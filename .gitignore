@@ -1,0 +1,19 @@
+# Python-generated files
+.ruff_cache/
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Galaxybrain
+.galaxybrain_index.json

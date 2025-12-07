@@ -1,0 +1,40 @@
+[project]
+name = "galaxybrain"
+version = "0.1.0"
+readme = "README.md"
+authors = [
+    { name = "David Gidwani", email = "david.gidwani@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "hyperscan>=0.8.0",
+    "numpy>=1.24",
+    "sentence-transformers>=3",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.15,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipython>=8.37.0",
+    "maturin>=1.5",
+    "pytest>=9.0.1",
+    "ruff>=0.14.8",
+]
+
+[project.scripts]
+galaxybrain = "galaxybrain._entry:main"
+
+[tool.ruff]
+line-length = 80
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true

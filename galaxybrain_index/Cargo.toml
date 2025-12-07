@@ -1,0 +1,20 @@
+[package]
+name = "galaxybrain_index"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "galaxybrain_index"
+crate-type = ["cdylib"]
+
+[dependencies]
+memmap2 = "0.9"
+pyo3 = { version = "0.27", features = ["extension-module", "py-clone"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
