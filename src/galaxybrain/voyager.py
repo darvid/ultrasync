@@ -121,6 +121,7 @@ class CallGraphTable(DataTable):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._graph: CallGraph | None = None
+        self.cursor_type = "row"
 
     def load_graph(self, graph: CallGraph) -> None:
         """Load call graph data into table."""
