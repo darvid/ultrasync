@@ -30,7 +30,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from galaxybrain.call_graph import CallGraph
-    from galaxybrain.taxonomy import ClassificationIR
+    from galaxybrain.classify import CodebaseIR
 
 
 def check_textual_available() -> None:
@@ -156,9 +156,9 @@ class ClassificationTable(DataTable):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        self._ir: ClassificationIR | None = None
+        self._ir: CodebaseIR | None = None
 
-    def load_ir(self, ir: ClassificationIR) -> None:
+    def load_ir(self, ir: CodebaseIR) -> None:
         """Load classification IR into table."""
         self._ir = ir
         self.clear(columns=True)
@@ -231,6 +231,8 @@ class SymbolDetailsPanel(Static):
 class VoyagerApp(App):
     """Galaxybrain Voyager - Interactive codebase explorer."""
 
+    TITLE = "wc99 voyager"
+
     CSS = """
     #main-tabs {
         height: 100%;
@@ -286,7 +288,7 @@ class VoyagerApp(App):
         self,
         root_path: Path | None = None,
         graph: CallGraph | None = None,
-        ir: ClassificationIR | None = None,
+        ir: CodebaseIR | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -350,11 +352,22 @@ class VoyagerApp(App):
         self,
         event: DataTable.RowSelected,
     ) -> None:
-        """Handle row selection in call graph table."""
+        """Handle row selection (enter/double-click) in call graph table."""
         if event.data_table.id == "callgraph-table" and self._graph:
             symbol_name = str(event.row_key.value)
             details = self.query_one("#symbol-details", SymbolDetailsPanel)
             details.show_symbol(symbol_name, self._graph)
+
+    def on_data_table_row_highlighted(
+        self,
+        event: DataTable.RowHighlighted,
+    ) -> None:
+        """Handle cursor movement in call graph table."""
+        if event.data_table.id == "callgraph-table" and self._graph:
+            if event.row_key:
+                symbol_name = str(event.row_key.value)
+                details = self.query_one("#symbol-details", SymbolDetailsPanel)
+                details.show_symbol(symbol_name, self._graph)
 
     def action_focus_files(self) -> None:
         """Switch to files tab."""
@@ -379,14 +392,14 @@ class VoyagerApp(App):
 def run_voyager(
     root_path: Path | None = None,
     graph: CallGraph | None = None,
-    ir: ClassificationIR | None = None,
+    ir: CodebaseIR | None = None,
 ) -> None:
     """Launch the Voyager TUI.
 
     Args:
         root_path: Root directory to explore (defaults to cwd)
         graph: Pre-built call graph (optional)
-        ir: Pre-built classification IR (optional)
+        ir: Pre-built CodebaseIR (optional)
     """
     check_textual_available()
     app = VoyagerApp(root_path=root_path, graph=graph, ir=ir)
