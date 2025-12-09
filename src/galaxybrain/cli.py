@@ -10,7 +10,15 @@ import time
 from pathlib import Path
 
 from galaxybrain.file_registry import FileRegistry
+from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.keys import hash64
+from galaxybrain.taxonomy import (
+    DEFAULT_TAXONOMY,
+    Classifier,
+    CodebaseIR,
+    EmbeddingCache,
+    TaxonomyRefiner,
+)
 from galaxybrain_index import ThreadIndex
 
 # lazy - pulls torch via sentence-transformers
@@ -254,7 +262,6 @@ def cmd_symbols(args: argparse.Namespace) -> int:
 
 def cmd_grep(args: argparse.Namespace) -> int:
     """Regex pattern matching across indexed files using Hyperscan."""
-    from galaxybrain.hyperscan_search import HyperscanSearch
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
@@ -379,7 +386,6 @@ def cmd_grep(args: argparse.Namespace) -> int:
 def cmd_semantic_grep(args: argparse.Namespace) -> int:
     """Regex pattern match, then semantic search the matches."""
     EmbeddingProvider = _get_embedder_class()
-    from galaxybrain.hyperscan_search import HyperscanSearch
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
@@ -605,7 +611,6 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_classify(args: argparse.Namespace) -> int:
     """Classify codebase files and symbols into taxonomy categories."""
     EmbeddingProvider = _get_embedder_class()
-    from galaxybrain.taxonomy import DEFAULT_TAXONOMY, Classifier
 
     index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
 
@@ -689,6 +694,92 @@ def cmd_classify(args: argparse.Namespace) -> int:
                     if len(file_ir.symbols) > 10:
                         print(f"    ... and {len(file_ir.symbols) - 10} more")
                 print()
+
+    return 0
+
+
+def cmd_refine(args: argparse.Namespace) -> int:
+    """Iteratively refine taxonomy classification."""
+    EmbeddingProvider = _get_embedder_class()
+
+    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+
+    if not index_path.exists():
+        print(f"error: index not found at {index_path}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    with open(index_path) as f:
+        index_data = json.load(f)
+
+    entries = index_data["entries"]
+    model = index_data["model"]
+
+    if not entries:
+        print("index is empty")
+        return 0
+
+    print(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
+
+    print(f"running {args.iterations} refinement iterations...")
+    refiner = TaxonomyRefiner(
+        embedder,
+        threshold=args.threshold,
+        split_threshold=args.split_threshold,
+        min_cluster_size=args.min_cluster,
+    )
+
+    result = refiner.refine(
+        entries,
+        n_iterations=args.iterations,
+        include_symbols=not args.files_only,
+    )
+
+    n_ran = len(result.iterations)
+    converged = n_ran < args.iterations
+    status = f"converged after {n_ran}" if converged else f"ran {n_ran}"
+
+    print(f"\n{'=' * 70}")
+    print(f"REFINEMENT COMPLETE ({status} iterations)")
+    print(f"{'=' * 70}\n")
+
+    # show iteration summaries
+    for it in result.iterations:
+        print(f"iteration {it.iteration}:")
+        m = it.metrics
+        cov, conf, n = m["coverage"], m["avg_confidence"], m["n_categories"]
+        print(f"  coverage={cov:.0%} confidence={conf:.3f} categories={n}")
+        if it.new_categories:
+            print(f"  + new: {', '.join(it.new_categories)}")
+        if it.split_categories:
+            for old, news in it.split_categories:
+                print(f"  ~ split {old} -> {', '.join(news)}")
+        if it.merged_categories:
+            for olds, new in it.merged_categories:
+                print(f"  ~ merge {', '.join(olds)} -> {new}")
+        print()
+
+    # final taxonomy
+    print(f"FINAL TAXONOMY ({len(result.final_taxonomy)} categories):\n")
+    for cat, query in sorted(result.final_taxonomy.items()):
+        q = query[:50] + "..." if len(query) > 50 else query
+        print(f"  {cat}: {q}")
+
+    # category sizes
+    print("\nCATEGORY SIZES:\n")
+    sorted_cats = sorted(
+        result.final_ir.category_index.items(), key=lambda x: -len(x[1])
+    )
+    for cat, files in sorted_cats:
+        if files:
+            print(f"  {cat}: {len(files)} files")
+
+    # write output if requested
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        print(f"\nwrote full results to {args.output}")
 
     return 0
 
@@ -909,6 +1000,52 @@ def main() -> int:
         help="show detailed file breakdown",
     )
 
+    # refine command
+    refine_parser = subparsers.add_parser(
+        "refine",
+        help="iteratively refine taxonomy classification",
+    )
+    refine_parser.add_argument(
+        "-i",
+        "--index",
+        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+    )
+    refine_parser.add_argument(
+        "-o",
+        "--output",
+        help="output JSON file for full results",
+    )
+    refine_parser.add_argument(
+        "-n",
+        "--iterations",
+        type=int,
+        default=5,
+        help="max refinement iterations (default: 5)",
+    )
+    refine_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.7,
+        help="classification threshold (default: 0.7)",
+    )
+    refine_parser.add_argument(
+        "--split-threshold",
+        type=int,
+        default=20,
+        help="split categories with > N items (default: 20)",
+    )
+    refine_parser.add_argument(
+        "--min-cluster",
+        type=int,
+        default=3,
+        help="min items for new category (default: 3)",
+    )
+    refine_parser.add_argument(
+        "--files-only",
+        action="store_true",
+        help="skip symbol classification",
+    )
+
     # repl command
     repl_parser = subparsers.add_parser(
         "repl",
@@ -949,6 +1086,8 @@ def main() -> int:
         return cmd_show(args)
     elif args.command == "classify":
         return cmd_classify(args)
+    elif args.command == "refine":
+        return cmd_refine(args)
     elif args.command == "repl":
         return cmd_repl(args)
 
@@ -970,6 +1109,8 @@ class ReplContext:
         self.embedder = embedder
         self.thread_index = thread_index
         self.root = root
+        self.embedding_cache = EmbeddingCache(embedder)
+        self.last_ir: CodebaseIR | None = None  # last classification result
 
         # build key lookup tables
         self.file_by_hash: dict[int, dict] = {}
@@ -1062,6 +1203,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 _repl_show(ctx, cmd_args)
             elif cmd in ("classify", "c", "cls"):
                 _repl_classify(ctx, cmd_args)
+            elif cmd in ("refine", "r", "ref"):
+                _repl_refine(ctx, cmd_args)
+            elif cmd in ("drill", "d"):
+                _repl_drill(ctx, cmd_args)
+            elif cmd in ("inspect", "i"):
+                _repl_inspect(ctx, cmd_args)
             elif cmd in ("stats", "st"):
                 _repl_stats(ctx)
             else:
@@ -1082,6 +1229,9 @@ commands (aliases in parens):
   sg, sgrep <query> <pattern>      regex + semantic search
   sh, show <symbol> [-c N]         show symbol source with context
   c, cls, classify [-v] [-s]       classify files (-s for symbols)
+  r, ref, refine [-n N] [-v]      iterative taxonomy refinement
+  d, drill <category>             list all files in a category
+  i, inspect <file>               show classification for a file
   st, stats                        show index statistics
   h, ?, help                       this message
   q, quit, exit                    exit repl
@@ -1196,8 +1346,6 @@ def _repl_grep(ctx: ReplContext, args: list[str]) -> None:
         print("usage: grep <pattern>")
         return
 
-    from galaxybrain.hyperscan_search import HyperscanSearch
-
     pattern = args[0].encode()
 
     t0 = time.perf_counter()
@@ -1257,8 +1405,6 @@ def _repl_sgrep(ctx: ReplContext, args: list[str]) -> None:
     if len(args) < 2:
         print("usage: sgrep <query> <pattern> [-k N]")
         return
-
-    from galaxybrain.hyperscan_search import HyperscanSearch
 
     query = args[0]
     pattern = args[1].encode()
@@ -1385,15 +1531,19 @@ def _repl_show(ctx: ReplContext, args: list[str]) -> None:
 
 def _repl_classify(ctx: ReplContext, args: list[str]) -> None:
     """Classify files into taxonomy."""
-    from galaxybrain.taxonomy import DEFAULT_TAXONOMY, Classifier
 
     verbose = "-v" in args
     include_symbols = "-s" in args
 
-    classifier = Classifier(ctx.embedder, taxonomy=DEFAULT_TAXONOMY)
+    classifier = Classifier(
+        ctx.embedder,
+        taxonomy=DEFAULT_TAXONOMY,
+        cache=ctx.embedding_cache,
+    )
     ir = classifier.classify_entries(
         ctx.entries, include_symbols=include_symbols
     )
+    ctx.last_ir = ir  # store for drill/inspect
 
     print("\nCATEGORIES:\n")
     file_limit = 10 if verbose else 3
@@ -1418,6 +1568,182 @@ def _repl_classify(ctx: ReplContext, args: list[str]) -> None:
                     print(f"    {sym.kind} {sym.name}: {sym_cats}")
                 if len(file_ir.symbols) > 10:
                     print(f"    ... and {len(file_ir.symbols) - 10} more")
+
+
+def _repl_refine(ctx: ReplContext, args: list[str]) -> None:
+    """Iterative taxonomy refinement."""
+
+    # parse args
+    n_iterations = 5
+    verbose = "-v" in args
+    i = 0
+    while i < len(args):
+        if args[i] == "-n" and i + 1 < len(args):
+            n_iterations = int(args[i + 1])
+            i += 2
+        else:
+            i += 1
+
+    print(f"running up to {n_iterations} refinement iterations...")
+
+    refiner = TaxonomyRefiner(
+        ctx.embedder,
+        split_threshold=15,
+        min_cluster_size=2,
+        cache=ctx.embedding_cache,
+    )
+
+    t0 = time.perf_counter()
+    result = refiner.refine(ctx.entries, n_iterations=n_iterations)
+    t_refine = time.perf_counter() - t0
+    ctx.last_ir = result.final_ir  # store for drill/inspect
+
+    n_ran = len(result.iterations)
+    converged = n_ran < n_iterations
+    status = f"converged after {n_ran}" if converged else f"ran {n_ran}"
+
+    print(f"\n{status} iterations ({t_refine * 1000:.0f}ms)\n")
+
+    # show iteration summaries
+    for it in result.iterations:
+        m = it.metrics
+        changes = []
+        if it.new_categories:
+            changes.append(f"+{len(it.new_categories)} new")
+        if it.split_categories:
+            changes.append(f"{len(it.split_categories)} splits")
+        if it.merged_categories:
+            changes.append(f"{len(it.merged_categories)} merges")
+        change_str = f" [{', '.join(changes)}]" if changes else ""
+        print(
+            f"  iter {it.iteration}: {m['n_categories']} cats, "
+            f"{m['avg_confidence']:.3f} conf{change_str}"
+        )
+
+    # final taxonomy
+    print(f"\nFINAL ({len(result.final_taxonomy)} categories):")
+    for cat, query in sorted(result.final_taxonomy.items()):
+        n_files = len(result.final_ir.category_index.get(cat, []))
+        q = query[:40] + "..." if len(query) > 40 else query
+        print(f"  {cat} ({n_files}): {q}")
+
+    if verbose:
+        print("\nCATEGORY DETAILS:")
+        for cat, files in sorted(result.final_ir.category_index.items()):
+            if files:
+                print(f"\n  {cat}:")
+                for f in files[:5]:
+                    print(f"    - {f}")
+                if len(files) > 5:
+                    print(f"    ... and {len(files) - 5} more")
+
+
+def _repl_drill(ctx: ReplContext, args: list[str]) -> None:
+    """Drill into a category from last classification."""
+    if not ctx.last_ir:
+        print("no classification yet - run 'classify' or 'refine' first")
+        return
+
+    if not args:
+        print("usage: drill <category>")
+        print(
+            f"available: {', '.join(sorted(ctx.last_ir.category_index.keys()))}"
+        )
+        return
+
+    category = args[0]
+
+    # fuzzy match category name
+    matches = [
+        c for c in ctx.last_ir.category_index if category.lower() in c.lower()
+    ]
+    if not matches:
+        print(f"no category matching '{category}'")
+        print(
+            f"available: {', '.join(sorted(ctx.last_ir.category_index.keys()))}"
+        )
+        return
+
+    if len(matches) > 1 and category.lower() not in [
+        m.lower() for m in matches
+    ]:
+        print(f"ambiguous - matches: {', '.join(matches)}")
+        return
+
+    # use exact match if available, else first fuzzy match
+    cat = category if category in ctx.last_ir.category_index else matches[0]
+    files = ctx.last_ir.category_index.get(cat, [])
+
+    print(f"\n{cat} ({len(files)} files):\n")
+    for f in files:
+        # find file IR to get scores
+        file_ir = next(
+            (fi for fi in ctx.last_ir.files if fi.path_rel == f), None
+        )
+        if file_ir:
+            score = file_ir.scores.get(cat, 0)
+            print(f"  [{score:.3f}] {f}")
+        else:
+            print(f"  {f}")
+
+
+def _repl_inspect(ctx: ReplContext, args: list[str]) -> None:
+    """Inspect classification details for a file."""
+    if not ctx.last_ir:
+        print("no classification yet - run 'classify' or 'refine' first")
+        return
+
+    if not args:
+        print("usage: inspect <file>")
+        return
+
+    query = args[0]
+
+    # fuzzy match file path
+    matches = [
+        f for f in ctx.last_ir.files if query.lower() in f.path_rel.lower()
+    ]
+    if not matches:
+        print(f"no file matching '{query}'")
+        return
+
+    if len(matches) > 1:
+        # check for exact match
+        exact = [f for f in matches if f.path_rel == query]
+        if exact:
+            matches = exact
+        else:
+            print("multiple matches:")
+            for f in matches[:10]:
+                print(f"  {f.path_rel}")
+            if len(matches) > 10:
+                print(f"  ... and {len(matches) - 10} more")
+            return
+
+    file_ir = matches[0]
+
+    print(f"\n{file_ir.path_rel}")
+    print(f"  key: 0x{file_ir.key_hash:016x}")
+
+    # categories with scores
+    print(f"\n  categories: {', '.join(file_ir.categories) or '(none)'}")
+
+    # all scores sorted
+    print("\n  scores:")
+    sorted_scores = sorted(file_ir.scores.items(), key=lambda x: -x[1])
+    for cat, score in sorted_scores[:10]:
+        marker = "*" if cat in file_ir.categories else " "
+        print(f"    {marker} {cat}: {score:.3f}")
+
+    # symbols if present
+    if file_ir.symbols:
+        print(f"\n  symbols ({len(file_ir.symbols)}):")
+        for sym in file_ir.symbols[:15]:
+            sym_cats = ", ".join(sym.top_categories) or "-"
+            top_score = max(sym.scores.values()) if sym.scores else 0
+            print(f"    {sym.kind} {sym.name} [{top_score:.3f}]: {sym_cats}")
+        if len(file_ir.symbols) > 15:
+            print(f"    ... and {len(file_ir.symbols) - 15} more")
 
 
 def _repl_stats(ctx: ReplContext) -> None:
