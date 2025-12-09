@@ -898,6 +898,69 @@ def cmd_refine(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voyager(args: argparse.Namespace) -> int:
+    """Launch the Voyager TUI explorer."""
+    try:
+        from galaxybrain.voyager import check_textual_available, run_voyager
+    except ImportError:
+        print(
+            "error: textual is required for voyager TUI",
+            file=sys.stderr,
+        )
+        print(
+            "install with: pip install galaxybrain[voyager]",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        check_textual_available()
+    except ImportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    root_path = Path(args.directory) if args.directory else Path.cwd()
+    if not root_path.is_dir():
+        print(f"error: {root_path} is not a directory", file=sys.stderr)
+        return 1
+
+    graph = None
+    ir = None
+
+    # load index if available for call graph + classification
+    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    if index_path.exists():
+        print(f"loading index from {index_path}...")
+        with open(index_path) as f:
+            index_data = json.load(f)
+
+        entries = index_data["entries"]
+        model = index_data["model"]
+
+        if entries:
+            EmbeddingProvider = _get_embedder_class()
+            print(f"loading model ({model})...")
+            embedder = EmbeddingProvider(model=model)
+
+            print("classifying files...")
+            classifier = Classifier(embedder, threshold=0.6)
+            ir = classifier.classify_entries(entries, include_symbols=True)
+            ir.root = str(root_path)
+
+            print("building call graph...")
+            from galaxybrain.call_graph import build_call_graph
+
+            graph = build_call_graph(ir, root_path)
+            print(
+                f"loaded {len(entries)} files, "
+                f"{len(graph.nodes)} symbols in call graph"
+            )
+
+    print("launching voyager TUI...")
+    run_voyager(root_path=root_path, graph=graph, ir=ir)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="galaxybrain",
@@ -1211,6 +1274,22 @@ def main() -> int:
         help=f"index file (default: {DEFAULT_INDEX_PATH})",
     )
 
+    # voyager command
+    voyager_parser = subparsers.add_parser(
+        "voyager",
+        help="interactive TUI explorer (requires galaxybrain[voyager])",
+    )
+    voyager_parser.add_argument(
+        "-i",
+        "--index",
+        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+    )
+    voyager_parser.add_argument(
+        "-d",
+        "--directory",
+        help="root directory to explore (default: current dir)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
@@ -1246,6 +1325,8 @@ def main() -> int:
         return cmd_refine(args)
     elif args.command == "repl":
         return cmd_repl(args)
+    elif args.command == "voyager":
+        return cmd_voyager(args)
 
     return 1
 
