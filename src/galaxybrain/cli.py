@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from galaxybrain.call_graph import CallGraph, build_call_graph
 from galaxybrain.file_registry import FileRegistry
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.keys import hash64
@@ -698,6 +699,119 @@ def cmd_classify(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_callgraph(args: argparse.Namespace) -> int:
+    """Build call graph from classification IR + hyperscan."""
+    EmbeddingProvider = _get_embedder_class()
+
+    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+
+    if not index_path.exists():
+        print(f"error: index not found at {index_path}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    with open(index_path) as f:
+        index_data = json.load(f)
+
+    entries = index_data["entries"]
+    model = index_data["model"]
+    root = Path(index_data.get("root", "."))
+
+    if not entries:
+        print("index is empty")
+        return 0
+
+    print(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
+
+    print(f"classifying {len(entries)} files...")
+    classifier = Classifier(embedder, threshold=0.6)
+    ir = classifier.classify_entries(entries, include_symbols=True)
+    ir.root = str(root)
+
+    print("building call graph...")
+    t0 = time.perf_counter()
+    graph = build_call_graph(ir, root)
+    t_build = time.perf_counter() - t0
+
+    stats = graph.to_dict()["stats"]
+    print(f"\ncall graph built in {t_build * 1000:.0f}ms:")
+    print(f"  symbols: {stats['total_symbols']}")
+    print(f"  edges:   {stats['total_edges']}")
+    print(f"  calls:   {stats['total_call_sites']}")
+
+    # output in requested format
+    if args.format in ("dot", "mermaid"):
+        min_calls = args.min_calls or 0
+        if args.format == "dot":
+            output_str = graph.to_dot(min_calls=min_calls)
+        else:
+            output_str = graph.to_mermaid(min_calls=min_calls)
+
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(output_str)
+            print(f"\nwrote {args.format} to {args.output}")
+        else:
+            print(f"\n{output_str}")
+        return 0
+
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(graph.to_dict(), f, indent=2)
+        print(f"\nwrote call graph JSON to {args.output}")
+    else:
+        # print top called symbols
+        print("\nmost called symbols:\n")
+        sorted_nodes = sorted(graph.nodes.values(), key=lambda n: -n.call_count)
+        for node in sorted_nodes[:20]:
+            if node.call_count > 0:
+                cats = ", ".join(node.categories[:2]) or "-"
+                print(
+                    f"  {node.name} ({node.kind}): "
+                    f"{node.call_count} calls [{cats}]"
+                )
+                print(f"    defined: {node.defined_in}:{node.definition_line}")
+                if args.verbose and node.callers:
+                    for caller in node.callers[:5]:
+                        print(f"      <- {caller}")
+                    if len(node.callers) > 5:
+                        print(f"      ... and {len(node.callers) - 5} more")
+
+    # show specific symbol if requested
+    if args.symbol:
+        node = graph.nodes.get(args.symbol)
+        if not node:
+            # fuzzy match
+            matches = [
+                n for n in graph.nodes if args.symbol.lower() in n.lower()
+            ]
+            if matches:
+                node = graph.nodes[matches[0]]
+
+        if node:
+            print(f"\n{'=' * 60}")
+            print(f"{node.kind} {node.name}")
+            print(f"  defined: {node.defined_in}:{node.definition_line}")
+            print(f"  categories: {', '.join(node.categories) or '-'}")
+            print(f"  call sites ({node.call_count}):")
+            for cs in node.call_sites[:20]:
+                print(f"    {cs.caller_path}:{cs.line}")
+                if args.verbose:
+                    ctx = (
+                        cs.context[:60] + "..."
+                        if len(cs.context) > 60
+                        else cs.context
+                    )
+                    print(f"      {ctx}")
+            if len(node.call_sites) > 20:
+                print(f"    ... and {len(node.call_sites) - 20} more")
+        else:
+            print(f"\nsymbol '{args.symbol}' not found in call graph")
+
+    return 0
+
+
 def cmd_refine(args: argparse.Namespace) -> int:
     """Iteratively refine taxonomy classification."""
     EmbeddingProvider = _get_embedder_class()
@@ -1000,6 +1114,46 @@ def main() -> int:
         help="show detailed file breakdown",
     )
 
+    # callgraph command
+    callgraph_parser = subparsers.add_parser(
+        "callgraph",
+        help="build call graph from classification + hyperscan",
+    )
+    callgraph_parser.add_argument(
+        "-i",
+        "--index",
+        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+    )
+    callgraph_parser.add_argument(
+        "-o",
+        "--output",
+        help="output file (JSON, DOT, or Mermaid based on --format)",
+    )
+    callgraph_parser.add_argument(
+        "-f",
+        "--format",
+        choices=["json", "dot", "mermaid"],
+        default="json",
+        help="output format (default: json)",
+    )
+    callgraph_parser.add_argument(
+        "--min-calls",
+        type=int,
+        default=0,
+        help="only include symbols with >= N calls in diagrams (default: 0)",
+    )
+    callgraph_parser.add_argument(
+        "-s",
+        "--symbol",
+        help="show details for specific symbol",
+    )
+    callgraph_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="show call site context",
+    )
+
     # refine command
     refine_parser = subparsers.add_parser(
         "refine",
@@ -1086,6 +1240,8 @@ def main() -> int:
         return cmd_show(args)
     elif args.command == "classify":
         return cmd_classify(args)
+    elif args.command == "callgraph":
+        return cmd_callgraph(args)
     elif args.command == "refine":
         return cmd_refine(args)
     elif args.command == "repl":
@@ -1111,6 +1267,7 @@ class ReplContext:
         self.root = root
         self.embedding_cache = EmbeddingCache(embedder)
         self.last_ir: CodebaseIR | None = None  # last classification result
+        self.last_callgraph: CallGraph | None = None  # last call graph
 
         # build key lookup tables
         self.file_by_hash: dict[int, dict] = {}
@@ -1159,9 +1316,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
     ctx = ReplContext(index_data, embedder, idx, root)
 
     print(f"\nloaded {len(entries)} files, {embedder.dim}-dim vectors")
-    print(
-        "commands: query, key, symbols, grep, sgrep, show, classify, help, quit"
-    )
+    print("commands: query, classify, callgraph, drill, inspect, help, quit")
     print("-" * 60)
 
     while True:
@@ -1209,6 +1364,10 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 _repl_drill(ctx, cmd_args)
             elif cmd in ("inspect", "i"):
                 _repl_inspect(ctx, cmd_args)
+            elif cmd in ("callgraph", "cg"):
+                _repl_callgraph(ctx, cmd_args)
+            elif cmd in ("callers", "who"):
+                _repl_callers(ctx, cmd_args)
             elif cmd in ("stats", "st"):
                 _repl_stats(ctx)
             else:
@@ -1229,9 +1388,11 @@ commands (aliases in parens):
   sg, sgrep <query> <pattern>      regex + semantic search
   sh, show <symbol> [-c N]         show symbol source with context
   c, cls, classify [-v] [-s]       classify files (-s for symbols)
-  r, ref, refine [-n N] [-v]      iterative taxonomy refinement
-  d, drill <category>             list all files in a category
-  i, inspect <file>               show classification for a file
+  r, ref, refine [-n N] [-v]       iterative taxonomy refinement
+  d, drill <category>              list all files in a category
+  i, inspect <file>                show classification for a file
+  cg, callgraph [-v]               build call graph from classification
+  who, callers <symbol>            show what calls a symbol
   st, stats                        show index statistics
   h, ?, help                       this message
   q, quit, exit                    exit repl
@@ -1746,6 +1907,101 @@ def _repl_inspect(ctx: ReplContext, args: list[str]) -> None:
             print(f"    ... and {len(file_ir.symbols) - 15} more")
 
 
+def _repl_callgraph(ctx: ReplContext, args: list[str]) -> None:
+    """Build call graph from classification."""
+    verbose = "-v" in args
+
+    # need classification first
+    if not ctx.last_ir:
+        print("classifying first...")
+        classifier = Classifier(
+            ctx.embedder,
+            taxonomy=DEFAULT_TAXONOMY,
+            threshold=0.6,
+            cache=ctx.embedding_cache,
+        )
+        ctx.last_ir = classifier.classify_entries(
+            ctx.entries, include_symbols=True
+        )
+
+    print("building call graph...")
+    t0 = time.perf_counter()
+    graph = build_call_graph(ctx.last_ir, ctx.root)
+    ctx.last_callgraph = graph
+    t_build = time.perf_counter() - t0
+
+    stats = graph.to_dict()["stats"]
+    print(f"\ncall graph built in {t_build * 1000:.0f}ms:")
+    print(f"  symbols: {stats['total_symbols']}")
+    print(f"  edges:   {stats['total_edges']}")
+    print(f"  calls:   {stats['total_call_sites']}")
+
+    # top called symbols
+    print("\nmost called symbols:\n")
+    sorted_nodes = sorted(graph.nodes.values(), key=lambda n: -n.call_count)
+    for node in sorted_nodes[:15]:
+        if node.call_count > 0:
+            cats = ", ".join(node.categories[:2]) or "-"
+            print(f"  {node.name}: {node.call_count} calls [{cats}]")
+            if verbose:
+                print(f"    defined: {node.defined_in}:{node.definition_line}")
+                for caller in node.callers[:3]:
+                    print(f"      <- {caller}")
+                if len(node.callers) > 3:
+                    print(f"      ... and {len(node.callers) - 3} more")
+
+
+def _repl_callers(ctx: ReplContext, args: list[str]) -> None:
+    """Show what calls a symbol."""
+    if not args:
+        print("usage: callers <symbol>")
+        return
+
+    if not ctx.last_callgraph:
+        print("run 'callgraph' first to build the call graph")
+        return
+
+    symbol = args[0]
+    graph = ctx.last_callgraph
+
+    # exact or fuzzy match
+    node = graph.nodes.get(symbol)
+    if not node:
+        matches = [n for n in graph.nodes if symbol.lower() in n.lower()]
+        if not matches:
+            print(f"symbol '{symbol}' not in call graph")
+            return
+        if len(matches) > 1:
+            print(f"ambiguous - matches: {', '.join(matches[:10])}")
+            return
+        node = graph.nodes[matches[0]]
+
+    print(f"\n{node.kind} {node.name}")
+    print(f"  defined: {node.defined_in}:{node.definition_line}")
+    print(f"  categories: {', '.join(node.categories) or '-'}")
+
+    if not node.call_sites:
+        print("\n  no callers found")
+        return
+
+    print(f"\n  call sites ({node.call_count}):\n")
+
+    # group by caller file
+    by_file: dict[str, list] = {}
+    for cs in node.call_sites:
+        by_file.setdefault(cs.caller_path, []).append(cs)
+
+    for caller_path, sites in sorted(by_file.items()):
+        print(f"  {caller_path}:")
+        for cs in sites[:5]:
+            ctx_str = (
+                cs.context[:50] + "..." if len(cs.context) > 50 else cs.context
+            )
+            print(f"    :{cs.line} {ctx_str}")
+        if len(sites) > 5:
+            print(f"    ... and {len(sites) - 5} more in this file")
+
+
 def _repl_stats(ctx: ReplContext) -> None:
     """Show index stats."""
     n_files = len(ctx.entries)
@@ -1759,6 +2015,13 @@ def _repl_stats(ctx: ReplContext) -> None:
     print(f"  model:   {model}")
     print(f"  dim:     {dim}")
     print(f"  root:    {ctx.root}")
+
+    if ctx.last_callgraph:
+        stats = ctx.last_callgraph.to_dict()["stats"]
+        print("\ncall graph:")
+        print(f"  nodes:   {stats['total_symbols']}")
+        print(f"  edges:   {stats['total_edges']}")
+        print(f"  calls:   {stats['total_call_sites']}")
 
 
 if __name__ == "__main__":
