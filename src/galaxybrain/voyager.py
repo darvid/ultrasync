@@ -278,6 +278,7 @@ class VoyagerApp(App):
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+q", "quit", "Quit", show=False),
         Binding("f", "focus_files", "Files"),
         Binding("c", "focus_callgraph", "Call Graph"),
         Binding("t", "focus_taxonomy", "Taxonomy"),
