@@ -137,7 +137,7 @@ class CallGraphTable(DataTable):
             callers = graph.get_callers(node.name)
             callees = graph.get_callees(node.name)
 
-            file_display = node.file or "?"
+            file_display = node.defined_in or "?"
             if len(file_display) > 30:
                 file_display = "..." + file_display[-27:]
 
@@ -207,7 +207,7 @@ class SymbolDetailsPanel(Static):
         lines = [
             f"[bold]{node.name}[/bold]",
             f"Kind: {node.kind}",
-            f"File: {node.file or 'unknown'}",
+            f"File: {node.defined_in or 'unknown'}",
             "",
             f"[cyan]Calls ({len(callees)}):[/cyan]",
         ]
