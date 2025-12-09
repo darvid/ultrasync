@@ -76,7 +76,7 @@ def build_test_index(
     # write index
     bucket_offset = HEADER_SIZE
     with open(index_path, "wb") as f:
-        # header: magic(8) + version(4) + reserved(4) + capacity(8) + bucket_offset(8)
+        # header: magic + version + reserved + capacity + bucket_offset
         header = struct.pack(
             "<8sIIQQ",
             MAGIC,
@@ -295,7 +295,7 @@ class TestHyperscanWithGlobalIndex:
             data = idx.slice_for_key(key_hash)
             matches = hs.scan(data)
 
-            for pattern_id, start, end in matches:
+            for _pattern_id, start, end in matches:
                 text = bytes(data)[start:end].decode()
                 classes_found.append((key, text))
 
@@ -394,7 +394,7 @@ class TestHyperscanWithGlobalIndex:
             data = idx.slice_for_key(key_hash)
             matches = hs.scan(data)
 
-            for pattern_id, start, end in matches:
+            for pattern_id, _start, _end in matches:
                 doc_markers.append((key, hs.pattern_for_id(pattern_id)))
 
         # should find python triple quotes and rust doc comments
@@ -403,8 +403,11 @@ class TestHyperscanWithGlobalIndex:
 
     def test_empty_patterns(self):
         """Test with no patterns - hyperscan requires at least one."""
-        with pytest.raises(Exception):  # hyperscan.error
+        try:
             HyperscanSearch([])
+            pytest.fail("Expected hyperscan error for empty patterns")
+        except Exception:  # noqa: BLE001 - hyperscan raises non-standard error
+            pass
 
     def test_no_matches(self, temp_index):
         """Test scanning with patterns that don't match."""
