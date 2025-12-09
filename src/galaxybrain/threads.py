@@ -6,10 +6,9 @@ from pathlib import Path
 
 import numpy as np
 
+from galaxybrain.embeddings import EmbeddingProvider
+from galaxybrain.events import SessionEvent
 from galaxybrain_index import ThreadIndex
-
-from .embeddings import EmbeddingProvider
-from .events import SessionEvent
 
 
 def cosine_np(a: np.ndarray, b: np.ndarray) -> float:

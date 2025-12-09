@@ -3,7 +3,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from .file_registry import FileRegistry
+from galaxybrain.file_registry import FileRegistry
 
 # binary format constants (must match Rust side)
 MAGIC = b"FXINDEX\0"

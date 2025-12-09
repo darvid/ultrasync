@@ -1,57 +1,23 @@
-# lazy imports to avoid loading heavy deps on package import
-def __getattr__(name):
+import warnings
+
+# suppress GIL warning from tokenizers (used by sentence-transformers)
+warnings.filterwarnings("ignore", message=".*global interpreter lock.*")
+
+from galaxybrain.events import EventType, SessionEvent
+from galaxybrain.file_registry import FileEntry, FileRegistry, blake2b_64
+from galaxybrain.file_scanner import FileMetadata, FileScanner
+from galaxybrain.hyperscan_search import HyperscanSearch
+from galaxybrain.index_builder import IndexBuilder
+from galaxybrain.router import QueryRouter
+from galaxybrain.threads import Thread, ThreadManager
+
+
+# lazy import - pulls torch via sentence-transformers
+def __getattr__(name: str):
     if name == "EmbeddingProvider":
-        from .embeddings import EmbeddingProvider
+        from galaxybrain.embeddings import EmbeddingProvider
 
         return EmbeddingProvider
-    elif name == "EventType":
-        from .events import EventType
-
-        return EventType
-    elif name == "SessionEvent":
-        from .events import SessionEvent
-
-        return SessionEvent
-    elif name == "FileEntry":
-        from .file_registry import FileEntry
-
-        return FileEntry
-    elif name == "FileRegistry":
-        from .file_registry import FileRegistry
-
-        return FileRegistry
-    elif name == "blake2b_64":
-        from .file_registry import blake2b_64
-
-        return blake2b_64
-    elif name == "FileMetadata":
-        from .file_scanner import FileMetadata
-
-        return FileMetadata
-    elif name == "FileScanner":
-        from .file_scanner import FileScanner
-
-        return FileScanner
-    elif name == "HyperscanSearch":
-        from .hyperscan_search import HyperscanSearch
-
-        return HyperscanSearch
-    elif name == "IndexBuilder":
-        from .index_builder import IndexBuilder
-
-        return IndexBuilder
-    elif name == "QueryRouter":
-        from .router import QueryRouter
-
-        return QueryRouter
-    elif name == "Thread":
-        from .threads import Thread
-
-        return Thread
-    elif name == "ThreadManager":
-        from .threads import ThreadManager
-
-        return ThreadManager
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

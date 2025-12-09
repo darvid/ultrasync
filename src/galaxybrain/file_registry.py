@@ -7,8 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .embeddings import EmbeddingProvider
-from .file_scanner import FileMetadata, FileScanner
+from galaxybrain.embeddings import EmbeddingProvider
+from galaxybrain.file_scanner import FileMetadata, FileScanner
 
 
 def blake2b_64(data: bytes) -> int:

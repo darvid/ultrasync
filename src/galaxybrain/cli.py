@@ -9,23 +9,19 @@ import sys
 import time
 from pathlib import Path
 
-# lazy imports to avoid loading heavy deps until needed
-ThreadIndex = None
+from galaxybrain.file_scanner import FileScanner
+from galaxybrain_index import ThreadIndex
+
+# lazy - pulls torch via sentence-transformers
 EmbeddingProvider = None
-FileScanner = None
 
 
-def _load_deps():
-    global ThreadIndex, EmbeddingProvider, FileScanner
-    if ThreadIndex is None:
-        from galaxybrain_index import ThreadIndex as TI
+def _load_embedder():
+    global EmbeddingProvider
+    if EmbeddingProvider is None:
+        from galaxybrain.embeddings import EmbeddingProvider as EP
 
-        from .embeddings import EmbeddingProvider as EP
-        from .file_scanner import FileScanner as FS
-
-        ThreadIndex = TI
         EmbeddingProvider = EP
-        FileScanner = FS
 
 
 DEFAULT_INDEX_PATH = Path(".galaxybrain_index.json")
@@ -33,7 +29,7 @@ DEFAULT_INDEX_PATH = Path(".galaxybrain_index.json")
 
 def cmd_index(args: argparse.Namespace) -> int:
     """Index a directory and save to disk."""
-    _load_deps()
+    _load_embedder()
 
     root = Path(args.directory).resolve()
     if not root.is_dir():
@@ -103,7 +99,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 def cmd_query(args: argparse.Namespace) -> int:
     """Query the index for similar files/symbols."""
-    _load_deps()
+    _load_embedder()
 
     index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
 
@@ -213,7 +209,7 @@ def cmd_symbols(args: argparse.Namespace) -> int:
 
 def cmd_grep(args: argparse.Namespace) -> int:
     """Regex pattern matching across indexed files using Hyperscan."""
-    from .hyperscan_search import HyperscanSearch
+    from galaxybrain.hyperscan_search import HyperscanSearch
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
@@ -348,8 +344,8 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
 def cmd_semantic_grep(args: argparse.Namespace) -> int:
     """Regex pattern match, then semantic search the matches."""
-    _load_deps()
-    from .hyperscan_search import HyperscanSearch
+    _load_embedder()
+    from galaxybrain.hyperscan_search import HyperscanSearch
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
