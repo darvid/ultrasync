@@ -251,6 +251,15 @@ def _mermaid_id(name: str) -> str:
     return name.replace(".", "_").replace("/", "_").replace("-", "_")
 
 
+@dataclass
+class PatternStats:
+    """Statistics about compiled hyperscan patterns."""
+
+    total_patterns: int
+    by_kind: dict[str, int]  # kind -> count
+    sample_patterns: list[tuple[str, str, str]]  # (name, kind, pattern)
+
+
 class CallGraphBuilder:
     """Builds call graphs using classification IR + hyperscan bulk matching.
 
@@ -260,10 +269,8 @@ class CallGraphBuilder:
     3. Scan all source files with hyperscan (single pass)
     4. Build edges from match results
 
-    This is blazing fast because:
-    - Hyperscan compiles all patterns into a single DFA
-    - Single scan pass over each file matches all patterns
-    - Literal patterns (function names) are optimized to near-O(1)
+    Hyperscan compiles all patterns into a single DFA, so each file
+    is scanned once to match all patterns simultaneously.
     """
 
     def __init__(
@@ -284,6 +291,12 @@ class CallGraphBuilder:
         self._file_contents = file_contents or {}
         self._symbol_to_file: dict[str, FileIR] = {}
         self._symbol_to_info: dict[str, SymbolClassification] = {}
+        self._pattern_stats: PatternStats | None = None
+
+    @property
+    def pattern_stats(self) -> PatternStats | None:
+        """Get pattern statistics after build() is called."""
+        return self._pattern_stats
 
     def build(self) -> CallGraph:
         """Build the call graph."""
@@ -423,6 +436,8 @@ class CallGraphBuilder:
         For consts: symbol_name (bare reference)
         """
         patterns: list[bytes] = []
+        by_kind: dict[str, int] = {}
+        samples: list[tuple[str, str, str]] = []
 
         for sym_name in symbols:
             sym_info = self._symbol_to_info[sym_name]
@@ -438,6 +453,17 @@ class CallGraphBuilder:
                 pattern = rf"\b{re.escape(sym_name)}\b"
 
             patterns.append(pattern.encode("utf-8"))
+
+            # track stats
+            by_kind[sym_info.kind] = by_kind.get(sym_info.kind, 0) + 1
+            if len(samples) < 10:
+                samples.append((sym_name, sym_info.kind, pattern))
+
+        self._pattern_stats = PatternStats(
+            total_patterns=len(patterns),
+            by_kind=by_kind,
+            sample_patterns=samples,
+        )
 
         return patterns
 
@@ -496,7 +522,7 @@ def build_call_graph(
     ir: CodebaseIR,
     root: Path,
     file_contents: dict[str, bytes] | None = None,
-) -> CallGraph:
+) -> tuple[CallGraph, PatternStats | None]:
     """Convenience function to build a call graph from classification IR.
 
     Args:
@@ -505,7 +531,8 @@ def build_call_graph(
         file_contents: Optional pre-loaded file contents
 
     Returns:
-        CallGraph with nodes (symbols) and edges (caller -> callee)
+        Tuple of (CallGraph, PatternStats) - stats may be None if no patterns
     """
     builder = CallGraphBuilder(ir, root, file_contents)
-    return builder.build()
+    graph = builder.build()
+    return graph, builder.pattern_stats

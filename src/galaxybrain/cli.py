@@ -731,7 +731,7 @@ def cmd_callgraph(args: argparse.Namespace) -> int:
 
     print("building call graph...")
     t0 = time.perf_counter()
-    graph = build_call_graph(ir, root)
+    graph, pattern_stats = build_call_graph(ir, root)
     t_build = time.perf_counter() - t0
 
     stats = graph.to_dict()["stats"]
@@ -739,6 +739,16 @@ def cmd_callgraph(args: argparse.Namespace) -> int:
     print(f"  symbols: {stats['total_symbols']}")
     print(f"  edges:   {stats['total_edges']}")
     print(f"  calls:   {stats['total_call_sites']}")
+
+    if args.verbose and pattern_stats:
+        print(f"\nhyperscan patterns ({pattern_stats.total_patterns} total):")
+        for kind, count in sorted(
+            pattern_stats.by_kind.items(), key=lambda x: -x[1]
+        ):
+            print(f"  {kind}: {count}")
+        print("\nsample patterns:")
+        for name, kind, pattern in pattern_stats.sample_patterns:
+            print(f"  {name} [{kind}]: {pattern}")
 
     # output in requested format
     if args.format in ("dot", "mermaid"):
@@ -950,7 +960,7 @@ def cmd_voyager(args: argparse.Namespace) -> int:
             print("building call graph...")
             from galaxybrain.call_graph import build_call_graph
 
-            graph = build_call_graph(ir, root_path)
+            graph, _ = build_call_graph(ir, root_path)
             print(
                 f"loaded {len(entries)} files, "
                 f"{len(graph.nodes)} symbols in call graph"
@@ -2007,7 +2017,7 @@ def _repl_callgraph(ctx: ReplContext, args: list[str]) -> None:
 
     print("building call graph...")
     t0 = time.perf_counter()
-    graph = build_call_graph(ctx.last_ir, ctx.root)
+    graph, _ = build_call_graph(ctx.last_ir, ctx.root)
     ctx.last_callgraph = graph
     t_build = time.perf_counter() - t0
 
