@@ -1,4 +1,4 @@
-"""Minimal entry point - re-execs with warning suppression before any heavy imports."""
+"""Minimal entry point with warning suppression."""
 
 import os
 import sys

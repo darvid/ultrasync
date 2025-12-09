@@ -9,27 +9,47 @@ import sys
 import time
 from pathlib import Path
 
-from galaxybrain.file_scanner import FileScanner
+from galaxybrain.file_registry import FileRegistry
+from galaxybrain.keys import hash64
 from galaxybrain_index import ThreadIndex
 
 # lazy - pulls torch via sentence-transformers
-EmbeddingProvider = None
+_EmbeddingProvider = None
 
 
-def _load_embedder():
-    global EmbeddingProvider
-    if EmbeddingProvider is None:
+def _get_embedder_class():
+    global _EmbeddingProvider
+    if _EmbeddingProvider is None:
         from galaxybrain.embeddings import EmbeddingProvider as EP
 
-        EmbeddingProvider = EP
+        _EmbeddingProvider = EP
+    return _EmbeddingProvider
 
 
 DEFAULT_INDEX_PATH = Path(".galaxybrain_index.json")
 
 
+def _build_line_starts(lines: list[bytes]) -> list[int]:
+    """Build line offset table for byte content."""
+    line_starts = [0]
+    pos = 0
+    for line in lines:
+        pos += len(line) + 1
+        line_starts.append(pos)
+    return line_starts
+
+
+def _offset_to_line(offset: int, line_starts: list[int], num_lines: int) -> int:
+    """Convert byte offset to 1-indexed line number."""
+    for i in range(len(line_starts) - 1):
+        if line_starts[i] <= offset < line_starts[i + 1]:
+            return i + 1
+    return num_lines
+
+
 def cmd_index(args: argparse.Namespace) -> int:
     """Index a directory and save to disk."""
-    _load_embedder()
+    EmbeddingProvider = _get_embedder_class()
 
     root = Path(args.directory).resolve()
     if not root.is_dir():
@@ -38,68 +58,34 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     output = Path(args.output) if args.output else DEFAULT_INDEX_PATH
 
+    print(f"loading embedding model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
+
     print(f"scanning {root}...")
-    scanner = FileScanner()
+    registry = FileRegistry(root=root, embedder=embedder)
 
     extensions = None
     if args.extensions:
         extensions = set(args.extensions.split(","))
 
-    metadata_list = scanner.scan_directory(root, extensions=extensions)
-    print(f"found {len(metadata_list)} files")
+    print("embedding files...")
+    entries = registry.register_directory_batch(root, extensions=extensions)
+    print(f"found {len(entries)} files")
 
-    if not metadata_list:
+    if not entries:
         print("nothing to index")
         return 0
 
-    print(f"loading embedding model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
-
-    print("embedding files...")
-    texts = [m.to_embedding_text() for m in metadata_list]
-    vectors = embedder.embed_batch(texts)
-
-    # build index data for persistence
-    index_data = {
-        "model": args.model,
-        "dim": embedder.dim,
-        "root": str(root),
-        "entries": [],
-    }
-
-    for metadata, vec in zip(metadata_list, vectors, strict=True):
-        index_data["entries"].append(
-            {
-                "path": str(metadata.path),
-                "filename": metadata.filename_no_ext,
-                "symbols": metadata.exported_symbols,
-                "symbol_info": [
-                    {
-                        "name": s.name,
-                        "line": s.line,
-                        "kind": s.kind,
-                        "end_line": s.end_line,
-                    }
-                    for s in metadata.symbol_info
-                ],
-                "components": metadata.component_names,
-                "comments": metadata.top_comments,
-                "embedding_text": metadata.to_embedding_text(),
-                "vector": vec.tolist(),
-            }
-        )
-
     # save to disk
     with open(output, "w") as f:
-        json.dump(index_data, f)
+        json.dump(registry.to_dict(), f)
 
-    print(f"indexed {len(metadata_list)} files -> {output}")
+    print(f"indexed {len(entries)} files -> {output}")
     return 0
 
 
 def cmd_query(args: argparse.Namespace) -> int:
     """Query the index for similar files/symbols."""
-    _load_embedder()
 
     index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
 
@@ -112,18 +98,41 @@ def cmd_query(args: argparse.Namespace) -> int:
         index_data = json.load(f)
 
     model = index_data["model"]
-    dim = index_data["dim"]
     entries = index_data["entries"]
 
     if not entries:
         print("index is empty")
         return 0
 
+    # key lookup mode - find by canonical key string
+    if args.key:
+        target_hash = hash64(args.key)
+        print(f"looking up key: {args.key}")
+        print(f"hash: 0x{target_hash:016x}\n")
+
+        # check file keys
+        for entry in entries:
+            if entry.get("key_hash") == target_hash:
+                _print_entry(entry)
+                return 0
+
+            # check symbol keys
+            for sym in entry.get("symbol_info", []):
+                if sym.get("key_hash") == target_hash:
+                    _print_symbol(entry, sym)
+                    return 0
+
+        print(f"no match for key: {args.key}", file=sys.stderr)
+        return 1
+
+    # semantic query mode
+    EmbeddingProvider = _get_embedder_class()
+
     print(f"loading model ({model})...")
     embedder = EmbeddingProvider(model=model)
 
     # build ThreadIndex
-    idx = ThreadIndex(dim)
+    idx = ThreadIndex(embedder.dim)
     for i, entry in enumerate(entries):
         idx.upsert(i, entry["vector"])
 
@@ -137,8 +146,9 @@ def cmd_query(args: argparse.Namespace) -> int:
     for file_id, score in results:
         entry = entries[file_id]
         path = entry["path"]
-        symbols = entry["symbols"][:5]  # top 5 symbols
-        components = entry["components"][:3]
+        symbols = entry.get("symbols", [])[:5]
+        components = entry.get("components", [])[:3]
+        key_hash = entry.get("key_hash")
 
         # make path relative if possible
         try:
@@ -147,6 +157,8 @@ def cmd_query(args: argparse.Namespace) -> int:
             rel_path = path
 
         print(f"[{score:.3f}] {rel_path}")
+        if key_hash:
+            print(f"        key: 0x{key_hash:016x}")
         if symbols:
             print(f"        symbols: {', '.join(symbols)}")
         if components:
@@ -154,6 +166,36 @@ def cmd_query(args: argparse.Namespace) -> int:
         print()
 
     return 0
+
+
+def _print_entry(entry: dict) -> None:
+    """Print a file entry match."""
+    path = entry["path"]
+    try:
+        rel_path = Path(path).relative_to(Path.cwd())
+    except ValueError:
+        rel_path = path
+
+    print(f"FILE: {rel_path}")
+    print(f"  key: 0x{entry.get('key_hash', 0):016x}")
+    symbols = entry.get("symbols", [])
+    if symbols:
+        print(f"  symbols: {', '.join(symbols[:10])}")
+        if len(symbols) > 10:
+            print(f"           ... and {len(symbols) - 10} more")
+
+
+def _print_symbol(entry: dict, sym: dict) -> None:
+    """Print a symbol match."""
+    path = entry["path"]
+    try:
+        rel_path = Path(path).relative_to(Path.cwd())
+    except ValueError:
+        rel_path = path
+
+    print(f"SYMBOL: {sym['kind']} {sym['name']}")
+    print(f"  file: {rel_path}:{sym['line']}")
+    print(f"  key: 0x{sym.get('key_hash', 0):016x}")
 
 
 def cmd_symbols(args: argparse.Namespace) -> int:
@@ -167,7 +209,8 @@ def cmd_symbols(args: argparse.Namespace) -> int:
     with open(index_path) as f:
         index_data = json.load(f)
 
-    all_symbols: list[tuple[str, str, int, str]] = []  # name, path, line, kind
+    # name, path, line, kind, key_hash
+    all_symbols: list[tuple[str, str, int, str, int | None]] = []
     for entry in index_data["entries"]:
         path = entry["path"]
         symbol_info = entry.get("symbol_info", [])
@@ -181,11 +224,12 @@ def cmd_symbols(args: argparse.Namespace) -> int:
                         path,
                         info["line"],
                         info["kind"],
+                        info.get("key_hash"),
                     )
                 )
         else:
             for sym in entry["symbols"]:
-                all_symbols.append((sym, path, 0, ""))
+                all_symbols.append((sym, path, 0, "", None))
 
     # sort by symbol name
     all_symbols.sort(key=lambda x: x[0].lower())
@@ -194,14 +238,15 @@ def cmd_symbols(args: argparse.Namespace) -> int:
         filter_lower = args.filter.lower()
         all_symbols = [s for s in all_symbols if filter_lower in s[0].lower()]
 
-    for sym, path, line, kind in all_symbols:
+    for sym, path, line, kind, key_hash in all_symbols:
         try:
             rel_path = Path(path).relative_to(Path.cwd())
         except ValueError:
             rel_path = path
         loc = f"{rel_path}:{line}" if line else str(rel_path)
         kind_str = f" [{kind}]" if kind else ""
-        print(f"{sym:<40} {loc}{kind_str}")
+        hash_str = f" 0x{key_hash:016x}" if key_hash else ""
+        print(f"{sym:<40} {loc}{kind_str}{hash_str}")
 
     print(f"\n{len(all_symbols)} symbols")
     return 0
@@ -291,23 +336,12 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
         # build line offset table
         lines = content.split(b"\n")
-        line_starts = [0]
-        pos = 0
-        for line in lines:
-            pos += len(line) + 1  # +1 for newline
-            line_starts.append(pos)
-
-        def offset_to_line(offset: int) -> int:
-            # binary search would be faster but this is fine for now
-            for i in range(len(line_starts) - 1):
-                if line_starts[i] <= offset < line_starts[i + 1]:
-                    return i + 1  # 1-indexed
-            return len(lines)
+        line_starts = _build_line_starts(lines)
 
         printed_lines: set[int] = set()
-        for pattern_id, start, end in matches:
+        for pattern_id, start, _end in matches:
             total_matches += 1
-            line_num = offset_to_line(start)
+            line_num = _offset_to_line(start, line_starts, len(lines))
 
             if line_num in printed_lines:
                 continue
@@ -344,7 +378,7 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
 def cmd_semantic_grep(args: argparse.Namespace) -> int:
     """Regex pattern match, then semantic search the matches."""
-    _load_embedder()
+    EmbeddingProvider = _get_embedder_class()
     from galaxybrain.hyperscan_search import HyperscanSearch
 
     timings: dict[str, float] = {}
@@ -362,7 +396,6 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
     root = Path(index_data.get("root", "."))
     entries = index_data["entries"]
     model = index_data["model"]
-    dim = index_data["dim"]
 
     if not entries:
         print("index is empty")
@@ -422,21 +455,11 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
         # build line offset table
         lines = content.split(b"\n")
-        line_starts = [0]
-        pos = 0
-        for line in lines:
-            pos += len(line) + 1
-            line_starts.append(pos)
-
-        def offset_to_line(offset: int) -> int:
-            for i in range(len(line_starts) - 1):
-                if line_starts[i] <= offset < line_starts[i + 1]:
-                    return i + 1
-            return len(lines)
+        line_starts = _build_line_starts(lines)
 
         seen_lines: set[int] = set()
         for _, start, _ in matches:
-            line_num = offset_to_line(start)
+            line_num = _offset_to_line(start, line_starts, len(lines))
             if line_num in seen_lines:
                 continue
             seen_lines.add(line_num)
@@ -463,7 +486,7 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
     # build search index
     t_index = time.perf_counter()
-    idx = ThreadIndex(dim)
+    idx = ThreadIndex(embedder.dim)
     for i, vec in enumerate(match_vecs):
         idx.upsert(i, vec.tolist())
     timings["index"] = time.perf_counter() - t_index
@@ -495,8 +518,9 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
         print("timing:")
         print(f"  compile:  {timings['compile'] * 1000:>7.2f} ms")
         print(f"  scan:     {timings['scan'] * 1000:>7.2f} ms")
+        n_lines = len(match_texts)
         print(
-            f"  embed:    {timings['embed'] * 1000:>7.2f} ms ({len(match_texts)} lines)"
+            f"  embed:    {timings['embed'] * 1000:>7.2f} ms ({n_lines} lines)"
         )
         print(f"  index:    {timings['index'] * 1000:>7.2f} ms")
         print(f"  search:   {timings['search'] * 1000:>7.2f} ms")
@@ -578,6 +602,97 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_classify(args: argparse.Namespace) -> int:
+    """Classify codebase files and symbols into taxonomy categories."""
+    EmbeddingProvider = _get_embedder_class()
+    from galaxybrain.taxonomy import DEFAULT_TAXONOMY, Classifier
+
+    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+
+    if not index_path.exists():
+        print(f"error: index not found at {index_path}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    with open(index_path) as f:
+        index_data = json.load(f)
+
+    entries = index_data["entries"]
+    model = index_data["model"]
+
+    if not entries:
+        print("index is empty")
+        return 0
+
+    print(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
+
+    # use custom taxonomy if provided
+    taxonomy = DEFAULT_TAXONOMY
+    if args.taxonomy:
+        taxonomy_path = Path(args.taxonomy)
+        if not taxonomy_path.exists():
+            print(f"error: taxonomy file not found: {taxonomy_path}")
+            return 1
+        with open(taxonomy_path) as f:
+            taxonomy = json.load(f)
+
+    print(f"classifying {len(entries)} files...")
+    classifier = Classifier(
+        embedder,
+        taxonomy=taxonomy,
+        threshold=args.threshold,
+        max_categories=args.max_categories,
+    )
+
+    ir = classifier.classify_entries(
+        entries,
+        include_symbols=not args.files_only,
+    )
+    ir.root = index_data.get("root", "")
+
+    if args.output:
+        # write JSON IR to file
+        with open(args.output, "w") as f:
+            json.dump(ir.to_dict(), f, indent=2)
+        print(f"wrote IR to {args.output}")
+    else:
+        # pretty print to stdout
+        # category summary
+        print("\nCATEGORIES:\n")
+        for cat, files in sorted(ir.category_index.items()):
+            if files:
+                print(f"  {cat} ({len(files)} files):")
+                for f in files[:5]:
+                    print(f"    - {f}")
+                if len(files) > 5:
+                    print(f"    ... and {len(files) - 5} more")
+                print()
+
+        # file details
+        if args.verbose:
+            print(f"{'=' * 70}")
+            print("FILE DETAILS:\n")
+            for file_ir in ir.files:
+                cats = ", ".join(file_ir.categories) or "(none)"
+                print(f"{file_ir.path_rel}")
+                print(f"  categories: {cats}")
+                print(f"  key: 0x{file_ir.key_hash:016x}")
+                if file_ir.symbols and not args.files_only:
+                    print(f"  symbols ({len(file_ir.symbols)}):")
+                    for sym in file_ir.symbols[:10]:
+                        sym_cats = ", ".join(sym.top_categories) or "-"
+                        key_str = (
+                            f" [0x{sym.key_hash:016x}]" if sym.key_hash else ""
+                        )
+                        print(f"    {sym.kind} {sym.name}: {sym_cats}{key_str}")
+                    if len(file_ir.symbols) > 10:
+                        print(f"    ... and {len(file_ir.symbols) - 10} more")
+                print()
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="galaxybrain",
@@ -618,7 +733,8 @@ def main() -> int:
     )
     query_parser.add_argument(
         "query",
-        help="search query",
+        nargs="?",
+        help="semantic search query",
     )
     query_parser.add_argument(
         "-i",
@@ -630,6 +746,10 @@ def main() -> int:
         type=int,
         default=10,
         help="number of results (default: 10)",
+    )
+    query_parser.add_argument(
+        "--key",
+        help="lookup by canonical key (e.g., 'file:src/foo.py')",
     )
 
     # symbols command
@@ -745,11 +865,58 @@ def main() -> int:
         help="lines of context (default: 2)",
     )
 
+    # classify command
+    classify_parser = subparsers.add_parser(
+        "classify",
+        help="classify files/symbols into taxonomy categories",
+    )
+    classify_parser.add_argument(
+        "-i",
+        "--index",
+        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+    )
+    classify_parser.add_argument(
+        "-o",
+        "--output",
+        help="output JSON file for IR (default: print to stdout)",
+    )
+    classify_parser.add_argument(
+        "-t",
+        "--taxonomy",
+        help="custom taxonomy JSON file",
+    )
+    classify_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.7,
+        help="minimum score for category assignment (default: 0.7)",
+    )
+    classify_parser.add_argument(
+        "--max-categories",
+        type=int,
+        default=3,
+        help="max categories per file (default: 3)",
+    )
+    classify_parser.add_argument(
+        "--files-only",
+        action="store_true",
+        help="skip symbol classification",
+    )
+    classify_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="show detailed file breakdown",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
         return cmd_index(args)
     elif args.command == "query":
+        if not args.query and not args.key:
+            print("error: provide a query or --key", file=sys.stderr)
+            return 1
         return cmd_query(args)
     elif args.command == "symbols":
         return cmd_symbols(args)
@@ -769,6 +936,8 @@ def main() -> int:
         return cmd_semantic_grep(args)
     elif args.command == "show":
         return cmd_show(args)
+    elif args.command == "classify":
+        return cmd_classify(args)
 
     return 1
 

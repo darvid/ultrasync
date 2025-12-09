@@ -8,9 +8,14 @@ class EmbeddingProvider:
     """Wraps a sentence-transformers model for text embedding."""
 
     def __init__(self, model: str = "intfloat/e5-base-v2") -> None:
+        self._model_name = model
         self._model = SentenceTransformer(model)
         self._dim = int(self._model.get_sentence_embedding_dimension())
         self._cache: dict[str, np.ndarray] = {}
+
+    @property
+    def model(self) -> str:
+        return self._model_name
 
     @property
     def dim(self) -> int:

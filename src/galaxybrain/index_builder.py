@@ -4,6 +4,7 @@ import struct
 from pathlib import Path
 
 from galaxybrain.file_registry import FileRegistry
+from galaxybrain.keys import hash64_sym_key
 
 # binary format constants (must match Rust side)
 MAGIC = b"FXINDEX\0"
@@ -14,6 +15,10 @@ VERSION = 1
 
 class IndexBuilder:
     """Builds persistent index.dat and blob.dat files.
+
+    Indexes both files and symbols:
+    - file keys: hash64_file_key(path_rel) -> whole file content
+    - symbol keys: hash64_sym_key(path, name, kind, start, end) -> symbol bytes
 
     index.dat format (little-endian):
         Header (32 bytes):
@@ -30,7 +35,7 @@ class IndexBuilder:
             flags: u32          reserved
 
     blob.dat format:
-        Contiguous raw file contents, referenced by offset/length.
+        Contiguous raw bytes, referenced by offset/length.
     """
 
     def __init__(self, load_factor: float = 0.7) -> None:
@@ -47,14 +52,7 @@ class IndexBuilder:
         if not entries:
             raise ValueError("Registry is empty")
 
-        # calculate capacity (next power of 2 with load factor)
-        min_capacity = int(len(entries) / self._load_factor) + 1
-        capacity = 1
-        while capacity < min_capacity:
-            capacity *= 2
-
-        # build blob.dat and collect offsets
-        # (key_hash, offset, length)
+        # (key_hash, offset, length) for all indexed items
         blob_entries: list[tuple[int, int, int]] = []
 
         with open(blob_path, "wb") as blob_file:
@@ -62,14 +60,47 @@ class IndexBuilder:
                 # read file content
                 try:
                     content = entry.path.read_bytes()
+                    lines = content.split(b"\n")
                 except OSError:
                     content = b""
+                    lines = []
 
-                offset = blob_file.tell()
-                length = len(content)
+                # index whole file
+                file_offset = blob_file.tell()
                 blob_file.write(content)
+                blob_entries.append((entry.key_hash, file_offset, len(content)))
 
-                blob_entries.append((entry.key_hash, offset, length))
+                # index each symbol
+                for sym in entry.metadata.symbol_info:
+                    start_line = sym.line - 1  # 0-indexed
+                    end_line = (sym.end_line or sym.line) - 1
+
+                    if start_line < 0 or start_line >= len(lines):
+                        continue
+
+                    # extract symbol bytes
+                    sym_lines = lines[start_line : end_line + 1]
+                    sym_content = b"\n".join(sym_lines)
+
+                    sym_offset = blob_file.tell()
+                    blob_file.write(sym_content)
+
+                    sym_hash = hash64_sym_key(
+                        entry.path_rel,
+                        sym.name,
+                        sym.kind,
+                        sym.line,
+                        sym.end_line or sym.line,
+                    )
+                    blob_entries.append(
+                        (sym_hash, sym_offset, len(sym_content))
+                    )
+
+        # calculate capacity (next power of 2 with load factor)
+        min_capacity = int(len(blob_entries) / self._load_factor) + 1
+        capacity = 1
+        while capacity < min_capacity:
+            capacity *= 2
 
         # build index.dat
         with open(index_path, "wb") as index_file:

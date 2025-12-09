@@ -4,10 +4,19 @@ import warnings
 warnings.filterwarnings("ignore", message=".*global interpreter lock.*")
 
 from galaxybrain.events import EventType, SessionEvent
-from galaxybrain.file_registry import FileEntry, FileRegistry, blake2b_64
+from galaxybrain.file_registry import FileEntry, FileRegistry
 from galaxybrain.file_scanner import FileMetadata, FileScanner
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.index_builder import IndexBuilder
+from galaxybrain.keys import (
+    file_key,
+    hash64,
+    hash64_file_key,
+    hash64_query_key,
+    hash64_sym_key,
+    query_key,
+    sym_key,
+)
 from galaxybrain.router import QueryRouter
 from galaxybrain.threads import Thread, ThreadManager
 
@@ -34,5 +43,11 @@ __all__ = [
     "SessionEvent",
     "Thread",
     "ThreadManager",
-    "blake2b_64",
+    "file_key",
+    "hash64",
+    "hash64_file_key",
+    "hash64_query_key",
+    "hash64_sym_key",
+    "query_key",
+    "sym_key",
 ]
