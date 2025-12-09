@@ -190,8 +190,9 @@ class ClassificationTable(DataTable):
 class SymbolDetailsPanel(Static):
     """Panel showing details for selected symbol."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, root_path: Path | None = None, **kwargs) -> None:
         super().__init__("Select a symbol to view details", **kwargs)
+        self.root_path = root_path or Path.cwd()
 
     def show_symbol(
         self,
@@ -208,25 +209,66 @@ class SymbolDetailsPanel(Static):
         callees = graph.get_callees(name)
 
         lines = [
-            f"[bold]{node.name}[/bold]",
-            f"Kind: {node.kind}",
-            f"File: {node.defined_in or 'unknown'}",
+            f"[bold]{node.name}[/bold]  [dim]{node.kind}[/dim]",
+            f"[dim]{node.defined_in or 'unknown'}:{node.definition_line}[/dim]",
             "",
-            f"[cyan]Calls ({len(callees)}):[/cyan]",
         ]
-        for callee in sorted(callees)[:10]:
-            lines.append(f"  → {callee}")
-        if len(callees) > 10:
-            lines.append(f"  ... and {len(callees) - 10} more")
 
-        lines.append("")
-        lines.append(f"[green]Called by ({len(callers)}):[/green]")
-        for caller in sorted(callers)[:10]:
-            lines.append(f"  ← {caller}")
-        if len(callers) > 10:
-            lines.append(f"  ... and {len(callers) - 10} more")
+        # show source code
+        source_lines = self._get_source_lines(
+            node.defined_in, node.definition_line
+        )
+        if source_lines:
+            lines.append("[yellow]Source:[/yellow]")
+            lines.extend(source_lines)
+            lines.append("")
+
+        # calls and callers on same line to save space
+        if callees:
+            calls_str = ", ".join(sorted(callees)[:5])
+            if len(callees) > 5:
+                calls_str += f" +{len(callees) - 5}"
+            lines.append(f"[cyan]Calls:[/cyan] {calls_str}")
+
+        if callers:
+            callers_str = ", ".join(sorted(callers)[:5])
+            if len(callers) > 5:
+                callers_str += f" +{len(callers) - 5}"
+            lines.append(f"[green]Called by:[/green] {callers_str}")
 
         self.update("\n".join(lines))
+
+    def _get_source_lines(
+        self,
+        file_path: str | None,
+        line_num: int,
+        context: int = 3,
+    ) -> list[str]:
+        """Read source lines around the definition."""
+        if not file_path:
+            return []
+
+        try:
+            full_path = self.root_path / file_path
+            if not full_path.exists():
+                return []
+
+            with open(full_path) as f:
+                all_lines = f.readlines()
+
+            start = max(0, line_num - 1)
+            end = min(len(all_lines), line_num + context)
+
+            result = []
+            for i in range(start, end):
+                line_text = all_lines[i].rstrip()
+                if len(line_text) > 60:
+                    line_text = line_text[:57] + "..."
+                prefix = "→" if i == line_num - 1 else " "
+                result.append(f"  {prefix} {i + 1:3d} │ {line_text}")
+            return result
+        except Exception:
+            return []
 
 
 class VoyagerApp(App):
@@ -316,7 +358,10 @@ class VoyagerApp(App):
             with TabPane("Call Graph", id="callgraph-tab"):
                 with Vertical():
                     yield CallGraphTable(id="callgraph-table")
-                    yield SymbolDetailsPanel(id="symbol-details")
+                    yield SymbolDetailsPanel(
+                        root_path=self.root_path,
+                        id="symbol-details",
+                    )
             with TabPane("Classification", id="classification-tab"):
                 yield ClassificationTable(id="classification-table")
         yield Footer()
