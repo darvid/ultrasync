@@ -168,19 +168,21 @@ class ClassificationTable(DataTable):
         self.add_column("Confidence", key="confidence")
         self.add_column("Symbols", key="symbols")
 
-        for file_path, file_ir in sorted(ir.files.items()):
-            file_display = file_path
+        for file_ir in sorted(ir.files, key=lambda f: f.path_rel):
+            file_display = file_ir.path_rel
             if len(file_display) > 40:
                 file_display = "..." + file_display[-37:]
 
             symbol_count = len(file_ir.symbols)
+            top_cat = file_ir.categories[0] if file_ir.categories else "-"
+            top_score = max(file_ir.scores.values()) if file_ir.scores else 0
 
             self.add_row(
                 file_display,
-                file_ir.classification,
-                f"{file_ir.confidence:.2f}",
+                top_cat,
+                f"{top_score:.2f}",
                 str(symbol_count),
-                key=file_path,
+                key=file_ir.path_rel,
             )
 
 
