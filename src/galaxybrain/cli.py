@@ -909,6 +909,17 @@ def main() -> int:
         help="show detailed file breakdown",
     )
 
+    # repl command
+    repl_parser = subparsers.add_parser(
+        "repl",
+        help="interactive REPL with preloaded index",
+    )
+    repl_parser.add_argument(
+        "-i",
+        "--index",
+        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
@@ -938,8 +949,490 @@ def main() -> int:
         return cmd_show(args)
     elif args.command == "classify":
         return cmd_classify(args)
+    elif args.command == "repl":
+        return cmd_repl(args)
 
     return 1
+
+
+class ReplContext:
+    """Holds preloaded state for the REPL."""
+
+    def __init__(
+        self,
+        index_data: dict,
+        embedder,
+        thread_index: ThreadIndex,
+        root: Path,
+    ) -> None:
+        self.index_data = index_data
+        self.entries = index_data["entries"]
+        self.embedder = embedder
+        self.thread_index = thread_index
+        self.root = root
+
+        # build key lookup tables
+        self.file_by_hash: dict[int, dict] = {}
+        self.sym_by_hash: dict[int, tuple[dict, dict]] = {}  # (entry, sym)
+        for entry in self.entries:
+            if h := entry.get("key_hash"):
+                self.file_by_hash[h] = entry
+            for sym in entry.get("symbol_info", []):
+                if h := sym.get("key_hash"):
+                    self.sym_by_hash[h] = (entry, sym)
+
+
+def cmd_repl(args: argparse.Namespace) -> int:
+    """Interactive REPL with preloaded index for fast queries."""
+    import shlex
+
+    EmbeddingProvider = _get_embedder_class()
+
+    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+
+    if not index_path.exists():
+        print(f"error: index not found at {index_path}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    print(f"loading index from {index_path}...")
+    with open(index_path) as f:
+        index_data = json.load(f)
+
+    entries = index_data["entries"]
+    model = index_data["model"]
+    root = Path(index_data.get("root", "."))
+
+    if not entries:
+        print("index is empty")
+        return 1
+
+    print(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
+
+    print("building search index...")
+    idx = ThreadIndex(embedder.dim)
+    for i, entry in enumerate(entries):
+        idx.upsert(i, entry["vector"])
+
+    ctx = ReplContext(index_data, embedder, idx, root)
+
+    print(f"\nloaded {len(entries)} files, {embedder.dim}-dim vectors")
+    print(
+        "commands: query, key, symbols, grep, sgrep, show, classify, help, quit"
+    )
+    print("-" * 60)
+
+    while True:
+        try:
+            line = input("\ngalaxybrain> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nbye!")
+            return 0
+
+        if not line:
+            continue
+
+        try:
+            parts = shlex.split(line)
+        except ValueError as e:
+            print(f"parse error: {e}")
+            continue
+
+        cmd = parts[0].lower()
+        cmd_args = parts[1:]
+
+        try:
+            if cmd in ("q", "quit", "exit"):
+                print("bye!")
+                return 0
+            elif cmd in ("?", "h", "help"):
+                _repl_help()
+            elif cmd in ("query", "s", "search"):
+                _repl_query(ctx, cmd_args)
+            elif cmd in ("key", "k"):
+                _repl_key(ctx, cmd_args)
+            elif cmd in ("sym", "symbols"):
+                _repl_symbols(ctx, cmd_args)
+            elif cmd in ("grep", "g"):
+                _repl_grep(ctx, cmd_args)
+            elif cmd in ("sgrep", "sg"):
+                _repl_sgrep(ctx, cmd_args)
+            elif cmd in ("show", "sh"):
+                _repl_show(ctx, cmd_args)
+            elif cmd in ("classify", "c", "cls"):
+                _repl_classify(ctx, cmd_args)
+            elif cmd in ("stats", "st"):
+                _repl_stats(ctx)
+            else:
+                print(f"unknown command: {cmd}")
+                print("type 'help' for available commands")
+        except Exception as e:
+            print(f"error: {e}")
+
+
+def _repl_help() -> None:
+    """Print REPL help."""
+    print("""
+commands (aliases in parens):
+  s, search, query <text> [-k N]   semantic search (default k=10)
+  k, key <canonical-key>           lookup by key (file:x, sym:x#y)
+  sym, symbols [filter]            list symbols, optional filter
+  g, grep <pattern>                regex search across files
+  sg, sgrep <query> <pattern>      regex + semantic search
+  sh, show <symbol> [-c N]         show symbol source with context
+  c, cls, classify [-v] [-s]       classify files (-s for symbols)
+  st, stats                        show index statistics
+  h, ?, help                       this message
+  q, quit, exit                    exit repl
+""")
+
+
+def _repl_query(ctx: ReplContext, args: list[str]) -> None:
+    """Semantic query."""
+    if not args:
+        print("usage: query <text> [-k N]")
+        return
+
+    k = 10
+    query_parts = []
+    i = 0
+    while i < len(args):
+        if args[i] == "-k" and i + 1 < len(args):
+            k = int(args[i + 1])
+            i += 2
+        else:
+            query_parts.append(args[i])
+            i += 1
+
+    query = " ".join(query_parts)
+    if not query:
+        print("usage: query <text> [-k N]")
+        return
+
+    t0 = time.perf_counter()
+    query_vec = ctx.embedder.embed(query).tolist()
+    t_embed = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    results = ctx.thread_index.search(query_vec, k=k)
+    t_search = time.perf_counter() - t0
+
+    print(f"\ntop {len(results)} for: {query!r}")
+    print(f"(embed: {t_embed * 1000:.1f}ms, search: {t_search * 1000:.2f}ms)\n")
+
+    for file_id, score in results:
+        entry = ctx.entries[file_id]
+        path = entry.get("path_rel", entry["path"])
+        symbols = entry.get("symbols", [])[:5]
+        print(f"[{score:.3f}] {path}")
+        if symbols:
+            print(f"         {', '.join(symbols)}")
+
+
+def _repl_key(ctx: ReplContext, args: list[str]) -> None:
+    """Lookup by canonical key."""
+    if not args:
+        print("usage: key <canonical-key>")
+        print("examples: key file:src/foo.py")
+        print("          key sym:src/foo.py#MyClass:class:10:50")
+        return
+
+    key = args[0]
+    t0 = time.perf_counter()
+    target_hash = hash64(key)
+    t_hash = time.perf_counter() - t0
+
+    print(f"key: {key}")
+    print(f"hash: 0x{target_hash:016x} ({t_hash * 1000:.3f}ms)\n")
+
+    if target_hash in ctx.file_by_hash:
+        entry = ctx.file_by_hash[target_hash]
+        _print_entry(entry)
+    elif target_hash in ctx.sym_by_hash:
+        entry, sym = ctx.sym_by_hash[target_hash]
+        _print_symbol(entry, sym)
+    else:
+        print("not found")
+
+
+def _repl_symbols(ctx: ReplContext, args: list[str]) -> None:
+    """List symbols."""
+    filter_str = args[0].lower() if args else None
+
+    all_syms: list[tuple[str, str, int, str, int | None]] = []
+    for entry in ctx.entries:
+        path = entry.get("path_rel", entry["path"])
+        for sym in entry.get("symbol_info", []):
+            all_syms.append(
+                (
+                    sym["name"],
+                    path,
+                    sym["line"],
+                    sym["kind"],
+                    sym.get("key_hash"),
+                )
+            )
+
+    all_syms.sort(key=lambda x: x[0].lower())
+
+    if filter_str:
+        all_syms = [s for s in all_syms if filter_str in s[0].lower()]
+
+    for name, path, line, kind, _key_hash in all_syms[:50]:
+        loc = f"{path}:{line}"
+        kind_str = f" [{kind}]" if kind else ""
+        print(f"{name:<40} {loc}{kind_str}")
+
+    if len(all_syms) > 50:
+        print(f"\n... and {len(all_syms) - 50} more (showing first 50)")
+    else:
+        print(f"\n{len(all_syms)} symbols")
+
+
+def _repl_grep(ctx: ReplContext, args: list[str]) -> None:
+    """Regex grep."""
+    if not args:
+        print("usage: grep <pattern>")
+        return
+
+    from galaxybrain.hyperscan_search import HyperscanSearch
+
+    pattern = args[0].encode()
+
+    t0 = time.perf_counter()
+    try:
+        hs = HyperscanSearch([pattern])
+    except Exception as e:
+        print(f"invalid pattern: {e}")
+        return
+    t_compile = time.perf_counter() - t0
+
+    matches = []
+    bytes_scanned = 0
+
+    t0 = time.perf_counter()
+    for entry in ctx.entries:
+        path = Path(entry["path"])
+        if not path.is_absolute():
+            path = ctx.root / path
+
+        try:
+            content = path.read_bytes()
+        except OSError:
+            continue
+
+        bytes_scanned += len(content)
+        hits = hs.scan(content)
+        if not hits:
+            continue
+
+        lines = content.split(b"\n")
+        line_starts = _build_line_starts(lines)
+        seen: set[int] = set()
+
+        for _, start, _ in hits:
+            line_num = _offset_to_line(start, line_starts, len(lines))
+            if line_num in seen:
+                continue
+            seen.add(line_num)
+            if line_num <= len(lines):
+                line_text = lines[line_num - 1].decode(errors="replace").strip()
+                rel_path = entry.get("path_rel", entry["path"])
+                matches.append((rel_path, line_num, line_text))
+
+    t_scan = time.perf_counter() - t0
+
+    for path, line_num, text in matches[:30]:
+        print(f"{path}:{line_num}: {text[:80]}")
+
+    mb = bytes_scanned / (1024 * 1024)
+    c_ms, s_ms = t_compile * 1000, t_scan * 1000
+    print(f"\n{len(matches)} matches")
+    print(f"(compile: {c_ms:.1f}ms, scan: {s_ms:.1f}ms, {mb:.1f}MB)")
+
+
+def _repl_sgrep(ctx: ReplContext, args: list[str]) -> None:
+    """Semantic grep: regex filter + semantic ranking."""
+    if len(args) < 2:
+        print("usage: sgrep <query> <pattern> [-k N]")
+        return
+
+    from galaxybrain.hyperscan_search import HyperscanSearch
+
+    query = args[0]
+    pattern = args[1].encode()
+    k = 10
+    if len(args) > 2 and args[2] == "-k" and len(args) > 3:
+        k = int(args[3])
+
+    try:
+        hs = HyperscanSearch([pattern])
+    except Exception as e:
+        print(f"invalid pattern: {e}")
+        return
+
+    # collect matches
+    match_texts: list[str] = []
+    match_locs: list[tuple[str, int, str]] = []
+
+    for entry in ctx.entries:
+        path = Path(entry["path"])
+        if not path.is_absolute():
+            path = ctx.root / path
+
+        try:
+            content = path.read_bytes()
+        except OSError:
+            continue
+
+        hits = hs.scan(content)
+        if not hits:
+            continue
+
+        lines = content.split(b"\n")
+        line_starts = _build_line_starts(lines)
+        seen: set[int] = set()
+
+        for _, start, _ in hits:
+            line_num = _offset_to_line(start, line_starts, len(lines))
+            if line_num in seen:
+                continue
+            seen.add(line_num)
+            if line_num <= len(lines):
+                line_text = lines[line_num - 1].decode(errors="replace").strip()
+                if line_text:
+                    match_texts.append(line_text)
+                    rel_path = entry.get("path_rel", entry["path"])
+                    match_locs.append((rel_path, line_num, line_text))
+
+    if not match_texts:
+        print("no pattern matches")
+        return
+
+    # embed and rank
+    t0 = time.perf_counter()
+    match_vecs = ctx.embedder.embed_batch(match_texts)
+    t_embed = time.perf_counter() - t0
+
+    tmp_idx = ThreadIndex(ctx.embedder.dim)
+    for i, vec in enumerate(match_vecs):
+        tmp_idx.upsert(i, vec.tolist())
+
+    t0 = time.perf_counter()
+    query_vec = ctx.embedder.embed(query).tolist()
+    results = tmp_idx.search(query_vec, k=k)
+    t_search = time.perf_counter() - t0
+    e_ms, s_ms = t_embed * 1000, t_search * 1000
+
+    n_hits = len(match_texts)
+    print(f"\ntop {len(results)} semantic matches for: {query!r}")
+    print(f"({n_hits} hits, embed: {e_ms:.1f}ms, search: {s_ms:.2f}ms)\n")
+
+    for match_id, score in results:
+        path, line_num, text = match_locs[match_id]
+        print(f"[{score:.3f}] {path}:{line_num}")
+        print(f"         {text[:70]}")
+
+
+def _repl_show(ctx: ReplContext, args: list[str]) -> None:
+    """Show symbol source."""
+    if not args:
+        print("usage: show <symbol> [-c N]")
+        return
+
+    symbol = args[0]
+    context_lines = 2
+    if len(args) > 1 and args[1] == "-c" and len(args) > 2:
+        context_lines = int(args[2])
+
+    matches: list[tuple[str, str, dict]] = []
+    for entry in ctx.entries:
+        path = entry.get("path_rel", entry["path"])
+        for sym in entry.get("symbol_info", []):
+            if symbol.lower() in sym["name"].lower():
+                matches.append((sym["name"], path, sym))
+
+    if not matches:
+        print(f"no symbol matching '{symbol}'")
+        return
+
+    for name, path, info in matches[:5]:
+        line = info["line"]
+        end_line = info.get("end_line") or line
+        kind = info["kind"]
+
+        print(f"\n{kind} {name}")
+        print(f"  {path}:{line}")
+        print("-" * 50)
+
+        try:
+            full_path = ctx.root / path
+            lines = full_path.read_text().split("\n")
+            start = max(0, line - 1 - context_lines)
+            end = min(len(lines), end_line + context_lines)
+
+            for i in range(start, end):
+                line_num = i + 1
+                marker = ">" if line <= line_num <= end_line else " "
+                print(f"{marker} {line_num:4d} | {lines[i]}")
+        except OSError as e:
+            print(f"  (could not read: {e})")
+
+    if len(matches) > 5:
+        print(f"\n... and {len(matches) - 5} more matches")
+
+
+def _repl_classify(ctx: ReplContext, args: list[str]) -> None:
+    """Classify files into taxonomy."""
+    from galaxybrain.taxonomy import DEFAULT_TAXONOMY, Classifier
+
+    verbose = "-v" in args
+    include_symbols = "-s" in args
+
+    classifier = Classifier(ctx.embedder, taxonomy=DEFAULT_TAXONOMY)
+    ir = classifier.classify_entries(
+        ctx.entries, include_symbols=include_symbols
+    )
+
+    print("\nCATEGORIES:\n")
+    file_limit = 10 if verbose else 3
+    for cat, files in sorted(ir.category_index.items()):
+        if files:
+            print(f"  {cat} ({len(files)} files):")
+            for f in files[:file_limit]:
+                print(f"    - {f}")
+            if len(files) > file_limit:
+                print(f"    ... and {len(files) - file_limit} more")
+            print()
+
+    if verbose:
+        print("=" * 50)
+        print("FILE DETAILS:\n")
+        for file_ir in ir.files:
+            cats = ", ".join(file_ir.categories) or "(none)"
+            print(f"{file_ir.path_rel}: {cats}")
+            if include_symbols and file_ir.symbols:
+                for sym in file_ir.symbols[:10]:
+                    sym_cats = ", ".join(sym.top_categories) or "-"
+                    print(f"    {sym.kind} {sym.name}: {sym_cats}")
+                if len(file_ir.symbols) > 10:
+                    print(f"    ... and {len(file_ir.symbols) - 10} more")
+
+
+def _repl_stats(ctx: ReplContext) -> None:
+    """Show index stats."""
+    n_files = len(ctx.entries)
+    n_symbols = sum(len(e.get("symbol_info", [])) for e in ctx.entries)
+    model = ctx.index_data["model"]
+    dim = ctx.embedder.dim
+
+    print("\nindex statistics:")
+    print(f"  files:   {n_files}")
+    print(f"  symbols: {n_symbols}")
+    print(f"  model:   {model}")
+    print(f"  dim:     {dim}")
+    print(f"  root:    {ctx.root}")
 
 
 if __name__ == "__main__":
