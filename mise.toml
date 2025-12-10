@@ -1,4 +1,35 @@
+[settings]
+experimental = true
+
 [tools]
 python = "latest"
 uv = "latest"
 rust = "latest"
+
+[tasks.sync]
+description = "Sync all dependencies including extras"
+run = "uv sync --all-extras --dev"
+
+[tasks.build]
+description = "Build rust extension"
+run = "uv run maturin develop -m galaxybrain_index/Cargo.toml"
+
+[tasks.dev]
+description = "Sync deps and build rust extension"
+depends = ["sync", "build"]
+
+[tasks.lint]
+description = "Run ruff linter"
+run = "ruff check src/galaxybrain"
+
+[tasks.fmt]
+description = "Format code with ruff"
+run = "ruff format src/galaxybrain"
+
+[tasks.test]
+description = "Run pytest"
+run = "uv run pytest"
+
+[tasks.voyager]
+description = "Launch the Voyager TUI"
+run = "uv run galaxybrain voyager"
