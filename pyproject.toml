@@ -7,10 +7,14 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "galaxybrain-index",
     "hyperscan>=0.8.0",
     "numpy>=1.24",
     "sentence-transformers>=3",
 ]
+
+[tool.uv.sources]
+galaxybrain-index = { path = "galaxybrain_index", editable = true }
 
 [project.optional-dependencies]
 voyager = ["textual>=0.50"]
