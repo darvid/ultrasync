@@ -30,7 +30,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from galaxybrain.call_graph import CallGraph
-    from galaxybrain.classify import CodebaseIR
+    from galaxybrain.taxonomy import CodebaseIR
 
 
 def check_textual_available() -> None:
@@ -134,7 +134,9 @@ class CallGraphTable(DataTable):
         self.add_column("Calls", key="calls")
         self.add_column("Called By", key="called_by")
 
-        for node in sorted(graph.nodes.values(), key=lambda n: -n.call_count):
+        # build rows with caller count for sorting
+        rows: list[tuple[str, str, str, int, int, str]] = []
+        for node in graph.nodes.values():
             callers = graph.get_callers(node.name)
             callees = graph.get_callees(node.name)
 
@@ -142,13 +144,28 @@ class CallGraphTable(DataTable):
             if len(file_display) > 30:
                 file_display = "..." + file_display[-27:]
 
+            rows.append(
+                (
+                    node.name,
+                    node.kind,
+                    file_display,
+                    len(callees),
+                    len(callers),
+                    node.name,  # row key
+                )
+            )
+
+        # sort by Called By (callers) descending
+        rows.sort(key=lambda r: r[4], reverse=True)
+
+        for name, kind, file_disp, calls, called_by, key in rows:
             self.add_row(
-                node.name,
-                node.kind,
-                file_display,
-                str(len(callees)),
-                str(len(callers)),
-                key=node.name,
+                name,
+                kind,
+                file_disp,
+                str(calls),
+                str(called_by),
+                key=key,
             )
 
 
@@ -158,6 +175,7 @@ class ClassificationTable(DataTable):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._ir: CodebaseIR | None = None
+        self.cursor_type = "row"
 
     def load_ir(self, ir: CodebaseIR) -> None:
         """Load classification IR into table."""
@@ -363,7 +381,8 @@ class VoyagerApp(App):
                         id="symbol-details",
                     )
             with TabPane("Classification", id="classification-tab"):
-                yield ClassificationTable(id="classification-table")
+                with Vertical():
+                    yield ClassificationTable(id="classification-table")
         yield Footer()
 
     def on_mount(self) -> None:
