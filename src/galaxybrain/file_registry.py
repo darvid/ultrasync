@@ -1,14 +1,14 @@
-from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from galaxybrain.embeddings import EmbeddingProvider
 from galaxybrain.file_scanner import FileMetadata, FileScanner, SymbolInfo
 from galaxybrain.keys import hash64_file_key, hash64_sym_key
+
+if TYPE_CHECKING:
+    from galaxybrain.embeddings import EmbeddingProvider
 
 
 @dataclass
@@ -69,7 +69,7 @@ class FileEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> FileEntry:
+    def from_dict(cls, data: dict[str, Any]) -> "FileEntry":
         """Deserialize from JSON-compatible dict."""
         symbol_info = [
             SymbolInfo(
@@ -116,7 +116,7 @@ class FileRegistry:
     def __init__(
         self,
         root: Path | None = None,
-        embedder: EmbeddingProvider | None = None,
+        embedder: "EmbeddingProvider | None" = None,
     ) -> None:
         self._root = root
         self._embedder = embedder
@@ -138,11 +138,11 @@ class FileRegistry:
         return self._entries
 
     @property
-    def embedder(self) -> EmbeddingProvider | None:
+    def embedder(self) -> "EmbeddingProvider | None":
         return self._embedder
 
     @embedder.setter
-    def embedder(self, value: EmbeddingProvider) -> None:
+    def embedder(self, value: "EmbeddingProvider") -> None:
         self._embedder = value
 
     def _relative_path(self, path: Path) -> str:
@@ -264,8 +264,8 @@ class FileRegistry:
     def from_dict(
         cls,
         data: dict[str, Any],
-        embedder: EmbeddingProvider | None = None,
-    ) -> FileRegistry:
+        embedder: "EmbeddingProvider | None" = None,
+    ) -> "FileRegistry":
         """Deserialize registry from JSON-compatible dict."""
         root = Path(data["root"]) if data.get("root") else None
         registry = cls(root=root, embedder=embedder)

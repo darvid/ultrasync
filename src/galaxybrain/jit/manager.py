@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import asyncio
 import hashlib
 import logging
@@ -9,16 +7,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from galaxybrain.file_scanner import FileScanner
-
-logger = logging.getLogger(__name__)
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
-from galaxybrain.jit.memory import (
-    MemoryManager,
-)
+from galaxybrain.jit.memory import MemoryManager
 from galaxybrain.jit.tracker import FileTracker
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
+
+try:
+    from galaxybrain_index import MutableGlobalIndex
+except ImportError:
+    MutableGlobalIndex = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
@@ -42,6 +43,9 @@ class IndexStats:
     vector_cache_bytes: int
     vector_cache_count: int
     tracker_db_path: str
+    aot_index_count: int = 0
+    aot_index_capacity: int = 0
+    aot_index_size_bytes: int = 0
 
 
 @dataclass
@@ -78,6 +82,22 @@ class JITIndexManager:
             embedding_provider=embedding_provider,
         )
 
+        # progressive AOT index - builds as we index files
+        self.aot_index = None
+        if MutableGlobalIndex is not None:
+            aot_path = data_dir / "index.dat"
+            if aot_path.exists():
+                self.aot_index = MutableGlobalIndex.open(str(aot_path))
+                logger.info(
+                    "opened AOT index: %d entries, capacity %d",
+                    self.aot_index.count(),
+                    self.aot_index.capacity(),
+                )
+            else:
+                # start with 4096 buckets, will grow as needed
+                self.aot_index = MutableGlobalIndex.create(str(aot_path), 4096)
+                logger.info("created new AOT index")
+
         self._started = False
 
     async def start(self) -> None:
@@ -107,7 +127,144 @@ class JITIndexManager:
         end_idx = line_end if line_end else start_idx + 1
         return b"\n".join(lines[start_idx:end_idx])
 
+    def register_file(self, path: Path, force: bool = False) -> IndexResult:
+        """Register a file (scan + blob) WITHOUT embedding. Fast!
+
+        Embedding happens lazily on search via ensure_embedded().
+        """
+        path = path.resolve()
+
+        if not path.exists():
+            return IndexResult(status="error", reason="not_found")
+
+        if not force and not self.tracker.needs_index(path):
+            return IndexResult(
+                status="skipped", reason="up_to_date", path=str(path)
+            )
+
+        metadata = self.scanner.scan(path)
+        if not metadata:
+            return IndexResult(
+                status="skipped", reason="unsupported_type", path=str(path)
+            )
+
+        try:
+            content = path.read_bytes()
+        except (OSError, PermissionError) as e:
+            return IndexResult(status="error", reason=str(e), path=str(path))
+
+        content_hash = self._content_hash(content)
+        blob_entry = self.blob.append(content)
+
+        path_rel = str(path)
+        file_key = hash64_file_key(path_rel)
+
+        self.tracker.upsert_file(
+            path=path,
+            content_hash=content_hash,
+            blob_offset=blob_entry.offset,
+            blob_length=blob_entry.length,
+            key_hash=file_key,
+        )
+
+        # insert file into AOT index for sub-ms lookups
+        if self.aot_index is not None:
+            self.aot_index.insert(
+                file_key, blob_entry.offset, blob_entry.length
+            )
+
+        self.tracker.delete_symbols(path)
+
+        for sym in metadata.symbol_info:
+            sym_key = hash64_sym_key(
+                path_rel, sym.name, sym.kind, sym.line, sym.end_line or sym.line
+            )
+
+            sym_bytes = self._extract_symbol_bytes(
+                content, sym.line, sym.end_line
+            )
+            if sym_bytes:
+                sym_blob = self.blob.append(sym_bytes)
+                self.tracker.upsert_symbol(
+                    file_path=path,
+                    name=sym.name,
+                    kind=sym.kind,
+                    line_start=sym.line,
+                    line_end=sym.end_line,
+                    blob_offset=sym_blob.offset,
+                    blob_length=sym_blob.length,
+                    key_hash=sym_key,
+                )
+
+                # insert symbol into AOT index
+                if self.aot_index is not None:
+                    self.aot_index.insert(
+                        sym_key, sym_blob.offset, sym_blob.length
+                    )
+
+        return IndexResult(
+            status="registered",
+            path=str(path),
+            symbols=len(metadata.symbol_info),
+            bytes=blob_entry.length,
+            key_hash=file_key,
+        )
+
+    def ensure_embedded(self, key_hash: int, path: Path | None = None) -> bool:
+        """Ensure a file/symbol has an embedding in the vector cache.
+
+        Returns True if embedding exists or was created, False on error.
+        Called lazily during search to warm the cache.
+        """
+        if self.vector_cache.get(key_hash) is not None:
+            logger.debug("ensure_embedded: 0x%016x already cached", key_hash)
+            return True
+
+        # look up in tracker to get file path
+        file_record = self.tracker.get_file_by_key(key_hash)
+        if file_record:
+            path = Path(file_record.path)
+            if not path.exists():
+                logger.debug(
+                    "ensure_embedded: 0x%016x file not found: %s",
+                    key_hash,
+                    path,
+                )
+                return False
+            metadata = self.scanner.scan(path)
+            if metadata:
+                text = metadata.to_embedding_text()
+                embedding = self.provider.embed(text)
+                self.vector_cache.put(key_hash, embedding)
+                logger.debug(
+                    "ensure_embedded: 0x%016x JIT embedded file %s",
+                    key_hash,
+                    path.name,
+                )
+                return True
+            logger.debug(
+                "ensure_embedded: 0x%016x scan failed for %s", key_hash, path
+            )
+            return False
+
+        # check if it's a symbol
+        sym_record = self.tracker.get_symbol_by_key(key_hash)
+        if sym_record:
+            text = f"{sym_record.kind} {sym_record.name}"
+            embedding = self.provider.embed(text)
+            self.vector_cache.put(key_hash, embedding)
+            logger.debug(
+                "ensure_embedded: 0x%016x JIT embedded symbol %s",
+                key_hash,
+                sym_record.name,
+            )
+            return True
+
+        logger.debug("ensure_embedded: 0x%016x not found in tracker", key_hash)
+        return False
+
     async def index_file(self, path: Path, force: bool = False) -> IndexResult:
+        """Full index: register + embed. Use register_file() for JIT."""
         path = path.resolve()
 
         if not path.exists():
@@ -162,6 +319,12 @@ class JITIndexManager:
             key_hash=file_key,
         )
 
+        # insert file into AOT index for sub-ms lookups
+        if self.aot_index is not None:
+            self.aot_index.insert(
+                file_key, blob_entry.offset, blob_entry.length
+            )
+
         self.tracker.delete_symbols(path)
 
         for i, sym in enumerate(metadata.symbol_info):
@@ -186,6 +349,12 @@ class JITIndexManager:
                     blob_length=sym_blob.length,
                     key_hash=sym_key,
                 )
+
+                # insert symbol into AOT index
+                if self.aot_index is not None:
+                    self.aot_index.insert(
+                        sym_key, sym_blob.offset, sym_blob.length
+                    )
 
         return IndexResult(
             status="indexed",
@@ -324,7 +493,15 @@ class JITIndexManager:
         exclude: list[str] | None = None,
         checkpoint_interval: int = 100,
         resume: bool = True,
+        embed: bool = False,
     ) -> AsyncIterator[IndexProgress]:
+        """Index all files in a directory.
+
+        By default (embed=False), only registers files (fast scan + blob).
+        With embed=True, also computes embeddings (slow but enables search).
+        """
+        import sys
+
         root = root.resolve()
         patterns = patterns or [
             "**/*.py",
@@ -342,6 +519,9 @@ class JITIndexManager:
             ".venv",
         ]
 
+        mode_str = "indexing" if embed else "registering"
+        print(f"scanning {root} for files...", file=sys.stderr, flush=True)
+
         all_files: list[Path] = []
         for pattern in patterns:
             for f in root.glob(pattern):
@@ -351,6 +531,11 @@ class JITIndexManager:
         all_files.sort()
         total = len(all_files)
 
+        print(
+            f"found {total} files to {mode_str.rstrip('ing')}",
+            file=sys.stderr,
+            flush=True,
+        )
         logger.info("full index: found %d files in %s", total, root)
 
         start_idx = 0
@@ -358,13 +543,32 @@ class JITIndexManager:
             checkpoint = self.tracker.get_latest_checkpoint()
             if checkpoint:
                 start_idx = checkpoint.processed_files
+                print(
+                    f"resuming from checkpoint: {start_idx}/{total}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         errors: list[str] = []
+        last_pct = -1
         for i, file_path in enumerate(all_files[start_idx:], start=start_idx):
-            result = await self.index_file(file_path)
+            if embed:
+                result = await self.index_file(file_path)
+            else:
+                result = self.register_file(file_path)
 
             if result.status == "error":
                 errors.append(f"{file_path}: {result.reason}")
+
+            # progress output every 5% or every 50 files
+            pct = int(100 * (i + 1) / total) if total else 0
+            if pct >= last_pct + 5 or (i + 1) % 50 == 0:
+                last_pct = pct
+                print(
+                    f"[{pct:3d}%] {i + 1}/{total} - {file_path.name}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             if (i + 1) % checkpoint_interval == 0:
                 self.tracker.save_checkpoint(i + 1, total, str(file_path))
@@ -384,9 +588,23 @@ class JITIndexManager:
                 errors=errors[-10:],
             )
 
+        print(
+            f"done: {total} files, {self.blob.size_bytes} bytes",
+            file=sys.stderr,
+            flush=True,
+        )
+
         self.tracker.clear_checkpoints()
 
     def get_stats(self) -> IndexStats:
+        aot_count = 0
+        aot_capacity = 0
+        aot_size = 0
+        if self.aot_index is not None:
+            aot_count = self.aot_index.count()
+            aot_capacity = self.aot_index.capacity()
+            aot_size = self.aot_index.size_bytes()
+
         return IndexStats(
             file_count=self.tracker.file_count(),
             symbol_count=self.tracker.symbol_count(),
@@ -395,19 +613,54 @@ class JITIndexManager:
             vector_cache_bytes=self.vector_cache.current_bytes,
             vector_cache_count=self.vector_cache.count,
             tracker_db_path=str(self.tracker.db_path),
+            aot_index_count=aot_count,
+            aot_index_capacity=aot_capacity,
+            aot_index_size_bytes=aot_size,
         )
 
     def get_vector(self, key_hash: int):
         return self.vector_cache.get(key_hash)
+
+    def aot_lookup(self, key_hash: int) -> tuple[int, int] | None:
+        """Direct AOT index lookup - sub-ms performance.
+
+        Returns (blob_offset, blob_length) if found, None otherwise.
+        Use this for exact key lookups when you know the hash.
+        """
+        if self.aot_index is None:
+            return None
+        result = self.aot_index.lookup(key_hash)
+        if result:
+            return (result[0], result[1])
+        return None
+
+    def aot_get_content(self, key_hash: int) -> bytes | None:
+        """Get content from AOT index by key hash.
+
+        Sub-ms lookup + blob read for exact matches.
+        """
+        loc = self.aot_lookup(key_hash)
+        if loc is None:
+            return None
+        offset, length = loc
+        return self.blob.read(offset, length)
 
     def search_vectors(
         self,
         query_vector,
         top_k: int = 10,
     ) -> list[tuple[int, float]]:
+        """Search only cached vectors (fast but may miss unembedded files)."""
         import numpy as np
 
         results: list[tuple[int, float]] = []
+
+        cached_count = self.vector_cache.count
+        logger.debug(
+            "search_vectors: %d cached vectors, %d registered files",
+            cached_count,
+            self.tracker.file_count(),
+        )
 
         for key_hash in self.vector_cache.keys():
             vec = self.vector_cache.get(key_hash)
@@ -422,4 +675,137 @@ class JITIndexManager:
                 results.append((key_hash, score))
 
         results.sort(key=lambda x: x[1], reverse=True)
+        logger.debug(
+            "search_vectors: found %d results, returning top %d",
+            len(results),
+            min(top_k, len(results)),
+        )
         return results[:top_k]
+
+    def warm_cache(
+        self,
+        max_files: int | None = None,
+        batch_size: int = 32,
+    ) -> int:
+        """Embed registered files that aren't in vector cache yet.
+
+        Args:
+            max_files: Max files to embed (None = all)
+            batch_size: Batch size for embedding
+
+        Returns:
+            Number of files newly embedded
+        """
+        if self.provider is None:
+            raise RuntimeError("embedding provider required for warm_cache")
+
+        to_embed: list[tuple[int, str, str]] = []  # (key_hash, path, text)
+
+        for file_record in self.tracker.iter_files():
+            if self.vector_cache.get(file_record.key_hash) is not None:
+                continue
+
+            path = Path(file_record.path)
+            if not path.exists():
+                continue
+
+            metadata = self.scanner.scan(path)
+            if metadata:
+                to_embed.append(
+                    (
+                        file_record.key_hash,
+                        file_record.path,
+                        metadata.to_embedding_text(),
+                    )
+                )
+
+            if max_files and len(to_embed) >= max_files:
+                break
+
+        if not to_embed:
+            return 0
+
+        # batch embed
+        texts = [t for _, _, t in to_embed]
+        embeddings = self.provider.embed_batch(texts)
+
+        for (key_hash, _, _), vec in zip(to_embed, embeddings, strict=True):
+            self.vector_cache.put(key_hash, vec)
+
+        return len(to_embed)
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+    ) -> list[tuple[int, float, str]]:
+        """Semantic search over cached vectors.
+
+        Returns list of (key_hash, score, path) tuples.
+        Call warm_cache() first to embed registered files.
+        """
+
+        if self.provider is None:
+            raise RuntimeError("embedding provider required for search")
+
+        query_vec = self.provider.embed(query)
+        results = self.search_vectors(query_vec, top_k)
+
+        # enrich with paths
+        out = []
+        for key_hash, score in results:
+            rec = self.tracker.get_file_by_key(key_hash)
+            out.append((key_hash, score, rec.path if rec else ""))
+        return out
+
+    def export_entries_for_taxonomy(
+        self, root: Path | None = None
+    ) -> list[dict]:
+        """Export file entries in format compatible with Classifier.
+
+        Returns list of dicts with path, path_rel, vector, key_hash,
+        symbol_info. Used by taxonomy commands (classify, callgraph, refine).
+        """
+        entries = []
+
+        for file_record in self.tracker.iter_files():
+            vec = self.vector_cache.get(file_record.key_hash)
+            if vec is None:
+                continue  # skip files without cached vectors
+
+            path = Path(file_record.path)
+            try:
+                path_rel = str(path.relative_to(root)) if root else str(path)
+            except ValueError:
+                path_rel = str(path)
+
+            # get symbols for this file
+            symbols = self.tracker.get_symbols(path)
+            symbol_info = []
+            for sym in symbols:
+                sym_vec = self.vector_cache.get(sym.key_hash)
+                symbol_info.append(
+                    {
+                        "name": sym.name,
+                        "kind": sym.kind,
+                        "line": sym.line_start,
+                        "end_line": sym.line_end,
+                        "key_hash": sym.key_hash,
+                        "vector": sym_vec.tolist()
+                        if sym_vec is not None
+                        else None,
+                    }
+                )
+
+            entries.append(
+                {
+                    "path": str(path),
+                    "path_rel": path_rel,
+                    "key_hash": file_record.key_hash,
+                    "vector": vec.tolist(),
+                    "symbols": [s["name"] for s in symbol_info],
+                    "symbol_info": symbol_info,
+                }
+            )
+
+        return entries

@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-galaxybrain-index = { path = "galaxybrain_index", editable = true }
+galaxybrain-index = { path = "crates/galaxybrain_index", editable = true }
 
 [project.optional-dependencies]
 voyager = ["textual>=0.50"]

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """galaxybrain CLI - index and query codebases."""
 
-from __future__ import annotations
-
 import argparse
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from galaxybrain.call_graph import CallGraph, CallSite, build_call_graph
-from galaxybrain.file_registry import FileRegistry
 from galaxybrain.hyperscan_search import HyperscanSearch
+from galaxybrain.jit.manager import JITIndexManager
+from galaxybrain.jit.search import search
+from galaxybrain.jit.tracker import FileTracker, SymbolRecord
 from galaxybrain.keys import hash64
 from galaxybrain.taxonomy import (
     DEFAULT_TAXONOMY,
@@ -26,7 +27,7 @@ from galaxybrain_index import ThreadIndex
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
 
-# lazy - pulls torch via sentence-transformers
+# lazy import for EmbeddingProvider - pulls torch via sentence-transformers
 _EmbeddingProvider: type[EmbeddingProvider] | None = None
 
 
@@ -39,7 +40,7 @@ def _get_embedder_class() -> type[EmbeddingProvider]:
     return _EmbeddingProvider
 
 
-DEFAULT_INDEX_PATH = Path(".galaxybrain_index.json")
+DEFAULT_DATA_DIR = Path(".galaxybrain")
 
 
 def _build_line_starts(lines: list[bytes]) -> list[int]:
@@ -61,7 +62,9 @@ def _offset_to_line(offset: int, line_starts: list[int], num_lines: int) -> int:
 
 
 def cmd_index(args: argparse.Namespace) -> int:
-    """Index a directory and save to disk."""
+    """Index a directory using JIT or AOT strategy."""
+    import asyncio
+
     EmbeddingProvider = _get_embedder_class()
 
     root = Path(args.directory).resolve()
@@ -69,113 +72,158 @@ def cmd_index(args: argparse.Namespace) -> int:
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
 
-    output = Path(args.output) if args.output else DEFAULT_INDEX_PATH
+    data_dir = root / DEFAULT_DATA_DIR
+    mode = getattr(args, "mode", "jit")
+    embed = getattr(args, "embed", False)
 
-    print(f"loading embedding model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    # only load embedding model if we're actually embedding
+    if embed:
+        print(f"loading embedding model ({args.model})...")
+        embedder = EmbeddingProvider(model=args.model)
+    else:
+        embedder = None
 
-    print(f"scanning {root}...")
-    registry = FileRegistry(root=root, embedder=embedder)
+    manager = JITIndexManager(
+        data_dir=data_dir,
+        embedding_provider=embedder,
+    )
 
-    extensions = None
+    patterns = None
     if args.extensions:
-        extensions = set(args.extensions.split(","))
+        # convert extensions to glob patterns
+        exts = [e.strip().lstrip(".") for e in args.extensions.split(",")]
+        patterns = [f"**/*.{ext}" for ext in exts]
 
-    print("embedding files...")
-    entries = registry.register_directory_batch(root, extensions=extensions)
-    print(f"found {len(entries)} files")
+    resume = mode == "jit" and not getattr(args, "no_resume", False)
 
-    if not entries:
-        print("nothing to index")
-        return 0
+    async def run_index():
+        async for _progress in manager.full_index(
+            root,
+            patterns=patterns,
+            resume=resume,
+            embed=embed,
+        ):
+            pass  # progress output handled by manager
+        return manager.get_stats()
 
-    # save to disk
-    with open(output, "w") as f:
-        json.dump(registry.to_dict(), f)
+    stats = asyncio.run(run_index())
 
-    print(f"indexed {len(entries)} files -> {output}")
+    action = "indexed" if embed else "registered"
+    print(f"\n{'=' * 50}")
+    print(f"{action} {stats.file_count} files, {stats.symbol_count} symbols")
+    print(f"blob: {stats.blob_size_bytes / 1024 / 1024:.2f} MB")
+    print(f"vectors: {stats.vector_cache_count} cached")
+    if stats.aot_index_count > 0:
+        print(
+            f"AOT index: {stats.aot_index_count} entries "
+            f"({stats.aot_index_size_bytes / 1024:.1f} KB)"
+        )
+    print(f"data: {data_dir}")
+
     return 0
 
 
 def cmd_query(args: argparse.Namespace) -> int:
-    """Query the index for similar files/symbols."""
+    """Semantic search across indexed files and symbols."""
+    debug = getattr(args, "debug", False)
+    if debug:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
+        logger = logging.getLogger("galaxybrain")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    EmbeddingProvider = _get_embedder_class()
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
         print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
-
-    model = index_data["model"]
-    entries = index_data["entries"]
-
-    if not entries:
-        print("index is empty")
-        return 0
-
-    # key lookup mode - find by canonical key string
+    # key lookup mode - direct AOT lookup (sub-ms), no model needed
     if args.key:
+        manager = JITIndexManager(
+            data_dir=data_dir,
+            embedding_provider=None,
+        )
+
         target_hash = hash64(args.key)
         print(f"looking up key: {args.key}")
         print(f"hash: 0x{target_hash:016x}\n")
 
-        # check file keys
-        for entry in entries:
-            if entry.get("key_hash") == target_hash:
-                _print_entry(entry)
-                return 0
+        result = manager.aot_lookup(target_hash)
+        if result:
+            offset, length = result
+            content = manager.blob.read(offset, length)
+            print(f"found: {length} bytes at offset {offset}")
+            print("-" * 40)
+            print(content.decode(errors="replace")[:2000])
+            if length > 2000:
+                print(f"\n... ({length - 2000} more bytes)")
+            return 0
 
-            # check symbol keys
-            for sym in entry.get("symbol_info", []):
-                if sym.get("key_hash") == target_hash:
-                    _print_symbol(entry, sym)
-                    return 0
+        # try tracker as fallback
+        file_record = manager.tracker.get_file_by_key(target_hash)
+        if file_record:
+            print(f"FILE: {file_record.path}")
+            return 0
 
         print(f"no match for key: {args.key}", file=sys.stderr)
         return 1
 
-    # semantic query mode
-    EmbeddingProvider = _get_embedder_class()
+    # semantic search mode - uses shared search with full fallback
+    print(f"loading model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
 
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
+    manager = JITIndexManager(
+        data_dir=data_dir,
+        embedding_provider=embedder,
+    )
 
-    # build ThreadIndex
-    idx = ThreadIndex(embedder.dim)
-    for i, entry in enumerate(entries):
-        idx.upsert(i, entry["vector"])
+    t0 = time.perf_counter()
+    results, stats = search(
+        query=args.query,
+        manager=manager,
+        root=root,
+        top_k=args.k,
+    )
+    t_search = time.perf_counter() - t0
 
-    # embed query
-    query_vec = embedder.embed(args.query).tolist()
-    results = idx.search(query_vec, k=args.k)
+    # show search stats
+    strategy_info = []
+    if stats.aot_hit:
+        strategy_info.append("aot_hit")
+    elif stats.semantic_results > 0:
+        strategy_info.append(f"semantic({stats.semantic_results})")
+    if stats.grep_fallback:
+        sources = ",".join(stats.grep_sources or [])
+        strategy_info.append(f"grep[{sources}]")
+        if stats.files_indexed > 0:
+            strategy_info.append(f"jit_indexed({stats.files_indexed})")
 
-    print(f"\ntop {len(results)} results for: {args.query!r}\n")
+    strategy_str = " -> ".join(strategy_info) if strategy_info else "none"
+
+    print(f"\ntop {len(results)} for: {args.query!r}")
+    print(f"(search: {t_search * 1000:.1f}ms, strategy: {strategy_str})\n")
     print("-" * 60)
 
-    for file_id, score in results:
-        entry = entries[file_id]
-        path = entry["path"]
-        symbols = entry.get("symbols", [])[:5]
-        components = entry.get("components", [])[:3]
-        key_hash = entry.get("key_hash")
-
-        # make path relative if possible
-        try:
-            rel_path = Path(path).relative_to(Path.cwd())
-        except ValueError:
-            rel_path = path
-
-        print(f"[{score:.3f}] {rel_path}")
-        if key_hash:
-            print(f"        key: 0x{key_hash:016x}")
-        if symbols:
-            print(f"        symbols: {', '.join(symbols)}")
-        if components:
-            print(f"        components: {', '.join(components)}")
+    for r in results:
+        if r.path:
+            try:
+                rel_path = Path(r.path).relative_to(Path.cwd())
+            except ValueError:
+                rel_path = Path(r.path)
+            print(f"[{r.score:.3f}] {rel_path}")
+            if r.key_hash:
+                print(f"        key: 0x{r.key_hash:016x} ({r.source})")
+            else:
+                print(f"        ({r.source})")
+        else:
+            # symbol or other indexed content
+            print(f"[{r.score:.3f}] key:0x{r.key_hash:016x} ({r.source})")
         print()
 
     return 0
@@ -213,55 +261,33 @@ def _print_symbol(entry: dict[str, object], sym: dict[str, object]) -> None:
 
 def cmd_symbols(args: argparse.Namespace) -> int:
     """List all indexed symbols."""
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    tracker = FileTracker(data_dir / "tracker.db")
 
-    # name, path, line, kind, key_hash
-    all_symbols: list[tuple[str, str, int, str, int | None]] = []
-    for entry in index_data["entries"]:
-        path = entry["path"]
-        symbol_info = entry.get("symbol_info", [])
+    name_filter = args.filter if args.filter else None
+    count = 0
 
-        # use symbol_info if available, fall back to symbols list
-        if symbol_info:
-            for info in symbol_info:
-                all_symbols.append(
-                    (
-                        info["name"],
-                        path,
-                        info["line"],
-                        info["kind"],
-                        info.get("key_hash"),
-                    )
-                )
-        else:
-            for sym in entry["symbols"]:
-                all_symbols.append((sym, path, 0, "", None))
-
-    # sort by symbol name
-    all_symbols.sort(key=lambda x: x[0].lower())
-
-    if args.filter:
-        filter_lower = args.filter.lower()
-        all_symbols = [s for s in all_symbols if filter_lower in s[0].lower()]
-
-    for sym, path, line, kind, key_hash in all_symbols:
+    for sym in tracker.iter_all_symbols(name_filter=name_filter):
         try:
-            rel_path = Path(path).relative_to(Path.cwd())
+            rel_path = Path(sym.file_path).relative_to(Path.cwd())
         except ValueError:
-            rel_path = path
-        loc = f"{rel_path}:{line}" if line else str(rel_path)
-        kind_str = f" [{kind}]" if kind else ""
-        hash_str = f" 0x{key_hash:016x}" if key_hash else ""
-        print(f"{sym:<40} {loc}{kind_str}{hash_str}")
+            rel_path = Path(sym.file_path)
 
-    print(f"\n{len(all_symbols)} symbols")
+        loc = f"{rel_path}:{sym.line_start}"
+        kind_str = f" [{sym.kind}]" if sym.kind else ""
+        hash_str = f" 0x{sym.key_hash:016x}"
+        print(f"{sym.name:<40} {loc}{kind_str}{hash_str}")
+        count += 1
+
+    tracker.close()
+    print(f"\n{count} symbols")
     return 0
 
 
@@ -271,20 +297,20 @@ def cmd_grep(args: argparse.Namespace) -> int:
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    tracker = FileTracker(data_dir / "tracker.db")
+    file_count = tracker.file_count()
 
-    root = Path(index_data.get("root", "."))
-    entries = index_data["entries"]
-
-    if not entries:
+    if file_count == 0:
         print("index is empty")
+        tracker.close()
         return 0
 
     # load patterns from file or use single pattern
@@ -295,6 +321,7 @@ def cmd_grep(args: argparse.Namespace) -> int:
                 f"error: patterns file not found: {patterns_path}",
                 file=sys.stderr,
             )
+            tracker.close()
             return 1
         patterns = [
             line.strip().encode()
@@ -306,15 +333,17 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
     if not patterns:
         print("error: no patterns provided", file=sys.stderr)
+        tracker.close()
         return 1
 
-    print(f"searching {len(entries)} files with {len(patterns)} pattern(s)...")
+    print(f"searching {file_count} files with {len(patterns)} pattern(s)...")
 
     t_compile = time.perf_counter()
     try:
         hs = HyperscanSearch(patterns)
     except Exception as e:
         print(f"error: failed to compile patterns: {e}", file=sys.stderr)
+        tracker.close()
         return 1
     timings["compile"] = time.perf_counter() - t_compile
 
@@ -323,10 +352,8 @@ def cmd_grep(args: argparse.Namespace) -> int:
     total_bytes_scanned = 0
 
     t_scan = time.perf_counter()
-    for entry in entries:
-        path = Path(entry["path"])
-        if not path.is_absolute():
-            path = root / path
+    for file_record in tracker.iter_files():
+        path = Path(file_record.path)
 
         try:
             content = path.read_bytes()
@@ -369,6 +396,7 @@ def cmd_grep(args: argparse.Namespace) -> int:
                 else:
                     print(f"{rel_path}:{line_num}: {line_content.strip()}")
 
+    tracker.close()
     timings["scan"] = time.perf_counter() - t_scan
     timings["total"] = time.perf_counter() - t_start
 
@@ -390,26 +418,26 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
 def cmd_semantic_grep(args: argparse.Namespace) -> int:
     """Regex pattern match, then semantic search the matches."""
+
     EmbeddingProvider = _get_embedder_class()
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    tracker = FileTracker(data_dir / "tracker.db")
+    file_count = tracker.file_count()
 
-    root = Path(index_data.get("root", "."))
-    entries = index_data["entries"]
-    model = index_data["model"]
-
-    if not entries:
+    if file_count == 0:
         print("index is empty")
+        tracker.close()
         return 0
 
     # load patterns
@@ -420,6 +448,7 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
                 f"error: patterns file not found: {patterns_path}",
                 file=sys.stderr,
             )
+            tracker.close()
             return 1
         patterns = [
             line.strip().encode()
@@ -431,15 +460,17 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
     if not patterns:
         print("error: no patterns provided", file=sys.stderr)
+        tracker.close()
         return 1
 
-    print(f"scanning {len(entries)} files with {len(patterns)} pattern(s)...")
+    print(f"scanning {file_count} files with {len(patterns)} pattern(s)...")
 
     t_compile = time.perf_counter()
     try:
         hs = HyperscanSearch(patterns)
     except Exception as e:
         print(f"error: failed to compile patterns: {e}", file=sys.stderr)
+        tracker.close()
         return 1
     timings["compile"] = time.perf_counter() - t_compile
 
@@ -450,10 +481,8 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
     ] = []  # (path, line_num, line_text)
 
     t_scan = time.perf_counter()
-    for entry in entries:
-        path = Path(entry["path"])
-        if not path.is_absolute():
-            path = root / path
+    for file_record in tracker.iter_files():
+        path = Path(file_record.path)
 
         try:
             content = path.read_bytes()
@@ -481,6 +510,7 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
                     match_texts.append(line_text)
                     match_locations.append((path, line_num, line_text))
 
+    tracker.close()
     timings["scan"] = time.perf_counter() - t_scan
 
     if not match_texts:
@@ -491,7 +521,7 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
     # embed all matching lines
     t_embed = time.perf_counter()
-    embedder = EmbeddingProvider(model=model)
+    embedder = EmbeddingProvider(model=args.model)
     match_vecs = embedder.embed_batch(match_texts)
     timings["embed"] = time.perf_counter() - t_embed
 
@@ -542,62 +572,55 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
 def cmd_show(args: argparse.Namespace) -> int:
     """Show symbol details with source code."""
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    tracker = FileTracker(data_dir / "tracker.db")
 
     # find matching symbols
-    matches: list[tuple[str, str, dict[str, object]]] = []  # name, path, info
-    for entry in index_data["entries"]:
-        path = entry["path"]
-        symbol_info = entry.get("symbol_info", [])
+    matches: list[SymbolRecord] = []
+    for sym in tracker.iter_all_symbols(name_filter=args.symbol):
+        if args.file and args.file not in sym.file_path:
+            continue
+        matches.append(sym)
 
-        for info in symbol_info:
-            if args.symbol.lower() in info["name"].lower():
-                matches.append((info["name"], path, info))
-
-    if not matches:
-        print(f"no symbol matching '{args.symbol}' found", file=sys.stderr)
-        return 1
-
-    # if file filter provided, narrow down
-    if args.file:
-        matches = [m for m in matches if args.file in m[1]]
+    tracker.close()
 
     if not matches:
-        print(
-            f"no symbol matching '{args.symbol}' in '{args.file}'",
-            file=sys.stderr,
-        )
+        if args.file:
+            print(
+                f"no symbol matching '{args.symbol}' in '{args.file}'",
+                file=sys.stderr,
+            )
+        else:
+            print(f"no symbol matching '{args.symbol}' found", file=sys.stderr)
         return 1
 
-    for name, path, info in matches:
+    for sym in matches:
         try:
-            rel_path = Path(path).relative_to(Path.cwd())
+            rel_path = Path(sym.file_path).relative_to(Path.cwd())
         except ValueError:
-            rel_path = Path(path)
+            rel_path = Path(sym.file_path)
 
-        line = int(info["line"])  # pyright: ignore[reportArgumentType]
-        end_line = int(info.get("end_line") or line)  # pyright: ignore[reportArgumentType]
-        kind = str(info["kind"])
+        line = sym.line_start
+        end_line = sym.line_end or line
 
-        print(f"\n{kind} {name}")
+        print(f"\n{sym.kind} {sym.name}")
         print(f"  {rel_path}:{line}")
+        print(f"  key: 0x{sym.key_hash:016x}")
         print("-" * 60)
 
         # read and display source
         try:
-            full_path = Path(path)
-            if not full_path.is_absolute():
-                full_path = Path(index_data.get("root", ".")) / path
-            file_lines = full_path.read_text().split("\n")
+            file_lines = Path(sym.file_path).read_text().split("\n")
 
-            # show context: 2 lines before, symbol, 2 lines after
+            # show context: lines before, symbol, lines after
             start = max(0, line - 1 - args.context)
             end = min(len(file_lines), end_line + args.context)
 
@@ -615,27 +638,26 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 def cmd_classify(args: argparse.Namespace) -> int:
     """Classify codebase files and symbols into taxonomy categories."""
+
     EmbeddingProvider = _get_embedder_class()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
         print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    print(f"loading model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
 
-    entries = index_data["entries"]
-    model = index_data["model"]
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+    entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty")
+        print("index is empty (no vectors cached)")
         return 0
-
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
 
     # use custom taxonomy if provided
     taxonomy = DEFAULT_TAXONOMY
@@ -659,7 +681,7 @@ def cmd_classify(args: argparse.Namespace) -> int:
         entries,
         include_symbols=not args.files_only,
     )
-    ir.root = index_data.get("root", "")
+    ir.root = str(root)
 
     if args.output:
         # write JSON IR to file
@@ -705,28 +727,26 @@ def cmd_classify(args: argparse.Namespace) -> int:
 
 def cmd_callgraph(args: argparse.Namespace) -> int:
     """Build call graph from classification IR + hyperscan."""
+
     EmbeddingProvider = _get_embedder_class()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
         print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    print(f"loading model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
 
-    entries = index_data["entries"]
-    model = index_data["model"]
-    root = Path(index_data.get("root", "."))
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+    entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty")
+        print("index is empty (no vectors cached)")
         return 0
-
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
 
     print(f"classifying {len(entries)} files...")
     classifier = Classifier(embedder, threshold=0.6)
@@ -828,27 +848,26 @@ def cmd_callgraph(args: argparse.Namespace) -> int:
 
 def cmd_refine(args: argparse.Namespace) -> int:
     """Iteratively refine taxonomy classification."""
+
     EmbeddingProvider = _get_embedder_class()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
         print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    with open(index_path) as f:
-        index_data = json.load(f)
+    print(f"loading model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
 
-    entries = index_data["entries"]
-    model = index_data["model"]
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+    entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty")
+        print("index is empty (no vectors cached)")
         return 0
-
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
 
     print(f"running {args.iterations} refinement iterations...")
     refiner = TaxonomyRefiner(
@@ -914,6 +933,7 @@ def cmd_refine(args: argparse.Namespace) -> int:
 
 def cmd_voyager(args: argparse.Namespace) -> int:
     """Launch the Voyager TUI explorer."""
+
     try:
         from galaxybrain.voyager import check_textual_available, run_voyager
     except ImportError:
@@ -942,20 +962,18 @@ def cmd_voyager(args: argparse.Namespace) -> int:
     ir = None
 
     # load index if available for call graph + classification
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
-    if index_path.exists():
-        print(f"loading index from {index_path}...")
-        with open(index_path) as f:
-            index_data = json.load(f)
+    data_dir = root_path / DEFAULT_DATA_DIR
+    if data_dir.exists():
+        EmbeddingProvider = _get_embedder_class()
+        print(f"loading model ({args.model})...")
+        embedder = EmbeddingProvider(model=args.model)
 
-        entries = index_data["entries"]
-        model = index_data["model"]
+        manager = JITIndexManager(
+            data_dir=data_dir, embedding_provider=embedder
+        )
+        entries = manager.export_entries_for_taxonomy(root_path)
 
         if entries:
-            EmbeddingProvider = _get_embedder_class()
-            print(f"loading model ({model})...")
-            embedder = EmbeddingProvider(model=model)
-
             print("classifying files...")
             classifier = Classifier(embedder, threshold=0.6)
             ir = classifier.classify_entries(entries, include_symbols=True)
@@ -977,7 +995,6 @@ def cmd_voyager(args: argparse.Namespace) -> int:
 
 def cmd_mcp(args: argparse.Namespace) -> int:
     """Run the MCP server for IDE/agent integration."""
-    import logging
 
     from galaxybrain.mcp_server import run_server
 
@@ -993,7 +1010,7 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
 
-    # only print status for non-stdio transports (stdio uses stdout for JSON-RPC)
+    # only print status for non-stdio (stdio uses stdout for JSON-RPC)
     if args.transport != "stdio":
         print(
             f"starting galaxybrain MCP server (transport={args.transport})..."
@@ -1010,6 +1027,86 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Show index statistics."""
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        return 1
+
+    tracker_db = data_dir / "tracker.db"
+    blob_file = data_dir / "blob.dat"
+    index_file = data_dir / "index.dat"
+
+    if not tracker_db.exists():
+        print(f"error: tracker database not found at {tracker_db}")
+        return 1
+
+    import sqlite3
+
+    conn = sqlite3.connect(tracker_db)
+    cur = conn.cursor()
+
+    cur.execute("SELECT COUNT(*) FROM files")
+    file_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM symbols")
+    symbol_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM memories")
+    memory_count = cur.fetchone()[0]
+
+    conn.close()
+
+    blob_size = blob_file.stat().st_size if blob_file.exists() else 0
+    index_size = index_file.stat().st_size if index_file.exists() else 0
+
+    print(f"Index Stats ({data_dir})")
+    print("-" * 40)
+    print(f"files:      {file_count}")
+    print(f"symbols:    {symbol_count}")
+    print(f"memories:   {memory_count}")
+    print(f"blob:       {blob_size / 1024 / 1024:.2f} MB")
+    if index_size > 0:
+        print(f"AOT index:  {index_size / 1024:.1f} KB")
+
+    return 0
+
+
+def cmd_warm(args: argparse.Namespace) -> int:
+    """Warm the vector cache by embedding registered files."""
+    import time
+
+    EmbeddingProvider = _get_embedder_class()
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    print(f"loading embedding model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
+
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+
+    max_files = args.max_files
+    print(f"warming cache (max_files={max_files or 'all'})...")
+
+    t0 = time.perf_counter()
+    count = manager.warm_cache(max_files=max_files)
+    elapsed = time.perf_counter() - t0
+
+    print(f"embedded {count} files in {elapsed:.1f}s")
+    print(f"vectors cached: {manager.vector_cache.count}")
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="galaxybrain",
@@ -1020,16 +1117,13 @@ def main() -> int:
     # index command
     index_parser = subparsers.add_parser(
         "index",
-        help="index a directory",
+        help="index a directory (writes to .galaxybrain/)",
     )
     index_parser.add_argument(
         "directory",
-        help="directory to index",
-    )
-    index_parser.add_argument(
-        "-o",
-        "--output",
-        help=f"output index file (default: {DEFAULT_INDEX_PATH})",
+        nargs="?",
+        default=".",
+        help="directory to index (default: current directory)",
     )
     index_parser.add_argument(
         "-m",
@@ -1042,11 +1136,27 @@ def main() -> int:
         "--extensions",
         help="comma-separated file extensions (e.g., .py,.rs)",
     )
+    index_parser.add_argument(
+        "--mode",
+        choices=["jit", "aot"],
+        default="jit",
+        help="indexing strategy: jit (incremental, default) or aot (batch)",
+    )
+    index_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="don't resume from checkpoint, start fresh (jit mode only)",
+    )
+    index_parser.add_argument(
+        "--embed",
+        action="store_true",
+        help="compute embeddings upfront (slow, enables immediate search)",
+    )
 
     # query command
     query_parser = subparsers.add_parser(
         "query",
-        help="search the index",
+        help="semantic search across indexed files",
     )
     query_parser.add_argument(
         "query",
@@ -1054,9 +1164,15 @@ def main() -> int:
         help="semantic search query",
     )
     query_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    query_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
     query_parser.add_argument(
         "-k",
@@ -1066,7 +1182,12 @@ def main() -> int:
     )
     query_parser.add_argument(
         "--key",
-        help="lookup by canonical key (e.g., 'file:src/foo.py')",
+        help="direct key lookup (e.g., 'file:src/foo.py')",
+    )
+    query_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="enable debug logging to see search strategy",
     )
 
     # symbols command
@@ -1075,9 +1196,9 @@ def main() -> int:
         help="list all indexed symbols",
     )
     symbols_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
     )
     symbols_parser.add_argument(
         "-f",
@@ -1101,9 +1222,9 @@ def main() -> int:
         help="file containing patterns (one per line)",
     )
     grep_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
     )
     grep_parser.add_argument(
         "-v",
@@ -1138,9 +1259,15 @@ def main() -> int:
         help="file containing patterns (one per line)",
     )
     sgrep_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    sgrep_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
     sgrep_parser.add_argument(
         "-k",
@@ -1170,9 +1297,9 @@ def main() -> int:
         help="filter by file path",
     )
     show_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
     )
     show_parser.add_argument(
         "-c",
@@ -1188,9 +1315,15 @@ def main() -> int:
         help="classify files/symbols into taxonomy categories",
     )
     classify_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    classify_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
     classify_parser.add_argument(
         "-o",
@@ -1232,9 +1365,15 @@ def main() -> int:
         help="build call graph from classification + hyperscan",
     )
     callgraph_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    callgraph_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
     callgraph_parser.add_argument(
         "-o",
@@ -1272,9 +1411,15 @@ def main() -> int:
         help="iteratively refine taxonomy classification",
     )
     refine_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    refine_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
     refine_parser.add_argument(
         "-o",
@@ -1318,9 +1463,15 @@ def main() -> int:
         help="interactive REPL with preloaded index",
     )
     repl_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+    repl_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
 
     # voyager command
@@ -1329,14 +1480,15 @@ def main() -> int:
         help="interactive TUI explorer (requires galaxybrain[voyager])",
     )
     voyager_parser.add_argument(
-        "-i",
-        "--index",
-        help=f"index file (default: {DEFAULT_INDEX_PATH})",
-    )
-    voyager_parser.add_argument(
         "-d",
         "--directory",
-        help="root directory to explore (default: current dir)",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+    voyager_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
     )
 
     # mcp command
@@ -1361,6 +1513,40 @@ def main() -> int:
         choices=["stdio", "streamable-http"],
         default="stdio",
         help="MCP transport (default: stdio)",
+    )
+
+    # stats command
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="show index statistics",
+    )
+    stats_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+
+    # warm command
+    warm_parser = subparsers.add_parser(
+        "warm",
+        help="embed registered files to warm the vector cache",
+    )
+    warm_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+    warm_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
+    )
+    warm_parser.add_argument(
+        "-n",
+        "--max-files",
+        type=int,
+        help="max files to embed (default: all)",
     )
 
     args = parser.parse_args()
@@ -1402,6 +1588,10 @@ def main() -> int:
         return cmd_voyager(args)
     elif args.command == "mcp":
         return cmd_mcp(args)
+    elif args.command == "stats":
+        return cmd_stats(args)
+    elif args.command == "warm":
+        return cmd_warm(args)
 
     return 1
 
@@ -1411,15 +1601,12 @@ class ReplContext:
 
     def __init__(
         self,
-        index_data: dict[str, object],
+        entries: list[dict[str, object]],
         embedder: EmbeddingProvider,
         thread_index: ThreadIndex,
         root: Path,
     ) -> None:
-        self.index_data = index_data
-        self.entries: list[dict[str, object]] = cast(
-            list[dict[str, object]], index_data["entries"]
-        )
+        self.entries = entries
         self.embedder = embedder
         self.thread_index = thread_index
         self.root = root
@@ -1448,34 +1635,34 @@ def cmd_repl(args: argparse.Namespace) -> int:
 
     EmbeddingProvider = _get_embedder_class()
 
-    index_path = Path(args.index) if args.index else DEFAULT_INDEX_PATH
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_path = data_dir / "tracker.db"
 
-    if not index_path.exists():
-        print(f"error: index not found at {index_path}", file=sys.stderr)
+    if not tracker_path.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
         print("run 'galaxybrain index <directory>' first", file=sys.stderr)
         return 1
 
-    print(f"loading index from {index_path}...")
-    with open(index_path) as f:
-        index_data = json.load(f)
+    model = args.model
+    print(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
-    entries = index_data["entries"]
-    model = index_data["model"]
-    root = Path(index_data.get("root", "."))
+    print(f"loading index from {data_dir}...")
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+    entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
         print("index is empty")
+        manager.close()
         return 1
-
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
 
     print("building search index...")
     idx = ThreadIndex(embedder.dim)
     for i, entry in enumerate(entries):
         idx.upsert(i, entry["vector"])
 
-    ctx = ReplContext(index_data, embedder, idx, root)
+    ctx = ReplContext(entries, embedder, idx, root)
 
     print(f"\nloaded {len(entries)} files, {embedder.dim}-dim vectors")
     print("commands: query, classify, callgraph, drill, inspect, help, quit")

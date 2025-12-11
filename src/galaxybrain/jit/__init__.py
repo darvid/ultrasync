@@ -7,6 +7,7 @@ from galaxybrain.jit.memory import (
     MemoryManager,
     MemorySearchResult,
 )
+from galaxybrain.jit.search import SearchResult, SearchStats, search
 from galaxybrain.jit.tracker import (
     FileRecord,
     FileTracker,
@@ -29,4 +30,7 @@ __all__ = [
     "JITIndexManager",
     "IndexProgress",
     "IndexStats",
+    "search",
+    "SearchResult",
+    "SearchStats",
 ]

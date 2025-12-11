@@ -1,14 +1,15 @@
-from __future__ import annotations
-
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
-from galaxybrain.embeddings import EmbeddingProvider
 from galaxybrain.events import SessionEvent
 from galaxybrain_index import ThreadIndex
+
+if TYPE_CHECKING:
+    from galaxybrain.embeddings import EmbeddingProvider
 
 
 def cosine_np(a: np.ndarray, b: np.ndarray) -> float:
@@ -42,7 +43,7 @@ class ThreadManager:
 
     def __init__(
         self,
-        embedder: EmbeddingProvider,
+        embedder: "EmbeddingProvider",
         max_threads: int = 5,
     ) -> None:
         self._embedder = embedder

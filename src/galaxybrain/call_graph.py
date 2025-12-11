@@ -1,6 +1,5 @@
 """Call graph construction using classification IR + hyperscan bulk matching."""
 
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field

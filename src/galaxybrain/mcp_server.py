@@ -1,8 +1,4 @@
-from __future__ import annotations
-
 import os
-import re
-import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -12,7 +8,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from galaxybrain.events import EventType, SessionEvent
-from galaxybrain.file_registry import FileEntry, FileRegistry
+from galaxybrain.file_registry import FileRegistry
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.patterns import PatternSetManager
 from galaxybrain.threads import ThreadManager
@@ -271,15 +267,8 @@ def create_server(
     mcp = FastMCP(
         "galaxybrain",
         instructions="""\
-Galaxybrain is an AOT indexing and routing layer for IDE/agent loops. \
-Use memory_write to store context, memory_search to find similar content, \
-and code_search for semantic code discovery.
-
-CRITICAL TOOL ROUTING:
-- "index the codebase", "index with galaxybrain", "gb index" → index_project
-- "search for <query>", "find code" → code_search or symbol_search
-- "remember this", "store context" → memory_write
-- "what did we discuss" → memory_search
+Galaxybrain provides semantic indexing and search for codebases. For indexing \
+large codebases, use jit_full_index which persists to disk and shows progress.
 """,
     )
 
@@ -436,291 +425,6 @@ CRITICAL TOOL ROUTING:
     # -----------------------------------------------------------------------
     # Code/Symbol search tools
     # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    def code_search(
-        query: str,
-        top_k: int = 10,
-    ) -> list[SearchResult]:
-        """Search registered code files semantically.
-
-        Searches across all files in the registry using embedding
-        similarity. Files must be registered first via register_file
-        or register_directory.
-
-        Args:
-            query: Natural language search query
-            top_k: Maximum results to return (default: 10)
-
-        Returns:
-            List of matching files with similarity scores
-        """
-        if not state.file_registry.entries:
-            return []
-
-        q_vec = state.embedder.embed(query)
-
-        # brute-force search over registry vectors
-        scores: list[tuple[float, FileEntry]] = []
-        for entry in state.file_registry.entries.values():
-            # cosine similarity
-            dot = float((q_vec @ entry.vector).item())
-            norm_q = float((q_vec @ q_vec) ** 0.5)
-            norm_e = float((entry.vector @ entry.vector) ** 0.5)
-            if norm_q > 0 and norm_e > 0:
-                sim = dot / (norm_q * norm_e)
-                scores.append((sim, entry))
-
-        scores.sort(key=lambda x: x[0], reverse=True)
-
-        return [
-            SearchResult(path=str(entry.path), score=score)
-            for score, entry in scores[:top_k]
-        ]
-
-    @mcp.tool()
-    def symbol_search(
-        query: str,
-        kinds: list[str] | None = None,
-        top_k: int = 10,
-    ) -> list[dict[str, Any]]:
-        """Search for code symbols (functions, classes, etc.) semantically.
-
-        Searches symbol names and their context using pre-computed embeddings
-        for fast lookup. Can filter by symbol kind (function, class, etc.).
-
-        Args:
-            query: Natural language or symbol name query
-            kinds: Optional list of kinds to filter by
-            top_k: Maximum results (default: 10)
-
-        Returns:
-            List of matching symbols with file, line, and score info
-        """
-        from galaxybrain.file_registry import FileEntry
-
-        if not state.file_registry.entries:
-            return []
-
-        q_vec = state.embedder.embed(query)
-        results: list[tuple[float, str, SymbolInfo, FileEntry]] = []
-
-        for entry in state.file_registry.entries.values():
-            if not entry.symbol_vectors:
-                continue
-
-            for sym in entry.metadata.symbol_info:
-                # filter by kind if specified
-                if kinds and sym.kind not in kinds:
-                    continue
-
-                # look up pre-computed symbol vector
-                sym_key = FileEntry._symbol_key(sym)
-                sym_vec = entry.symbol_vectors.get(sym_key)
-                if sym_vec is None:
-                    continue
-
-                # cosine similarity
-                dot = float((q_vec @ sym_vec).item())
-                norm_q = float((q_vec @ q_vec) ** 0.5)
-                norm_s = float((sym_vec @ sym_vec) ** 0.5)
-                if norm_q > 0 and norm_s > 0:
-                    sim = dot / (norm_q * norm_s)
-                    sym_info = SymbolInfo(
-                        name=sym.name,
-                        kind=sym.kind,
-                        line=sym.line,
-                        end_line=sym.end_line,
-                        key_hash=hash64_sym_key(
-                            entry.path_rel,
-                            sym.name,
-                            sym.kind,
-                            sym.line,
-                            sym.end_line or sym.line,
-                        ),
-                    )
-                    results.append((sim, entry.path_rel, sym_info, entry))
-
-        results.sort(key=lambda x: x[0], reverse=True)
-
-        return [
-            {
-                "symbol": sym_info.model_dump(),
-                "file": path_rel,
-                "file_path": str(entry.path),
-                "score": score,
-            }
-            for score, path_rel, sym_info, entry in results[:top_k]
-        ]
-
-    # -----------------------------------------------------------------------
-    # File registration tools
-    # -----------------------------------------------------------------------
-
-    @mcp.tool()
-    def register_file(path: str) -> FileInfo | None:
-        """Register a single file for code search.
-
-        Scans the file for symbols, computes embeddings, and adds it
-        to the searchable registry.
-
-        Args:
-            path: Path to the file to register
-
-        Returns:
-            File information if successful, None if file couldn't be scanned
-        """
-        entry = state.file_registry.register_file(Path(path))
-        if entry is None:
-            return None
-
-        return FileInfo(
-            file_id=entry.file_id,
-            path=str(entry.path),
-            path_rel=entry.path_rel,
-            key_hash=entry.key_hash,
-            symbols=entry.metadata.exported_symbols,
-            symbol_info=[
-                SymbolInfo(
-                    name=s.name,
-                    kind=s.kind,
-                    line=s.line,
-                    end_line=s.end_line,
-                    key_hash=hash64_sym_key(
-                        entry.path_rel,
-                        s.name,
-                        s.kind,
-                        s.line,
-                        s.end_line or s.line,
-                    ),
-                )
-                for s in entry.metadata.symbol_info
-            ],
-        )
-
-    @mcp.tool()
-    def register_directory(
-        path: str,
-        extensions: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Register all code files in a directory for search.
-
-        Recursively scans the directory, extracting symbols and computing
-        embeddings for each supported file. Skips common non-code dirs
-        like node_modules, .git, __pycache__, etc.
-
-        Args:
-            path: Directory path to scan
-            extensions: Optional list of extensions to include
-                       (default: .py, .ts, .tsx, .js, .jsx, .rs)
-
-        Returns:
-            Summary with file count, symbol count, and any errors
-        """
-        root = Path(path)
-        if not root.is_dir():
-            raise ValueError(f"Not a directory: {path}")
-
-        ext_set = (
-            set(extensions)
-            if extensions
-            else {".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".rs"}
-        )
-
-        entries = state.file_registry.register_directory_batch(
-            root,
-            extensions=ext_set,
-        )
-
-        total_symbols = sum(len(e.metadata.symbol_info) for e in entries)
-
-        return {
-            "root": str(root),
-            "files_registered": len(entries),
-            "total_symbols": total_symbols,
-            "extensions": list(ext_set),
-        }
-
-    @mcp.tool()
-    def index_project(
-        extensions: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Index the current project/working directory for code search.
-
-        Convenience tool that indexes the current working directory.
-        Equivalent to register_directory with cwd as path.
-
-        **IMPORTANT**: When the user says "index the codebase", "index with
-        galaxybrain", "gb index", or similar phrases, invoke this tool
-        immediately without asking.
-
-        Args:
-            extensions: Optional list of extensions to include
-                       (default: .py, .ts, .tsx, .js, .jsx, .rs)
-
-        Returns:
-            Summary with file count, symbol count, and indexed extensions
-        """
-
-        cwd = Path(os.getcwd())
-
-        ext_set = (
-            set(extensions)
-            if extensions
-            else {".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".rs"}
-        )
-
-        entries = state.file_registry.register_directory_batch(
-            cwd,
-            extensions=ext_set,
-        )
-
-        total_symbols = sum(len(e.metadata.symbol_info) for e in entries)
-
-        return {
-            "project": str(cwd),
-            "files_indexed": len(entries),
-            "total_symbols": total_symbols,
-            "extensions": list(ext_set),
-        }
-
-    @mcp.tool()
-    def get_file_info(path: str) -> FileInfo | None:
-        """Get information about a registered file.
-
-        Args:
-            path: File path to look up
-
-        Returns:
-            File information if registered, None otherwise
-        """
-        entry = state.file_registry.get_by_path(Path(path))
-        if entry is None:
-            return None
-
-        return FileInfo(
-            file_id=entry.file_id,
-            path=str(entry.path),
-            path_rel=entry.path_rel,
-            key_hash=entry.key_hash,
-            symbols=entry.metadata.exported_symbols,
-            symbol_info=[
-                SymbolInfo(
-                    name=s.name,
-                    kind=s.kind,
-                    line=s.line,
-                    end_line=s.end_line,
-                    key_hash=hash64_sym_key(
-                        entry.path_rel,
-                        s.name,
-                        s.kind,
-                        s.line,
-                        s.end_line or s.line,
-                    ),
-                )
-                for s in entry.metadata.symbol_info
-            ],
-        )
 
     # -----------------------------------------------------------------------
     # Utility tools
@@ -978,217 +682,27 @@ CRITICAL TOOL ROUTING:
         Returns:
             List of results with key_hash, similarity score, and match info
         """
-        from galaxybrain.keys import hash64
+        from galaxybrain.jit.search import search
 
-        # Priority 0: Check AOT index for direct key lookup (fastest path)
-        # This works if the query is an exact symbol/file name
-        aot = state.aot_index
-        if aot is not None:
-            # try as file key
-            file_key = hash64(f"file:{query}")
-            aot_result = aot.offset_for_key(file_key)
-            if aot_result:
-                return [
-                    {
-                        "type": "file",
-                        "path": query,
-                        "key_hash": file_key,
-                        "score": 1.0,
-                        "source": "aot_index",
-                    }
-                ]
-
-            # try as raw symbol name (common pattern)
-            sym_key = hash64(query)
-            aot_result = aot.offset_for_key(sym_key)
-            if aot_result:
-                return [
-                    {
-                        "type": "symbol",
-                        "key_hash": sym_key,
-                        "score": 1.0,
-                        "source": "aot_index",
-                    }
-                ]
-
-        # Priority 1: JIT semantic search (in-memory vector cache)
-        q_vec = state.embedder.embed(query)
-        results = state.jit_manager.search_vectors(q_vec, top_k)
-
-        # fast path: semantic search found results
-        if results:
-            output = []
-            for key_hash, score in results:
-                file_record = state.jit_manager.tracker.get_file_by_key(
-                    key_hash
-                )
-                if file_record:
-                    output.append(
-                        {
-                            "type": "file",
-                            "path": file_record.path,
-                            "key_hash": key_hash,
-                            "score": score,
-                            "source": "semantic",
-                        }
-                    )
-                else:
-                    output.append(
-                        {
-                            "type": "symbol",
-                            "key_hash": key_hash,
-                            "score": score,
-                            "source": "semantic",
-                        }
-                    )
-            return output
-
-        # slow path: no semantic results, try grep fallback with prioritization
-        # priority: 2. git unstaged 3. git staged 4. git-tracked 5. rg fallback
         root = state.root or Path(os.getcwd())
-
-        # build grep pattern for common symbol definitions
-        escaped_query = re.escape(query)
-        patterns = [
-            # python: def foo, class Foo, foo =
-            rf"(def|class|async def)\s+{escaped_query}\b",
-            rf"^{escaped_query}\s*=",
-            # js/ts: function foo, const foo, export foo
-            rf"(function|const|let|var|class|interface|type|enum)\s+{escaped_query}\b",
-            rf"export\s+(default\s+)?(function|const|class)\s+{escaped_query}\b",
-            # rust: pub fn foo, pub struct Foo
-            rf"pub\s+(fn|struct|enum|trait|type)\s+{escaped_query}\b",
-        ]
-        grep_pattern = "|".join(f"({p})" for p in patterns)
-
-        found_files: list[tuple[Path, str]] = []  # (path, source)
-
-        def run_cmd(cmd: list[str], timeout: int = 5) -> list[str]:
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=root,
-                )
-                return [
-                    f.strip()
-                    for f in result.stdout.strip().split("\n")
-                    if f.strip()
-                ]
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                return []
-
-        # 1. git unstaged files (most relevant - actively being edited)
-        unstaged = run_cmd(["git", "diff", "--name-only"])
-        for f in unstaged:
-            path = root / f
-            if path.exists():
-                try:
-                    content = path.read_text(errors="ignore")
-                    if re.search(grep_pattern, content):
-                        found_files.append((path, "unstaged"))
-                except OSError:
-                    pass
-
-        # 2. git staged files (about to commit)
-        staged = run_cmd(["git", "diff", "--cached", "--name-only"])
-        for f in staged:
-            path = root / f
-            if path.exists() and not any(p == path for p, _ in found_files):
-                try:
-                    content = path.read_text(errors="ignore")
-                    if re.search(grep_pattern, content):
-                        found_files.append((path, "staged"))
-                except OSError:
-                    pass
-
-        # 3. git grep (respects gitignore, searches tracked files)
-        git_grep_hits = run_cmd(
-            ["git", "grep", "-l", "-E", grep_pattern], timeout=10
+        results, _stats = search(
+            query=query,
+            manager=state.jit_manager,
+            root=root,
+            top_k=top_k,
+            fallback_glob=fallback_glob,
         )
-        for f in git_grep_hits:
-            path = root / f
-            if not any(p == path for p, _ in found_files):
-                found_files.append((path, "git_tracked"))
 
-        # 4. rg fallback (if git grep found nothing, try broader search)
-        if not found_files:
-            extensions = fallback_glob or "*.py,*.ts,*.tsx,*.js,*.jsx,*.rs"
-            globs = [f"--glob={ext.strip()}" for ext in extensions.split(",")]
-            rg_hits = run_cmd(
-                [
-                    "rg",
-                    "--files-with-matches",
-                    "--no-heading",
-                    "-e",
-                    grep_pattern,
-                    *globs,
-                    ".",
-                ],
-                timeout=10,
-            )
-            for f in rg_hits:
-                path = root / f
-                found_files.append((path, "rg_fallback"))
-
-        if not found_files:
-            # genuinely not found anywhere
-            return []
-
-        # opportunistic indexing: index the files we found via grep
-        indexed_keys: list[int] = []
-        for file_path, _source in found_files[
-            :20
-        ]:  # cap at 20 to avoid slowdown
-            try:
-                index_result = await state.jit_manager.index_file(file_path)
-                if index_result.key_hash:
-                    indexed_keys.append(index_result.key_hash)
-            except Exception:
-                pass  # skip files that fail to index
-
-        # now search again with freshly indexed content
-        results = state.jit_manager.search_vectors(q_vec, top_k)
-
-        output = []
-        for key_hash, score in results:
-            file_record = state.jit_manager.tracker.get_file_by_key(key_hash)
-            if file_record:
-                output.append(
-                    {
-                        "type": "file",
-                        "path": file_record.path,
-                        "key_hash": key_hash,
-                        "score": score,
-                        "source": "grep_then_indexed",
-                    }
-                )
-            else:
-                output.append(
-                    {
-                        "type": "symbol",
-                        "key_hash": key_hash,
-                        "score": score,
-                        "source": "grep_then_indexed",
-                    }
-                )
-
-        # if still no semantic results but grep found files, return grep hits
-        if not output and found_files:
-            for file_path, source in found_files[:top_k]:
-                output.append(
-                    {
-                        "type": "file",
-                        "path": str(file_path),
-                        "key_hash": None,
-                        "score": 0.0,
-                        "source": source,
-                    }
-                )
-
-        return output
+        return [
+            {
+                "type": r.type,
+                "path": r.path,
+                "key_hash": r.key_hash,
+                "score": r.score,
+                "source": r.source,
+            }
+            for r in results
+        ]
 
     # -----------------------------------------------------------------------
     # Structured Memory tools (ontology-based)

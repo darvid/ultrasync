@@ -1,13 +1,14 @@
-from __future__ import annotations
-
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from galaxybrain.embeddings import EmbeddingProvider
 from galaxybrain.events import EventType, SessionEvent
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.threads import Thread, ThreadManager
 from galaxybrain_index import GlobalIndex
+
+if TYPE_CHECKING:
+    from galaxybrain.embeddings import EmbeddingProvider
 
 
 class QueryRouter:
@@ -20,6 +21,9 @@ class QueryRouter:
         patterns: list[bytes] | None = None,
         model_name: str = "intfloat/e5-base-v2",
     ) -> None:
+        # lazy import to avoid pulling torch at module load time
+        from galaxybrain.embeddings import EmbeddingProvider
+
         self._embedder = EmbeddingProvider(model_name)
         self._threads = ThreadManager(self._embedder)
 
@@ -35,7 +39,7 @@ class QueryRouter:
             self._hs = HyperscanSearch(patterns)
 
     @property
-    def embedder(self) -> EmbeddingProvider:
+    def embedder(self) -> "EmbeddingProvider":
         return self._embedder
 
     @property

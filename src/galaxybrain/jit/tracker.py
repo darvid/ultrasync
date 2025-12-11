@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 import sqlite3
 import time
@@ -292,6 +291,28 @@ class FileTracker:
         ).fetchall()
         return [to_unsigned_64(row["key_hash"]) for row in rows]
 
+    def get_symbol_by_key(self, key_hash: int) -> SymbolRecord | None:
+        signed_key = to_signed_64(key_hash)
+        row = self.conn.execute(
+            "SELECT * FROM symbols WHERE key_hash = ?",
+            (signed_key,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return SymbolRecord(
+            id=row["id"],
+            file_path=row["file_path"],
+            name=row["name"],
+            kind=row["kind"],
+            line_start=row["line_start"],
+            line_end=row["line_end"],
+            blob_offset=row["blob_offset"],
+            blob_length=row["blob_length"],
+            key_hash=to_unsigned_64(row["key_hash"]),
+        )
+
     def upsert_symbol(
         self,
         file_path: Path,
@@ -324,7 +345,13 @@ class FileTracker:
                     key_hash = ?
                 WHERE id = ?
                 """,
-                (line_end, blob_offset, blob_length, signed_key, existing["id"]),
+                (
+                    line_end,
+                    blob_offset,
+                    blob_length,
+                    signed_key,
+                    existing["id"],
+                ),
             )
             self.conn.commit()
             return existing["id"]
@@ -408,6 +435,80 @@ class FileTracker:
             "SELECT COUNT(*) as cnt FROM symbols"
         ).fetchone()
         return row["cnt"]
+
+    def iter_files(self, batch_size: int = 100) -> Iterator[FileRecord]:
+        """Iterate over all indexed files."""
+        offset = 0
+        while True:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM files
+                ORDER BY path
+                LIMIT ? OFFSET ?
+                """,
+                (batch_size, offset),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield FileRecord(
+                    path=row["path"],
+                    mtime=row["mtime"],
+                    size=row["size"],
+                    content_hash=row["content_hash"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                    indexed_at=row["indexed_at"],
+                )
+
+            offset += batch_size
+
+    def iter_all_symbols(
+        self, name_filter: str | None = None, batch_size: int = 100
+    ) -> Iterator[SymbolRecord]:
+        """Iterate over all indexed symbols, optionally filtered by name."""
+        offset = 0
+        while True:
+            if name_filter:
+                rows = self.conn.execute(
+                    """
+                    SELECT * FROM symbols
+                    WHERE name LIKE ?
+                    ORDER BY name, file_path
+                    LIMIT ? OFFSET ?
+                    """,
+                    (f"%{name_filter}%", batch_size, offset),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    """
+                    SELECT * FROM symbols
+                    ORDER BY name, file_path
+                    LIMIT ? OFFSET ?
+                    """,
+                    (batch_size, offset),
+                ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield SymbolRecord(
+                    id=row["id"],
+                    file_path=row["file_path"],
+                    name=row["name"],
+                    kind=row["kind"],
+                    line_start=row["line_start"],
+                    line_end=row["line_end"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                )
+
+            offset += batch_size
 
     def save_checkpoint(
         self,

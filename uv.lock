@@ -249,7 +249,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "galaxybrain-index", editable = "galaxybrain_index" },
+    { name = "galaxybrain-index", editable = "crates/galaxybrain_index" },
     { name = "hyperscan", specifier = ">=0.8.0" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "numpy", specifier = ">=1.24" },
@@ -270,7 +270,7 @@ dev = [
 [[package]]
 name = "galaxybrain-index"
 version = "0.1.0"
-source = { editable = "galaxybrain_index" }
+source = { editable = "crates/galaxybrain_index" }
 
 [[package]]
 name = "h11"

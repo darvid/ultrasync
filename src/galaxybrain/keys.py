@@ -6,7 +6,6 @@ Provides canonical 64-bit hashing and key string constructors for:
 - query keys: q:{mode}:{corpus}:{normalized_query}
 """
 
-from __future__ import annotations
 
 import hashlib
 import struct
