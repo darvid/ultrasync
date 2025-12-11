@@ -975,6 +975,32 @@ def cmd_voyager(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Run the MCP server for IDE/agent integration."""
+    from galaxybrain.mcp_server import run_server
+
+    root = Path(args.directory) if args.directory else None
+    if root and not root.is_dir():
+        print(f"error: {root} is not a directory", file=sys.stderr)
+        return 1
+
+    # only print status for non-stdio transports (stdio uses stdout for JSON-RPC)
+    if args.transport != "stdio":
+        print(
+            f"starting galaxybrain MCP server (transport={args.transport})..."
+        )
+        if root:
+            print(f"root directory: {root}")
+        print(f"model: {args.model}")
+
+    run_server(
+        model_name=args.model,
+        root=root,
+        transport=args.transport,
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="galaxybrain",
@@ -1304,6 +1330,30 @@ def main() -> int:
         help="root directory to explore (default: current dir)",
     )
 
+    # mcp command
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="run MCP server for IDE/agent integration",
+    )
+    mcp_parser.add_argument(
+        "-m",
+        "--model",
+        default="intfloat/e5-base-v2",
+        help="embedding model (default: intfloat/e5-base-v2)",
+    )
+    mcp_parser.add_argument(
+        "-d",
+        "--directory",
+        help="root directory for file registration",
+    )
+    mcp_parser.add_argument(
+        "-t",
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
@@ -1341,6 +1391,8 @@ def main() -> int:
         return cmd_repl(args)
     elif args.command == "voyager":
         return cmd_voyager(args)
+    elif args.command == "mcp":
+        return cmd_mcp(args)
 
     return 1
 

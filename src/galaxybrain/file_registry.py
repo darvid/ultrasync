@@ -22,9 +22,22 @@ class FileEntry:
     embedding_text: str
     vector: np.ndarray
     key_hash: int  # hash64_file_key(path_rel)
+    # pre-computed symbol embeddings: "{name}:{kind}:{line}" -> vector
+    symbol_vectors: dict[str, np.ndarray] | None = None
+
+    @staticmethod
+    def _symbol_key(sym: SymbolInfo) -> str:
+        """Generate a unique key for a symbol within a file."""
+        return f"{sym.name}:{sym.kind}:{sym.line}"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
+        symbol_vectors_serialized = None
+        if self.symbol_vectors:
+            symbol_vectors_serialized = {
+                k: v.tolist() for k, v in self.symbol_vectors.items()
+            }
+
         return {
             "file_id": self.file_id,
             "path": str(self.path),
@@ -52,6 +65,7 @@ class FileEntry:
             "comments": self.metadata.top_comments,
             "embedding_text": self.embedding_text,
             "vector": self.vector.tolist(),
+            "symbol_vectors": symbol_vectors_serialized,
         }
 
     @classmethod
@@ -74,6 +88,11 @@ class FileEntry:
             component_names=data.get("components", []),
             top_comments=data.get("comments", []),
         )
+        symbol_vectors = None
+        if data.get("symbol_vectors"):
+            symbol_vectors = {
+                k: np.array(v) for k, v in data["symbol_vectors"].items()
+            }
         return cls(
             file_id=data["file_id"],
             path=Path(data["path"]),
@@ -82,6 +101,7 @@ class FileEntry:
             embedding_text=data["embedding_text"],
             vector=np.array(data["vector"]),
             key_hash=data["key_hash"],
+            symbol_vectors=symbol_vectors,
         )
 
 
@@ -264,7 +284,11 @@ class FileRegistry:
         extensions: set[str] | None = None,
         exclude_dirs: set[str] | None = None,
     ) -> list[FileEntry]:
-        """Scan and register files with batch embedding (faster)."""
+        """Scan and register files with batch embedding (faster).
+
+        Computes embeddings for both files and all symbols in a single
+        batch call to minimize model invocations.
+        """
         if self._embedder is None:
             raise RuntimeError("EmbeddingProvider not set")
 
@@ -280,12 +304,43 @@ class FileRegistry:
         if not metadata_list:
             return []
 
-        # batch embed all files at once
-        texts = [m.to_embedding_text() for m in metadata_list]
-        vectors = self._embedder.embed_batch(texts)
+        # collect all texts to embed: files first, then all symbols
+        file_texts = [m.to_embedding_text() for m in metadata_list]
 
+        # build symbol texts with their file context
+        # track (metadata_idx, symbol_key) for each symbol text
+        symbol_texts: list[str] = []
+        symbol_map: list[tuple[int, str]] = []  # (metadata_idx, symbol_key)
+
+        for meta_idx, metadata in enumerate(metadata_list):
+            path_rel = self._relative_path(metadata.path)
+            for sym in metadata.symbol_info:
+                sym_text = f"{sym.name} {sym.kind} {path_rel}"
+                symbol_texts.append(sym_text)
+                symbol_map.append((meta_idx, FileEntry._symbol_key(sym)))
+
+        # batch embed everything at once
+        all_texts = file_texts + symbol_texts
+        all_vectors = self._embedder.embed_batch(all_texts)
+
+        # split vectors back into file and symbol groups
+        file_vectors = all_vectors[: len(file_texts)]
+        symbol_vectors_list = all_vectors[len(file_texts) :]
+
+        # group symbol vectors by their file
+        symbol_vectors_by_file: list[dict[str, np.ndarray]] = [
+            {} for _ in metadata_list
+        ]
+        for (meta_idx, sym_key), vec in zip(
+            symbol_map, symbol_vectors_list, strict=True
+        ):
+            symbol_vectors_by_file[meta_idx][sym_key] = vec
+
+        # create entries
         entries: list[FileEntry] = []
-        for metadata, vector in zip(metadata_list, vectors, strict=True):
+        for metadata, file_vec, sym_vecs in zip(
+            metadata_list, file_vectors, symbol_vectors_by_file, strict=True
+        ):
             path_rel = self._relative_path(metadata.path)
             key_hash = hash64_file_key(path_rel)
 
@@ -298,8 +353,9 @@ class FileRegistry:
                 path_rel=path_rel,
                 metadata=metadata,
                 embedding_text=metadata.to_embedding_text(),
-                vector=vector,
+                vector=file_vec,
                 key_hash=key_hash,
+                symbol_vectors=sym_vecs if sym_vecs else None,
             )
 
             self._entries[file_id] = entry
