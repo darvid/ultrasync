@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from galaxybrain.keys import to_signed_64, to_unsigned_64
+
 
 @dataclass
 class FileRecord:
@@ -39,6 +41,22 @@ class Checkpoint:
     last_path: str
     total_files: int
     processed_files: int
+
+
+@dataclass
+class MemoryRecord:
+    id: str
+    task: str | None
+    insights: str  # JSON array
+    context: str  # JSON array
+    symbol_keys: str  # JSON array of key_hashes
+    text: str
+    tags: str  # JSON array
+    blob_offset: int
+    blob_length: int
+    key_hash: int
+    created_at: float
+    updated_at: float | None
 
 
 class FileTracker:
@@ -105,6 +123,26 @@ class FileTracker:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                task TEXT,
+                insights TEXT,
+                context TEXT,
+                symbol_keys TEXT,
+                text TEXT NOT NULL,
+                tags TEXT,
+                blob_offset INTEGER NOT NULL,
+                blob_length INTEGER NOT NULL,
+                key_hash INTEGER UNIQUE NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_task ON memories(task);
+            CREATE INDEX IF NOT EXISTS idx_memories_key_hash
+                ON memories(key_hash);
+            CREATE INDEX IF NOT EXISTS idx_memories_created
+                ON memories(created_at);
         """
         )
         self.conn.commit()
@@ -145,14 +183,16 @@ class FileTracker:
             content_hash=row["content_hash"],
             blob_offset=row["blob_offset"],
             blob_length=row["blob_length"],
-            key_hash=row["key_hash"],
+            key_hash=to_unsigned_64(row["key_hash"]),
             indexed_at=row["indexed_at"],
         )
 
     def get_file_by_key(self, key_hash: int) -> FileRecord | None:
+        # Convert unsigned to signed for query
+        signed_key = to_signed_64(key_hash)
         row = self.conn.execute(
             "SELECT * FROM files WHERE key_hash = ?",
-            (key_hash,),
+            (signed_key,),
         ).fetchone()
 
         if not row:
@@ -165,7 +205,7 @@ class FileTracker:
             content_hash=row["content_hash"],
             blob_offset=row["blob_offset"],
             blob_length=row["blob_length"],
-            key_hash=row["key_hash"],
+            key_hash=to_unsigned_64(row["key_hash"]),
             indexed_at=row["indexed_at"],
         )
 
@@ -179,6 +219,8 @@ class FileTracker:
     ) -> None:
         path_resolved = str(path.resolve())
         stat = path.stat()
+        # Convert unsigned hash to signed for SQLite storage
+        signed_key = to_signed_64(key_hash)
 
         self.conn.execute(
             """
@@ -202,7 +244,7 @@ class FileTracker:
                 content_hash,
                 blob_offset,
                 blob_length,
-                key_hash,
+                signed_key,
                 time.time(),
             ),
         )
@@ -210,6 +252,11 @@ class FileTracker:
 
     def delete_file(self, path: Path) -> bool:
         path_resolved = str(path.resolve())
+        # cascade delete symbols for this file first
+        self.conn.execute(
+            "DELETE FROM symbols WHERE file_path = ?",
+            (path_resolved,),
+        )
         cursor = self.conn.execute(
             "DELETE FROM files WHERE path = ?",
             (path_resolved,),
@@ -233,7 +280,7 @@ class FileTracker:
                 line_end=row["line_end"],
                 blob_offset=row["blob_offset"],
                 blob_length=row["blob_length"],
-                key_hash=row["key_hash"],
+                key_hash=to_unsigned_64(row["key_hash"]),
             )
             for row in rows
         ]
@@ -243,7 +290,7 @@ class FileTracker:
             "SELECT key_hash FROM symbols WHERE file_path = ?",
             (str(path.resolve()),),
         ).fetchall()
-        return [row["key_hash"] for row in rows]
+        return [to_unsigned_64(row["key_hash"]) for row in rows]
 
     def upsert_symbol(
         self,
@@ -257,6 +304,7 @@ class FileTracker:
         key_hash: int,
     ) -> int:
         file_path_resolved = str(file_path.resolve())
+        signed_key = to_signed_64(key_hash)
 
         existing = self.conn.execute(
             """
@@ -276,7 +324,7 @@ class FileTracker:
                     key_hash = ?
                 WHERE id = ?
                 """,
-                (line_end, blob_offset, blob_length, key_hash, existing["id"]),
+                (line_end, blob_offset, blob_length, signed_key, existing["id"]),
             )
             self.conn.commit()
             return existing["id"]
@@ -296,7 +344,7 @@ class FileTracker:
                     line_end,
                     blob_offset,
                     blob_length,
-                    key_hash,
+                    signed_key,
                 ),
             )
             self.conn.commit()
@@ -419,3 +467,215 @@ class FileTracker:
             (key, value),
         )
         self.conn.commit()
+
+    # -----------------------------------------------------------------------
+    # Memory methods
+    # -----------------------------------------------------------------------
+
+    def upsert_memory(
+        self,
+        id: str,
+        task: str | None,
+        insights: str,
+        context: str,
+        symbol_keys: str,
+        text: str,
+        tags: str,
+        blob_offset: int,
+        blob_length: int,
+        key_hash: int,
+    ) -> None:
+        now = time.time()
+        signed_key = to_signed_64(key_hash)
+        self.conn.execute(
+            """
+            INSERT INTO memories (
+                id, task, insights, context, symbol_keys, text, tags,
+                blob_offset, blob_length, key_hash, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            ON CONFLICT(id) DO UPDATE SET
+                task = excluded.task,
+                insights = excluded.insights,
+                context = excluded.context,
+                symbol_keys = excluded.symbol_keys,
+                text = excluded.text,
+                tags = excluded.tags,
+                blob_offset = excluded.blob_offset,
+                blob_length = excluded.blob_length,
+                key_hash = excluded.key_hash,
+                updated_at = ?
+            """,
+            (
+                id,
+                task,
+                insights,
+                context,
+                symbol_keys,
+                text,
+                tags,
+                blob_offset,
+                blob_length,
+                signed_key,
+                now,
+                now,
+            ),
+        )
+        self.conn.commit()
+
+    def get_memory(self, memory_id: str) -> MemoryRecord | None:
+        row = self.conn.execute(
+            "SELECT * FROM memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return MemoryRecord(
+            id=row["id"],
+            task=row["task"],
+            insights=row["insights"],
+            context=row["context"],
+            symbol_keys=row["symbol_keys"],
+            text=row["text"],
+            tags=row["tags"],
+            blob_offset=row["blob_offset"],
+            blob_length=row["blob_length"],
+            key_hash=to_unsigned_64(row["key_hash"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def get_memory_by_key(self, key_hash: int) -> MemoryRecord | None:
+        signed_key = to_signed_64(key_hash)
+        row = self.conn.execute(
+            "SELECT * FROM memories WHERE key_hash = ?",
+            (signed_key,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return MemoryRecord(
+            id=row["id"],
+            task=row["task"],
+            insights=row["insights"],
+            context=row["context"],
+            symbol_keys=row["symbol_keys"],
+            text=row["text"],
+            tags=row["tags"],
+            blob_offset=row["blob_offset"],
+            blob_length=row["blob_length"],
+            key_hash=to_unsigned_64(row["key_hash"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def query_memories(
+        self,
+        task: str | None = None,
+        context_filter: list[str] | None = None,
+        insight_filter: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MemoryRecord]:
+        conditions: list[str] = []
+        params: list[str | int] = []
+
+        if task:
+            conditions.append("task = ?")
+            params.append(task)
+
+        if context_filter:
+            for ctx in context_filter:
+                conditions.append("context LIKE ?")
+                params.append(f'%"{ctx}"%')
+
+        if insight_filter:
+            for ins in insight_filter:
+                conditions.append("insights LIKE ?")
+                params.append(f'%"{ins}"%')
+
+        if tags:
+            for tag in tags:
+                conditions.append("tags LIKE ?")
+                params.append(f'%"{tag}"%')
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+        params.extend([limit, offset])
+
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM memories
+            WHERE {where_clause}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            params,
+        ).fetchall()
+
+        return [
+            MemoryRecord(
+                id=row["id"],
+                task=row["task"],
+                insights=row["insights"],
+                context=row["context"],
+                symbol_keys=row["symbol_keys"],
+                text=row["text"],
+                tags=row["tags"],
+                blob_offset=row["blob_offset"],
+                blob_length=row["blob_length"],
+                key_hash=to_unsigned_64(row["key_hash"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def delete_memory(self, memory_id: str) -> bool:
+        cursor = self.conn.execute(
+            "DELETE FROM memories WHERE id = ?",
+            (memory_id,),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def memory_count(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM memories"
+        ).fetchone()
+        return row["cnt"]
+
+    def iter_memories(self, batch_size: int = 100) -> Iterator[MemoryRecord]:
+        offset = 0
+        while True:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM memories
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (batch_size, offset),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield MemoryRecord(
+                    id=row["id"],
+                    task=row["task"],
+                    insights=row["insights"],
+                    context=row["context"],
+                    symbol_keys=row["symbol_keys"],
+                    text=row["text"],
+                    tags=row["tags"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+
+            offset += batch_size

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from galaxybrain.events import EventType, SessionEvent
 from galaxybrain.file_registry import FileEntry, FileRegistry
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
+from galaxybrain.patterns import PatternSetManager
 from galaxybrain.threads import ThreadManager
 
 if TYPE_CHECKING:
@@ -82,6 +83,42 @@ class PatternMatch(BaseModel):
     pattern_id: int = Field(description="1-indexed pattern ID")
     start: int = Field(description="Start byte offset")
     end: int = Field(description="End byte offset")
+    pattern: str = Field(default="", description="The matched pattern regex")
+
+
+class StructuredMemoryResult(BaseModel):
+    """Result of writing structured memory."""
+
+    id: str = Field(description="Memory ID (e.g., mem:a1b2c3d4)")
+    key_hash: int = Field(description="64-bit hash for lookup")
+    task: str | None = Field(description="Task type classification")
+    insights: list[str] = Field(description="Insight classifications")
+    context: list[str] = Field(description="Context classifications")
+    tags: list[str] = Field(description="Free-form tags")
+    created_at: str = Field(description="ISO timestamp")
+
+
+class MemorySearchResultItem(BaseModel):
+    """A single memory search result."""
+
+    id: str = Field(description="Memory ID")
+    key_hash: int = Field(description="64-bit hash")
+    task: str | None = Field(description="Task type")
+    insights: list[str] = Field(description="Insight types")
+    context: list[str] = Field(description="Context types")
+    text: str = Field(description="Memory content (truncated)")
+    tags: list[str] = Field(description="Tags")
+    score: float = Field(description="Relevance score")
+    created_at: str = Field(description="ISO timestamp")
+
+
+class PatternSetInfo(BaseModel):
+    """Information about a pattern set."""
+
+    id: str = Field(description="Pattern set ID (e.g., pat:security-smells)")
+    description: str = Field(description="Human-readable description")
+    pattern_count: int = Field(description="Number of patterns")
+    tags: list[str] = Field(description="Classification tags")
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +148,7 @@ class ServerState:
         self._jit_manager: JITIndexManager | None = None
         self._aot_index: GlobalIndex | None = None
         self._aot_checked = False
+        self._pattern_manager: PatternSetManager | None = None
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -197,6 +235,13 @@ class ServerState:
         """Get AOT GlobalIndex if available, None otherwise."""
         self._ensure_aot_initialized()
         return self._aot_index
+
+    @property
+    def pattern_manager(self) -> PatternSetManager:
+        """Get the PatternSetManager, initializing if needed."""
+        if self._pattern_manager is None:
+            self._pattern_manager = PatternSetManager(self._jit_data_dir)
+        return self._pattern_manager
 
     @property
     def root(self) -> Path | None:
@@ -1144,6 +1189,346 @@ CRITICAL TOOL ROUTING:
                 )
 
         return output
+
+    # -----------------------------------------------------------------------
+    # Structured Memory tools (ontology-based)
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def memory_write_structured(
+        text: str,
+        task: str | None = None,
+        insights: list[str] | None = None,
+        context: list[str] | None = None,
+        symbol_keys: list[int] | None = None,
+        tags: list[str] | None = None,
+    ) -> StructuredMemoryResult:
+        """Write a structured memory entry to the JIT index.
+
+        Creates a memory entry with optional taxonomy classification.
+        The entry is embedded for semantic search and stored persistently.
+
+        Use automatically when:
+        - User provides reasoning about a design decision
+        - A significant constraint or limitation is identified
+        - An assumption is being made that affects implementation
+        - A tradeoff is being accepted
+        - Context is provided that may be relevant later
+        - Completing a debugging session with findings
+
+        Args:
+            text: The memory content to store
+            task: Task type (e.g., "task:debug", "task:refactor")
+            insights: Insight types (e.g., ["insight:decision"])
+            context: Context types (e.g., ["context:frontend"])
+            symbol_keys: Key hashes of related symbols
+            tags: Free-form tags for filtering
+
+        Returns:
+            Memory entry with id, key_hash, and metadata
+        """
+        entry = state.jit_manager.memory.write(
+            text=text,
+            task=task,
+            insights=insights,
+            context=context,
+            symbol_keys=symbol_keys,
+            tags=tags,
+        )
+
+        return StructuredMemoryResult(
+            id=entry.id,
+            key_hash=entry.key_hash,
+            task=entry.task,
+            insights=entry.insights,
+            context=entry.context,
+            tags=entry.tags,
+            created_at=entry.created_at,
+        )
+
+    @mcp.tool()
+    def memory_search_structured(
+        query: str | None = None,
+        task: str | None = None,
+        context: list[str] | None = None,
+        insights: list[str] | None = None,
+        tags: list[str] | None = None,
+        top_k: int = 10,
+    ) -> list[MemorySearchResultItem]:
+        """Search memories with semantic and structured filters.
+
+        Combines semantic similarity with taxonomy-based filtering
+        for precise memory retrieval.
+
+        Use automatically when:
+        - User begins a new debugging session
+        - User asks about prior decisions or context
+        - User initiates architectural discussion
+        - User references "what we discussed" or "remember when"
+        - Starting work on a file that has associated memories
+
+        Args:
+            query: Natural language search query (optional)
+            task: Filter by task type
+            context: Filter by context types
+            insights: Filter by insight types
+            tags: Filter by tags
+            top_k: Maximum results to return
+
+        Returns:
+            List of matching memories with scores
+        """
+        results = state.jit_manager.memory.search(
+            query=query,
+            task=task,
+            context_filter=context,
+            insight_filter=insights,
+            tags=tags,
+            top_k=top_k,
+        )
+
+        return [
+            MemorySearchResultItem(
+                id=r.entry.id,
+                key_hash=r.entry.key_hash,
+                task=r.entry.task,
+                insights=r.entry.insights,
+                context=r.entry.context,
+                text=r.entry.text[:500],  # truncate for display
+                tags=r.entry.tags,
+                score=r.score,
+                created_at=r.entry.created_at,
+            )
+            for r in results
+        ]
+
+    @mcp.tool()
+    def memory_get(memory_id: str) -> dict[str, Any] | None:
+        """Retrieve a specific memory entry by ID.
+
+        Args:
+            memory_id: The memory ID (e.g., "mem:a1b2c3d4")
+
+        Returns:
+            Memory entry or None if not found
+        """
+        entry = state.jit_manager.memory.get(memory_id)
+        if not entry:
+            return None
+
+        return {
+            "id": entry.id,
+            "key_hash": entry.key_hash,
+            "task": entry.task,
+            "insights": entry.insights,
+            "context": entry.context,
+            "symbol_keys": entry.symbol_keys,
+            "text": entry.text,
+            "tags": entry.tags,
+            "created_at": entry.created_at,
+            "updated_at": entry.updated_at,
+        }
+
+    @mcp.tool()
+    def memory_list_structured(
+        task: str | None = None,
+        context: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List memories with optional taxonomy filters.
+
+        Args:
+            task: Filter by task type
+            context: Filter by context types
+            limit: Maximum entries to return
+            offset: Pagination offset
+
+        Returns:
+            List of memory entries
+        """
+        entries = state.jit_manager.memory.list(
+            task=task,
+            context_filter=context,
+            limit=limit,
+            offset=offset,
+        )
+
+        return [
+            {
+                "id": e.id,
+                "key_hash": e.key_hash,
+                "task": e.task,
+                "insights": e.insights,
+                "context": e.context,
+                "text": e.text[:200],  # truncate for listing
+                "tags": e.tags,
+                "created_at": e.created_at,
+            }
+            for e in entries
+        ]
+
+    # -----------------------------------------------------------------------
+    # PatternSet tools
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def pattern_load(
+        pattern_set_id: str,
+        patterns: list[str],
+        description: str = "",
+        tags: list[str] | None = None,
+    ) -> PatternSetInfo:
+        """Load and compile a pattern set for scanning.
+
+        Compiles regex patterns into a Hyperscan database for
+        high-performance scanning of indexed content.
+
+        Args:
+            pattern_set_id: Unique identifier (e.g., "pat:security")
+            patterns: List of regex patterns
+            description: Human-readable description
+            tags: Classification tags
+
+        Returns:
+            Pattern set metadata with pattern count
+        """
+        ps = state.pattern_manager.load(
+            {
+                "id": pattern_set_id,
+                "patterns": patterns,
+                "description": description,
+                "tags": tags or [],
+            }
+        )
+
+        return PatternSetInfo(
+            id=ps.id,
+            description=ps.description,
+            pattern_count=len(ps.patterns),
+            tags=ps.tags,
+        )
+
+    @mcp.tool()
+    def pattern_scan(
+        pattern_set_id: str,
+        target_key: int,
+    ) -> list[PatternMatch]:
+        """Scan indexed content against a pattern set.
+
+        Retrieves content by key hash and scans against the
+        compiled pattern set.
+
+        Args:
+            pattern_set_id: Pattern set to use
+            target_key: Key hash of content to scan
+
+        Returns:
+            List of pattern matches with offsets
+        """
+        # try file first, then memory
+        file_record = state.jit_manager.tracker.get_file_by_key(target_key)
+        if file_record:
+            matches = state.pattern_manager.scan_indexed_content(
+                pattern_set_id,
+                state.jit_manager.blob,
+                file_record.blob_offset,
+                file_record.blob_length,
+            )
+        else:
+            memory_record = state.jit_manager.tracker.get_memory_by_key(
+                target_key
+            )
+            if not memory_record:
+                raise ValueError(f"Key not found: {target_key}")
+            matches = state.pattern_manager.scan_indexed_content(
+                pattern_set_id,
+                state.jit_manager.blob,
+                memory_record.blob_offset,
+                memory_record.blob_length,
+            )
+
+        return [
+            PatternMatch(
+                pattern_id=m.pattern_id,
+                start=m.start,
+                end=m.end,
+                pattern=m.pattern,
+            )
+            for m in matches
+        ]
+
+    @mcp.tool()
+    def pattern_scan_memories(
+        pattern_set_id: str,
+        task: str | None = None,
+        context: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Scan memories matching filters against a pattern set.
+
+        Args:
+            pattern_set_id: Pattern set to use
+            task: Optional task filter
+            context: Optional context filter
+
+        Returns:
+            Memories with their pattern matches
+        """
+        memories = state.jit_manager.memory.list(
+            task=task,
+            context_filter=context,
+            limit=100,
+        )
+
+        results = []
+        for mem in memories:
+            record = state.jit_manager.tracker.get_memory(mem.id)
+            if not record:
+                continue
+
+            matches = state.pattern_manager.scan_indexed_content(
+                pattern_set_id,
+                state.jit_manager.blob,
+                record.blob_offset,
+                record.blob_length,
+            )
+
+            if matches:
+                results.append(
+                    {
+                        "memory_id": mem.id,
+                        "key_hash": mem.key_hash,
+                        "task": mem.task,
+                        "matches": [
+                            {
+                                "pattern_id": m.pattern_id,
+                                "start": m.start,
+                                "end": m.end,
+                                "pattern": m.pattern,
+                            }
+                            for m in matches
+                        ],
+                    }
+                )
+
+        return results
+
+    @mcp.tool()
+    def pattern_list() -> list[PatternSetInfo]:
+        """List all loaded pattern sets.
+
+        Returns:
+            List of pattern set metadata
+        """
+        return [
+            PatternSetInfo(
+                id=ps["id"],
+                description=ps["description"],
+                pattern_count=ps["pattern_count"],
+                tags=ps["tags"],
+            )
+            for ps in state.pattern_manager.list_all()
+        ]
 
     return mcp
 

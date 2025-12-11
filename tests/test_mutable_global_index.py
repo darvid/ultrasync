@@ -127,7 +127,8 @@ class TestMutableGlobalIndexCompaction:
         for i in range(1, 21):
             idx.insert(i, i * 10, i)
 
-        for i in range(1, 17):
+        # need > 25% tombstones (> capacity/4 = 16), so remove 17
+        for i in range(1, 18):
             idx.remove(i)
 
         assert idx.needs_compaction() is True

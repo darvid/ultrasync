@@ -8,8 +8,9 @@ from pathlib import Path
 
 BLOB_MAGIC = b"GXBLOB\x00\x01"
 BLOB_VERSION = 1
-BLOB_HEADER_SIZE = 32
 BLOB_HEADER_FORMAT = "<8sIII16s"
+# 8 (magic) + 4 (version) + 4 (flags) + 4 (count) + 16 (reserved) = 36
+BLOB_HEADER_SIZE = 36
 
 
 @dataclass

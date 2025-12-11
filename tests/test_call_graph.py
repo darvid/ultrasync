@@ -463,7 +463,7 @@ class TestCallGraphBuilder:
         for file_ir in sample_ir.files:
             file_ir.path = str(temp_project / file_ir.path_rel)
 
-        graph = build_call_graph(sample_ir, temp_project)
+        graph, _stats = build_call_graph(sample_ir, temp_project)
 
         # should have found helper_func
         assert "helper_func" in graph.nodes
@@ -482,7 +482,7 @@ class TestBuildCallGraphConvenience:
         ir = CodebaseIR(root=str(tmp_path), model="test", taxonomy={})
         ir.files = []
 
-        result = build_call_graph(ir, tmp_path)
+        result, _stats = build_call_graph(ir, tmp_path)
         assert isinstance(result, CallGraph)
         assert result.root == str(tmp_path)
 
@@ -491,6 +491,6 @@ class TestBuildCallGraphConvenience:
         ir = CodebaseIR(root=str(tmp_path), model="test", taxonomy={})
         ir.files = []
 
-        result = build_call_graph(ir, tmp_path)
+        result, _stats = build_call_graph(ir, tmp_path)
         assert len(result.nodes) == 0
         assert len(result.edges) == 0

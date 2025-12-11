@@ -53,6 +53,10 @@ class FileScanner:
             return None
 
         ext = path.suffix.lower()
+        supported_exts = self.PYTHON_EXTS | self.TS_JS_EXTS | self.RUST_EXTS
+        if ext not in supported_exts:
+            return None
+
         filename_no_ext = path.stem
 
         metadata = FileMetadata(

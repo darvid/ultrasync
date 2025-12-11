@@ -11,6 +11,9 @@ from galaxybrain.file_scanner import FileScanner
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
+from galaxybrain.jit.memory import (
+    MemoryManager,
+)
 from galaxybrain.jit.tracker import FileTracker
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 
@@ -31,6 +34,7 @@ class IndexProgress:
 class IndexStats:
     file_count: int
     symbol_count: int
+    memory_count: int
     blob_size_bytes: int
     vector_cache_bytes: int
     vector_cache_count: int
@@ -64,6 +68,12 @@ class JITIndexManager:
         self.embed_queue = EmbedQueue(embedding_provider, embed_batch_size)
         self.scanner = FileScanner()
         self.provider = embedding_provider
+        self.memory = MemoryManager(
+            tracker=self.tracker,
+            blob=self.blob,
+            vector_cache=self.vector_cache,
+            embedding_provider=embedding_provider,
+        )
 
         self._started = False
 
@@ -358,6 +368,7 @@ class JITIndexManager:
         return IndexStats(
             file_count=self.tracker.file_count(),
             symbol_count=self.tracker.symbol_count(),
+            memory_count=self.tracker.memory_count(),
             blob_size_bytes=self.blob.size_bytes,
             vector_cache_bytes=self.vector_cache.current_bytes,
             vector_cache_count=self.vector_cache.count,

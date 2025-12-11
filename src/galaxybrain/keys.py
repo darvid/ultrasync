@@ -13,6 +13,24 @@ import struct
 
 DEFAULT_PERSON = b"galaxybrain"
 
+# SQLite INTEGER is signed 64-bit, but our hashes are unsigned
+MAX_SIGNED_64 = 2**63 - 1
+UNSIGNED_64_MOD = 2**64
+
+
+def to_signed_64(val: int) -> int:
+    """Convert unsigned 64-bit to signed for SQLite storage."""
+    if val > MAX_SIGNED_64:
+        return val - UNSIGNED_64_MOD
+    return val
+
+
+def to_unsigned_64(val: int) -> int:
+    """Convert signed 64-bit back to unsigned after SQLite retrieval."""
+    if val < 0:
+        return val + UNSIGNED_64_MOD
+    return val
+
 
 def hash64(key: str, person: bytes = DEFAULT_PERSON) -> int:
     """Compute a 64-bit BLAKE2b hash of a key string.
@@ -81,3 +99,53 @@ def hash64_sym_key(
 def hash64_query_key(mode: str, corpus: str, normalized_query: str) -> int:
     """Hash a query key to 64-bit integer."""
     return hash64(query_key(mode, corpus, normalized_query))
+
+
+# ---------------------------------------------------------------------------
+# Memory ontology key constructors
+# ---------------------------------------------------------------------------
+
+
+def mem_key(uuid8: str) -> str:
+    """Construct a memory key string.
+
+    Format: mem:{uuid8}
+    """
+    return f"mem:{uuid8}"
+
+
+def task_key(slug: str) -> str:
+    """Construct a task type key string.
+
+    Format: task:{slug}
+    """
+    return f"task:{slug}"
+
+
+def insight_key(slug: str) -> str:
+    """Construct an insight type key string.
+
+    Format: insight:{slug}
+    """
+    return f"insight:{slug}"
+
+
+def context_key(slug: str) -> str:
+    """Construct a context type key string.
+
+    Format: context:{slug}
+    """
+    return f"context:{slug}"
+
+
+def pattern_key(slug: str) -> str:
+    """Construct a pattern set key string.
+
+    Format: pat:{slug}
+    """
+    return f"pat:{slug}"
+
+
+def hash64_mem_key(uuid8: str) -> int:
+    """Hash a memory key to 64-bit integer."""
+    return hash64(mem_key(uuid8))
