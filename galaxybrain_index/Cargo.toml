@@ -11,6 +11,9 @@ crate-type = ["cdylib"]
 memmap2 = "0.9"
 pyo3 = { version = "0.27", features = ["extension-module", "py-clone"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.dev]
 opt-level = 1
 

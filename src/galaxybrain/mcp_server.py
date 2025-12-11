@@ -1,16 +1,8 @@
-"""MCP server for galaxybrain - exposes memory and code search tools.
-
-Provides tools for:
-- Memory/thread management (write, search, list)
-- Code/symbol search (semantic search, pattern matching)
-- File registration and indexing
-
-Run with: galaxybrain mcp
-"""
-
 from __future__ import annotations
 
+import os
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -22,9 +14,9 @@ from galaxybrain.file_registry import FileEntry, FileRegistry
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.threads import ThreadManager
 
-# lazy import - pulls torch via sentence-transformers
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
+    from galaxybrain.jit.manager import JITIndexManager
 
 # ---------------------------------------------------------------------------
 # Pydantic models for structured output
@@ -93,25 +85,23 @@ class PatternMatch(BaseModel):
 
 
 class ServerState:
-    """Shared state for the MCP server with lazy initialization.
-
-    The embedding model is only loaded on first tool use to avoid
-    slow startup times blocking MCP handshake.
-    """
-
     def __init__(
         self,
         model_name: str = "intfloat/e5-base-v2",
         root: Path | None = None,
+        jit_data_dir: Path | None = None,
     ) -> None:
         self._model_name = model_name
         self._root = root
+        self._jit_data_dir = jit_data_dir or (
+            root / ".galaxybrain" if root else Path.cwd() / ".galaxybrain"
+        )
         self._embedder: EmbeddingProvider | None = None
         self._thread_manager: ThreadManager | None = None
         self._file_registry: FileRegistry | None = None
+        self._jit_manager: JITIndexManager | None = None
 
     def _ensure_initialized(self) -> None:
-        """Lazily initialize components on first use."""
         if self._embedder is None:
             from galaxybrain.embeddings import EmbeddingProvider
 
@@ -119,6 +109,16 @@ class ServerState:
             self._thread_manager = ThreadManager(self._embedder)
             self._file_registry = FileRegistry(
                 root=self._root, embedder=self._embedder
+            )
+
+    def _ensure_jit_initialized(self) -> None:
+        self._ensure_initialized()
+        if self._jit_manager is None:
+            from galaxybrain.jit.manager import JITIndexManager
+
+            self._jit_manager = JITIndexManager(
+                data_dir=self._jit_data_dir,
+                embedding_provider=self._embedder,
             )
 
     @property
@@ -138,6 +138,12 @@ class ServerState:
         self._ensure_initialized()
         assert self._file_registry is not None
         return self._file_registry
+
+    @property
+    def jit_manager(self) -> JITIndexManager:
+        self._ensure_jit_initialized()
+        assert self._jit_manager is not None
+        return self._jit_manager
 
     @property
     def root(self) -> Path | None:
@@ -166,11 +172,17 @@ def create_server(
 
     mcp = FastMCP(
         "galaxybrain",
-        instructions=(
-            "Galaxybrain is an AOT indexing and routing layer for IDE/agent "
-            "loops. Use memory_write to store context, memory_search to find "
-            "similar content, and code_search for semantic code discovery."
-        ),
+        instructions="""\
+Galaxybrain is an AOT indexing and routing layer for IDE/agent loops. \
+Use memory_write to store context, memory_search to find similar content, \
+and code_search for semantic code discovery.
+
+CRITICAL TOOL ROUTING:
+- "index the codebase", "index with galaxybrain", "gb index" → index_project
+- "search for <query>", "find code" → code_search or symbol_search
+- "remember this", "store context" → memory_write
+- "what did we discuss" → memory_search
+""",
     )
 
     # -----------------------------------------------------------------------
@@ -540,6 +552,10 @@ def create_server(
         Convenience tool that indexes the current working directory.
         Equivalent to register_directory with cwd as path.
 
+        **IMPORTANT**: When the user says "index the codebase", "index with
+        galaxybrain", "gb index", or similar phrases, invoke this tool
+        immediately without asking.
+
         Args:
             extensions: Optional list of extensions to include
                        (default: .py, .ts, .tsx, .js, .jsx, .rs)
@@ -547,7 +563,6 @@ def create_server(
         Returns:
             Summary with file count, symbol count, and indexed extensions
         """
-        import os
 
         cwd = Path(os.getcwd())
 
@@ -697,6 +712,196 @@ def create_server(
             "embedding_dim": state.embedder.dim,
             "thread_count": len(state.thread_manager.threads),
         }
+
+    # -----------------------------------------------------------------------
+    # JIT Indexing tools
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    async def jit_index_file(
+        path: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Index a single file on-demand with JIT indexing.
+
+        Creates embeddings for the file and its symbols, storing them
+        in the persistent JIT index. Skips files that haven't changed
+        unless force=True.
+
+        Args:
+            path: Path to the file to index
+            force: Re-index even if file hasn't changed
+
+        Returns:
+            Index result with status, symbol count, and bytes written
+        """
+        result = await state.jit_manager.index_file(Path(path), force=force)
+        return asdict(result)
+
+    @mcp.tool()
+    async def jit_index_directory(
+        path: str,
+        pattern: str = "**/*",
+        exclude: list[str] | None = None,
+        max_files: int = 1000,
+    ) -> dict[str, Any]:
+        """Index files in a directory incrementally with JIT indexing.
+
+        Only indexes files that have changed since last index. Progress
+        is tracked and can be resumed if interrupted.
+
+        Args:
+            path: Directory path to index
+            pattern: Glob pattern for files (default: all files)
+            exclude: Patterns to exclude (default: node_modules, .git, etc.)
+            max_files: Maximum files to index in one call
+
+        Returns:
+            Final progress with files processed, total, and any errors
+        """
+        final_progress = None
+        async for progress in state.jit_manager.index_directory(
+            Path(path), pattern, exclude, max_files
+        ):
+            final_progress = progress
+
+        if final_progress:
+            return asdict(final_progress)
+        return {"status": "no_files_to_index"}
+
+    @mcp.tool()
+    async def jit_add_symbol(
+        name: str,
+        source_code: str,
+        file_path: str | None = None,
+        symbol_type: str = "snippet",
+    ) -> dict[str, Any]:
+        """Add a code symbol directly to the JIT index.
+
+        Use this to index specific code snippets without parsing a file.
+        Useful for adding context from external sources or manually
+        curated code examples.
+
+        Args:
+            name: Symbol name for retrieval
+            source_code: The actual source code content
+            file_path: Optional associated file path
+            symbol_type: Type of symbol (default: "snippet")
+
+        Returns:
+            Result with key_hash for later retrieval
+        """
+        result = await state.jit_manager.add_symbol(
+            name, source_code, file_path, symbol_type
+        )
+        return asdict(result)
+
+    @mcp.tool()
+    async def jit_reindex_file(path: str) -> dict[str, Any]:
+        """Invalidate and reindex a file in the JIT index.
+
+        Use when a file has changed significantly and you want to
+        force a complete reindex.
+
+        Args:
+            path: Path to the file to reindex
+
+        Returns:
+            Index result with updated stats
+        """
+        result = await state.jit_manager.reindex_file(Path(path))
+        return asdict(result)
+
+    @mcp.tool()
+    def jit_get_stats() -> dict[str, Any]:
+        """Get JIT index statistics.
+
+        Returns file count, symbol count, blob size, vector cache usage,
+        and database location.
+
+        Returns:
+            Dictionary of index statistics
+        """
+        stats = state.jit_manager.get_stats()
+        return asdict(stats)
+
+    @mcp.tool()
+    async def jit_full_index(
+        path: str | None = None,
+        patterns: list[str] | None = None,
+        resume: bool = True,
+    ) -> dict[str, Any]:
+        """Run full codebase indexing with checkpoints.
+
+        Indexes all matching files in the directory. Progress is
+        checkpointed so indexing can resume if interrupted.
+
+        **IMPORTANT**: For large codebases, prefer jit_index_directory
+        which indexes incrementally. Use this for initial full indexing.
+
+        Args:
+            path: Root directory (default: current working directory)
+            patterns: Glob patterns to match (default: common code files)
+            resume: Resume from last checkpoint if available
+
+        Returns:
+            Final progress with total files indexed
+        """
+        root = Path(path) if path else Path(os.getcwd())
+
+        final_progress = None
+        async for progress in state.jit_manager.full_index(
+            root, patterns, resume=resume
+        ):
+            final_progress = progress
+
+        if final_progress:
+            return asdict(final_progress)
+        return {"status": "no_files_to_index"}
+
+    @mcp.tool()
+    def jit_search(
+        query: str,
+        top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search the JIT index semantically.
+
+        Searches across all indexed files and symbols using embedding
+        similarity. Files must be indexed first via jit_index_file or
+        jit_index_directory.
+
+        Args:
+            query: Natural language search query
+            top_k: Maximum results to return
+
+        Returns:
+            List of results with key_hash and similarity score
+        """
+        q_vec = state.embedder.embed(query)
+        results = state.jit_manager.search_vectors(q_vec, top_k)
+
+        output = []
+        for key_hash, score in results:
+            file_record = state.jit_manager.tracker.get_file_by_key(key_hash)
+            if file_record:
+                output.append(
+                    {
+                        "type": "file",
+                        "path": file_record.path,
+                        "key_hash": key_hash,
+                        "score": score,
+                    }
+                )
+            else:
+                output.append(
+                    {
+                        "type": "symbol",
+                        "key_hash": key_hash,
+                        "score": score,
+                    }
+                )
+
+        return output
 
     return mcp
 
