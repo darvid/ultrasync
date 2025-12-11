@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -17,6 +19,9 @@ from galaxybrain.threads import ThreadManager
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
     from galaxybrain.jit.manager import JITIndexManager
+
+    # Rust GlobalIndex type for AOT lookups
+    from galaxybrain_index import GlobalIndex
 
 # ---------------------------------------------------------------------------
 # Pydantic models for structured output
@@ -90,16 +95,22 @@ class ServerState:
         model_name: str = "intfloat/e5-base-v2",
         root: Path | None = None,
         jit_data_dir: Path | None = None,
+        aot_index_path: Path | None = None,
+        aot_blob_path: Path | None = None,
     ) -> None:
         self._model_name = model_name
         self._root = root
         self._jit_data_dir = jit_data_dir or (
             root / ".galaxybrain" if root else Path.cwd() / ".galaxybrain"
         )
+        self._aot_index_path = aot_index_path
+        self._aot_blob_path = aot_blob_path
         self._embedder: EmbeddingProvider | None = None
         self._thread_manager: ThreadManager | None = None
         self._file_registry: FileRegistry | None = None
         self._jit_manager: JITIndexManager | None = None
+        self._aot_index: GlobalIndex | None = None
+        self._aot_checked = False
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -120,6 +131,42 @@ class ServerState:
                 data_dir=self._jit_data_dir,
                 embedding_provider=self._embedder,
             )
+
+    def _ensure_aot_initialized(self) -> None:
+        """Try to load AOT GlobalIndex if it exists."""
+        if self._aot_checked:
+            return
+        self._aot_checked = True
+
+        # check explicit paths first
+        index_path = self._aot_index_path
+        blob_path = self._aot_blob_path
+
+        # fallback to default locations in .galaxybrain
+        if index_path is None:
+            default_index = self._jit_data_dir / "index.dat"
+            if default_index.exists():
+                index_path = default_index
+        if blob_path is None:
+            default_blob = self._jit_data_dir / "aot_blob.dat"
+            if default_blob.exists():
+                blob_path = default_blob
+
+        if (
+            index_path
+            and blob_path
+            and index_path.exists()
+            and blob_path.exists()
+        ):
+            try:
+                from galaxybrain_index import GlobalIndex as RustGlobalIndex
+
+                self._aot_index = RustGlobalIndex(
+                    str(index_path), str(blob_path)
+                )
+            except Exception:
+                # AOT index failed to load, continue without it
+                pass
 
     @property
     def embedder(self) -> EmbeddingProvider:
@@ -144,6 +191,12 @@ class ServerState:
         self._ensure_jit_initialized()
         assert self._jit_manager is not None
         return self._jit_manager
+
+    @property
+    def aot_index(self) -> GlobalIndex | None:
+        """Get AOT GlobalIndex if available, None otherwise."""
+        self._ensure_aot_initialized()
+        return self._aot_index
 
     @property
     def root(self) -> Path | None:
@@ -860,24 +913,198 @@ CRITICAL TOOL ROUTING:
         return {"status": "no_files_to_index"}
 
     @mcp.tool()
-    def jit_search(
+    async def jit_search(
         query: str,
         top_k: int = 10,
+        fallback_glob: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search the JIT index semantically.
+        """Search the JIT index semantically with automatic fallback.
 
         Searches across all indexed files and symbols using embedding
-        similarity. Files must be indexed first via jit_index_file or
-        jit_index_directory.
+        similarity. If no results found, automatically falls back to
+        grep/glob search and indexes discovered files for future queries.
 
         Args:
             query: Natural language search query
             top_k: Maximum results to return
+            fallback_glob: Glob pattern for fallback search (default: common
+                code extensions)
 
         Returns:
-            List of results with key_hash and similarity score
+            List of results with key_hash, similarity score, and match info
         """
+        from galaxybrain.keys import hash64
+
+        # Priority 0: Check AOT index for direct key lookup (fastest path)
+        # This works if the query is an exact symbol/file name
+        aot = state.aot_index
+        if aot is not None:
+            # try as file key
+            file_key = hash64(f"file:{query}")
+            aot_result = aot.offset_for_key(file_key)
+            if aot_result:
+                return [
+                    {
+                        "type": "file",
+                        "path": query,
+                        "key_hash": file_key,
+                        "score": 1.0,
+                        "source": "aot_index",
+                    }
+                ]
+
+            # try as raw symbol name (common pattern)
+            sym_key = hash64(query)
+            aot_result = aot.offset_for_key(sym_key)
+            if aot_result:
+                return [
+                    {
+                        "type": "symbol",
+                        "key_hash": sym_key,
+                        "score": 1.0,
+                        "source": "aot_index",
+                    }
+                ]
+
+        # Priority 1: JIT semantic search (in-memory vector cache)
         q_vec = state.embedder.embed(query)
+        results = state.jit_manager.search_vectors(q_vec, top_k)
+
+        # fast path: semantic search found results
+        if results:
+            output = []
+            for key_hash, score in results:
+                file_record = state.jit_manager.tracker.get_file_by_key(
+                    key_hash
+                )
+                if file_record:
+                    output.append(
+                        {
+                            "type": "file",
+                            "path": file_record.path,
+                            "key_hash": key_hash,
+                            "score": score,
+                            "source": "semantic",
+                        }
+                    )
+                else:
+                    output.append(
+                        {
+                            "type": "symbol",
+                            "key_hash": key_hash,
+                            "score": score,
+                            "source": "semantic",
+                        }
+                    )
+            return output
+
+        # slow path: no semantic results, try grep fallback with prioritization
+        # priority: 2. git unstaged 3. git staged 4. git-tracked 5. rg fallback
+        root = state.root or Path(os.getcwd())
+
+        # build grep pattern for common symbol definitions
+        escaped_query = re.escape(query)
+        patterns = [
+            # python: def foo, class Foo, foo =
+            rf"(def|class|async def)\s+{escaped_query}\b",
+            rf"^{escaped_query}\s*=",
+            # js/ts: function foo, const foo, export foo
+            rf"(function|const|let|var|class|interface|type|enum)\s+{escaped_query}\b",
+            rf"export\s+(default\s+)?(function|const|class)\s+{escaped_query}\b",
+            # rust: pub fn foo, pub struct Foo
+            rf"pub\s+(fn|struct|enum|trait|type)\s+{escaped_query}\b",
+        ]
+        grep_pattern = "|".join(f"({p})" for p in patterns)
+
+        found_files: list[tuple[Path, str]] = []  # (path, source)
+
+        def run_cmd(cmd: list[str], timeout: int = 5) -> list[str]:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=root,
+                )
+                return [
+                    f.strip()
+                    for f in result.stdout.strip().split("\n")
+                    if f.strip()
+                ]
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return []
+
+        # 1. git unstaged files (most relevant - actively being edited)
+        unstaged = run_cmd(["git", "diff", "--name-only"])
+        for f in unstaged:
+            path = root / f
+            if path.exists():
+                try:
+                    content = path.read_text(errors="ignore")
+                    if re.search(grep_pattern, content):
+                        found_files.append((path, "unstaged"))
+                except OSError:
+                    pass
+
+        # 2. git staged files (about to commit)
+        staged = run_cmd(["git", "diff", "--cached", "--name-only"])
+        for f in staged:
+            path = root / f
+            if path.exists() and not any(p == path for p, _ in found_files):
+                try:
+                    content = path.read_text(errors="ignore")
+                    if re.search(grep_pattern, content):
+                        found_files.append((path, "staged"))
+                except OSError:
+                    pass
+
+        # 3. git grep (respects gitignore, searches tracked files)
+        git_grep_hits = run_cmd(
+            ["git", "grep", "-l", "-E", grep_pattern], timeout=10
+        )
+        for f in git_grep_hits:
+            path = root / f
+            if not any(p == path for p, _ in found_files):
+                found_files.append((path, "git_tracked"))
+
+        # 4. rg fallback (if git grep found nothing, try broader search)
+        if not found_files:
+            extensions = fallback_glob or "*.py,*.ts,*.tsx,*.js,*.jsx,*.rs"
+            globs = [f"--glob={ext.strip()}" for ext in extensions.split(",")]
+            rg_hits = run_cmd(
+                [
+                    "rg",
+                    "--files-with-matches",
+                    "--no-heading",
+                    "-e",
+                    grep_pattern,
+                    *globs,
+                    ".",
+                ],
+                timeout=10,
+            )
+            for f in rg_hits:
+                path = root / f
+                found_files.append((path, "rg_fallback"))
+
+        if not found_files:
+            # genuinely not found anywhere
+            return []
+
+        # opportunistic indexing: index the files we found via grep
+        indexed_keys: list[int] = []
+        for file_path, _source in found_files[
+            :20
+        ]:  # cap at 20 to avoid slowdown
+            try:
+                index_result = await state.jit_manager.index_file(file_path)
+                if index_result.key_hash:
+                    indexed_keys.append(index_result.key_hash)
+            except Exception:
+                pass  # skip files that fail to index
+
+        # now search again with freshly indexed content
         results = state.jit_manager.search_vectors(q_vec, top_k)
 
         output = []
@@ -890,6 +1117,7 @@ CRITICAL TOOL ROUTING:
                         "path": file_record.path,
                         "key_hash": key_hash,
                         "score": score,
+                        "source": "grep_then_indexed",
                     }
                 )
             else:
@@ -898,6 +1126,20 @@ CRITICAL TOOL ROUTING:
                         "type": "symbol",
                         "key_hash": key_hash,
                         "score": score,
+                        "source": "grep_then_indexed",
+                    }
+                )
+
+        # if still no semantic results but grep found files, return grep hits
+        if not output and found_files:
+            for file_path, source in found_files[:top_k]:
+                output.append(
+                    {
+                        "type": "file",
+                        "path": str(file_path),
+                        "key_hash": None,
+                        "score": 0.0,
+                        "source": source,
                     }
                 )
 
