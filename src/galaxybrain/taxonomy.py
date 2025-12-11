@@ -410,7 +410,12 @@ class TaxonomyRefiner:
         ir: CodebaseIR,
         taxonomy: dict[str, str],
         entries: list[dict[str, Any]],
-    ) -> tuple[list[str], list, list, dict[str, str]]:
+    ) -> tuple[
+        list[str],
+        list[tuple[str, list[str]]],
+        list[tuple[list[str], str]],
+        dict[str, str],
+    ]:
         """Single refinement iteration - returns changes and new taxonomy."""
         new_taxonomy = dict(taxonomy)
         new_categories: list[str] = []
@@ -480,9 +485,9 @@ class TaxonomyRefiner:
 
         return discovered
 
-    def _extract_patterns(self, symbols: list[str]) -> Counter:
+    def _extract_patterns(self, symbols: list[str]) -> Counter[str]:
         """Extract common patterns from symbol names."""
-        patterns: Counter = Counter()
+        patterns: Counter[str] = Counter()
 
         for sym in symbols:
             parts = sym.lower().split()

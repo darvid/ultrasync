@@ -119,11 +119,12 @@ class FileScanner:
 
         for node in ast.iter_child_nodes(tree):
             # top-level docstring
-            is_expr = isinstance(node, ast.Expr)
-            is_const = is_expr and isinstance(node.value, ast.Constant)
-            if is_const:
-                if isinstance(node.value.value, str):
-                    doc = node.value.value.strip()
+            if isinstance(node, ast.Expr) and isinstance(
+                node.value, ast.Constant
+            ):
+                val = node.value.value
+                if isinstance(val, str):
+                    doc = val.strip()
                     if doc:
                         # first line only
                         metadata.top_comments.append(doc.split("\n")[0])

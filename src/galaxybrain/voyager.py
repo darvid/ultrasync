@@ -7,26 +7,21 @@ Requires: pip install galaxybrain[voyager]
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-try:
-    from textual.app import App, ComposeResult
-    from textual.binding import Binding
-    from textual.containers import Horizontal, Vertical
-    from textual.widgets import (
-        DataTable,
-        Footer,
-        Header,
-        Static,
-        TabbedContent,
-        TabPane,
-        Tree,
-    )
-    from textual.widgets.tree import TreeNode
-
-    TEXTUAL_AVAILABLE = True
-except ImportError:
-    TEXTUAL_AVAILABLE = False
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Static,
+    TabbedContent,
+    TabPane,
+    Tree,
+)
+from textual.widgets.tree import TreeNode
 
 if TYPE_CHECKING:
     from galaxybrain.call_graph import CallGraph
@@ -34,22 +29,18 @@ if TYPE_CHECKING:
 
 
 def check_textual_available() -> None:
-    """Raise ImportError if textual is not installed."""
-    if not TEXTUAL_AVAILABLE:
-        raise ImportError(
-            "textual is required for voyager TUI. "
-            "Install with: pip install galaxybrain[voyager]"
-        )
+    """Raise ImportError if textual is not installed (no-op, import handles it)."""
+    pass
 
 
-class FileExplorerTree(Tree):
+class FileExplorerTree(Tree[Path]):
     """File tree explorer widget."""
 
     def __init__(
         self,
         root_path: Path,
         label: str = "Files",
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         super().__init__(label, **kwargs)
         self.root_path = root_path
@@ -61,7 +52,7 @@ class FileExplorerTree(Tree):
         self._load_directory(self.root, self.root_path)
         self.root.expand()
 
-    def _load_directory(self, node: TreeNode, path: Path) -> None:
+    def _load_directory(self, node: TreeNode[Path], path: Path) -> None:
         """Load directory contents into tree node."""
         path_str = str(path)
         if path_str in self._loaded_dirs:
@@ -108,17 +99,17 @@ class FileExplorerTree(Tree):
         }
         return icons.get(suffix, "📄")
 
-    def on_tree_node_expanded(self, event: Tree.NodeExpanded) -> None:
+    def on_tree_node_expanded(self, event: Tree.NodeExpanded[Path]) -> None:
         """Lazy load directory contents on expand."""
         node = event.node
         if node.data and isinstance(node.data, Path) and node.data.is_dir():
             self._load_directory(node, node.data)
 
 
-class CallGraphTable(DataTable):
+class CallGraphTable(DataTable[str]):
     """Call graph visualization as a data table."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._graph: CallGraph | None = None
         self.cursor_type = "row"
@@ -169,10 +160,10 @@ class CallGraphTable(DataTable):
             )
 
 
-class ClassificationTable(DataTable):
+class ClassificationTable(DataTable[str]):
     """Classification results as a data table."""
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._ir: CodebaseIR | None = None
         self.cursor_type = "row"
@@ -289,7 +280,7 @@ class SymbolDetailsPanel(Static):
             return []
 
 
-class VoyagerApp(App):
+class VoyagerApp(App[None]):
     """Galaxybrain Voyager - Interactive codebase explorer."""
 
     TITLE = "wc99 voyager"
@@ -395,7 +386,7 @@ class VoyagerApp(App):
             table = self.query_one("#classification-table", ClassificationTable)
             table.load_ir(self._ir)
 
-    def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
+    def on_tree_node_selected(self, event: Tree.NodeSelected[Path]) -> None:
         """Handle file selection in tree."""
         node = event.node
         if node.data and isinstance(node.data, Path) and node.data.is_file():

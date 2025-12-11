@@ -8,8 +8,9 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from galaxybrain.call_graph import CallGraph, build_call_graph
+from galaxybrain.call_graph import CallGraph, CallSite, build_call_graph
 from galaxybrain.file_registry import FileRegistry
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.keys import hash64
@@ -22,11 +23,14 @@ from galaxybrain.taxonomy import (
 )
 from galaxybrain_index import ThreadIndex
 
+if TYPE_CHECKING:
+    from galaxybrain.embeddings import EmbeddingProvider
+
 # lazy - pulls torch via sentence-transformers
-_EmbeddingProvider = None
+_EmbeddingProvider: type[EmbeddingProvider] | None = None
 
 
-def _get_embedder_class():
+def _get_embedder_class() -> type[EmbeddingProvider]:
     global _EmbeddingProvider
     if _EmbeddingProvider is None:
         from galaxybrain.embeddings import EmbeddingProvider as EP
@@ -177,30 +181,30 @@ def cmd_query(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_entry(entry: dict) -> None:
+def _print_entry(entry: dict[str, object]) -> None:
     """Print a file entry match."""
-    path = entry["path"]
+    path = str(entry["path"])
     try:
         rel_path = Path(path).relative_to(Path.cwd())
     except ValueError:
-        rel_path = path
+        rel_path = Path(path)
 
     print(f"FILE: {rel_path}")
     print(f"  key: 0x{entry.get('key_hash', 0):016x}")
-    symbols = entry.get("symbols", [])
+    symbols = cast(list[str], entry.get("symbols", []))
     if symbols:
         print(f"  symbols: {', '.join(symbols[:10])}")
         if len(symbols) > 10:
             print(f"           ... and {len(symbols) - 10} more")
 
 
-def _print_symbol(entry: dict, sym: dict) -> None:
+def _print_symbol(entry: dict[str, object], sym: dict[str, object]) -> None:
     """Print a symbol match."""
-    path = entry["path"]
+    path = str(entry["path"])
     try:
         rel_path = Path(path).relative_to(Path.cwd())
     except ValueError:
-        rel_path = path
+        rel_path = Path(path)
 
     print(f"SYMBOL: {sym['kind']} {sym['name']}")
     print(f"  file: {rel_path}:{sym['line']}")
@@ -548,7 +552,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         index_data = json.load(f)
 
     # find matching symbols
-    matches: list[tuple[str, str, dict]] = []  # name, path, info
+    matches: list[tuple[str, str, dict[str, object]]] = []  # name, path, info
     for entry in index_data["entries"]:
         path = entry["path"]
         symbol_info = entry.get("symbol_info", [])
@@ -578,9 +582,9 @@ def cmd_show(args: argparse.Namespace) -> int:
         except ValueError:
             rel_path = Path(path)
 
-        line = info["line"]
-        end_line = info.get("end_line") or line
-        kind = info["kind"]
+        line = int(info["line"])  # pyright: ignore[reportArgumentType]
+        end_line = int(info.get("end_line") or line)  # pyright: ignore[reportArgumentType]
+        kind = str(info["kind"])
 
         print(f"\n{kind} {name}")
         print(f"  {rel_path}:{line}")
@@ -591,16 +595,16 @@ def cmd_show(args: argparse.Namespace) -> int:
             full_path = Path(path)
             if not full_path.is_absolute():
                 full_path = Path(index_data.get("root", ".")) / path
-            lines = full_path.read_text().split("\n")
+            file_lines = full_path.read_text().split("\n")
 
             # show context: 2 lines before, symbol, 2 lines after
             start = max(0, line - 1 - args.context)
-            end = min(len(lines), end_line + args.context)
+            end = min(len(file_lines), end_line + args.context)
 
             for i in range(start, end):
                 line_num = i + 1
                 marker = ">" if line <= line_num <= end_line else " "
-                print(f"{marker} {line_num:4d} | {lines[i]}")
+                print(f"{marker} {line_num:4d} | {file_lines[i]}")
         except (OSError, IndexError) as e:
             print(f"  (could not read source: {e})")
 
@@ -1346,13 +1350,15 @@ class ReplContext:
 
     def __init__(
         self,
-        index_data: dict,
-        embedder,
+        index_data: dict[str, object],
+        embedder: EmbeddingProvider,
         thread_index: ThreadIndex,
         root: Path,
     ) -> None:
         self.index_data = index_data
-        self.entries = index_data["entries"]
+        self.entries: list[dict[str, object]] = cast(
+            list[dict[str, object]], index_data["entries"]
+        )
         self.embedder = embedder
         self.thread_index = thread_index
         self.root = root
@@ -1361,14 +1367,18 @@ class ReplContext:
         self.last_callgraph: CallGraph | None = None  # last call graph
 
         # build key lookup tables
-        self.file_by_hash: dict[int, dict] = {}
-        self.sym_by_hash: dict[int, tuple[dict, dict]] = {}  # (entry, sym)
+        self.file_by_hash: dict[int, dict[str, object]] = {}
+        self.sym_by_hash: dict[
+            int, tuple[dict[str, object], dict[str, object]]
+        ] = {}
         for entry in self.entries:
             if h := entry.get("key_hash"):
-                self.file_by_hash[h] = entry
-            for sym in entry.get("symbol_info", []):
+                self.file_by_hash[int(h)] = entry  # pyright: ignore[reportArgumentType]
+            for sym in cast(
+                list[dict[str, object]], entry.get("symbol_info", [])
+            ):
                 if h := sym.get("key_hash"):
-                    self.sym_by_hash[h] = (entry, sym)
+                    self.sym_by_hash[int(h)] = (entry, sym)  # pyright: ignore[reportArgumentType]
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
@@ -1526,7 +1536,7 @@ def _repl_query(ctx: ReplContext, args: list[str]) -> None:
     for file_id, score in results:
         entry = ctx.entries[file_id]
         path = entry.get("path_rel", entry["path"])
-        symbols = entry.get("symbols", [])[:5]
+        symbols = cast(list[str], entry.get("symbols", []))[:5]
         print(f"[{score:.3f}] {path}")
         if symbols:
             print(f"         {', '.join(symbols)}")
@@ -1564,15 +1574,15 @@ def _repl_symbols(ctx: ReplContext, args: list[str]) -> None:
 
     all_syms: list[tuple[str, str, int, str, int | None]] = []
     for entry in ctx.entries:
-        path = entry.get("path_rel", entry["path"])
-        for sym in entry.get("symbol_info", []):
+        path = str(entry.get("path_rel", entry["path"]))
+        for sym in cast(list[dict[str, object]], entry.get("symbol_info", [])):
             all_syms.append(
                 (
-                    sym["name"],
+                    str(sym["name"]),
                     path,
-                    sym["line"],
-                    sym["kind"],
-                    sym.get("key_hash"),
+                    int(sym["line"]),  # pyright: ignore[reportArgumentType]
+                    str(sym["kind"]),
+                    int(sym["key_hash"]) if sym.get("key_hash") else None,  # pyright: ignore[reportArgumentType]
                 )
             )
 
@@ -1613,7 +1623,7 @@ def _repl_grep(ctx: ReplContext, args: list[str]) -> None:
 
     t0 = time.perf_counter()
     for entry in ctx.entries:
-        path = Path(entry["path"])
+        path = Path(str(entry["path"]))
         if not path.is_absolute():
             path = ctx.root / path
 
@@ -1675,7 +1685,7 @@ def _repl_sgrep(ctx: ReplContext, args: list[str]) -> None:
     match_locs: list[tuple[str, int, str]] = []
 
     for entry in ctx.entries:
-        path = Path(entry["path"])
+        path = Path(str(entry["path"]))
         if not path.is_absolute():
             path = ctx.root / path
 
@@ -1701,7 +1711,7 @@ def _repl_sgrep(ctx: ReplContext, args: list[str]) -> None:
                 line_text = lines[line_num - 1].decode(errors="replace").strip()
                 if line_text:
                     match_texts.append(line_text)
-                    rel_path = entry.get("path_rel", entry["path"])
+                    rel_path = str(entry.get("path_rel", entry["path"]))
                     match_locs.append((rel_path, line_num, line_text))
 
     if not match_texts:
@@ -1744,21 +1754,22 @@ def _repl_show(ctx: ReplContext, args: list[str]) -> None:
     if len(args) > 1 and args[1] == "-c" and len(args) > 2:
         context_lines = int(args[2])
 
-    matches: list[tuple[str, str, dict]] = []
+    matches: list[tuple[str, str, dict[str, object]]] = []
     for entry in ctx.entries:
-        path = entry.get("path_rel", entry["path"])
-        for sym in entry.get("symbol_info", []):
-            if symbol.lower() in sym["name"].lower():
-                matches.append((sym["name"], path, sym))
+        path = str(entry.get("path_rel", entry["path"]))
+        for sym in cast(list[dict[str, object]], entry.get("symbol_info", [])):
+            name = str(sym["name"])
+            if symbol.lower() in name.lower():
+                matches.append((name, path, sym))
 
     if not matches:
         print(f"no symbol matching '{symbol}'")
         return
 
     for name, path, info in matches[:5]:
-        line = info["line"]
-        end_line = info.get("end_line") or line
-        kind = info["kind"]
+        line = int(info["line"])  # pyright: ignore[reportArgumentType]
+        end_line = int(info.get("end_line") or line)  # pyright: ignore[reportArgumentType]
+        kind = str(info["kind"])
 
         print(f"\n{kind} {name}")
         print(f"  {path}:{line}")
@@ -1766,14 +1777,14 @@ def _repl_show(ctx: ReplContext, args: list[str]) -> None:
 
         try:
             full_path = ctx.root / path
-            lines = full_path.read_text().split("\n")
+            file_lines = full_path.read_text().split("\n")
             start = max(0, line - 1 - context_lines)
-            end = min(len(lines), end_line + context_lines)
+            end = min(len(file_lines), end_line + context_lines)
 
             for i in range(start, end):
                 line_num = i + 1
                 marker = ">" if line <= line_num <= end_line else " "
-                print(f"{marker} {line_num:4d} | {lines[i]}")
+                print(f"{marker} {line_num:4d} | {file_lines[i]}")
         except OSError as e:
             print(f"  (could not read: {e})")
 
@@ -2078,7 +2089,7 @@ def _repl_callers(ctx: ReplContext, args: list[str]) -> None:
     print(f"\n  call sites ({node.call_count}):\n")
 
     # group by caller file
-    by_file: dict[str, list] = {}
+    by_file: dict[str, list[CallSite]] = {}
     for cs in node.call_sites:
         by_file.setdefault(cs.caller_path, []).append(cs)
 
@@ -2096,7 +2107,9 @@ def _repl_callers(ctx: ReplContext, args: list[str]) -> None:
 def _repl_stats(ctx: ReplContext) -> None:
     """Show index stats."""
     n_files = len(ctx.entries)
-    n_symbols = sum(len(e.get("symbol_info", [])) for e in ctx.entries)
+    n_symbols = sum(
+        len(cast(list[object], e.get("symbol_info", []))) for e in ctx.entries
+    )
     model = ctx.index_data["model"]
     dim = ctx.embedder.dim
 

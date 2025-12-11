@@ -133,7 +133,8 @@ class ThreadManager:
         if file_id is None:
             file_id = len(thr.file_ids) + 1
             thr.file_ids[path] = file_id
-        idx.upsert(file_id, vec.tolist())
+        if idx is not None:
+            idx.upsert(file_id, vec.tolist())
 
     def get_thread(self, thread_id: int) -> Thread | None:
         return self._threads.get(thread_id)

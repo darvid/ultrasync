@@ -10,7 +10,12 @@ class EmbeddingProvider:
     def __init__(self, model: str = "intfloat/e5-base-v2") -> None:
         self._model_name = model
         self._model = SentenceTransformer(model)
-        self._dim = int(self._model.get_sentence_embedding_dimension())
+        dim = self._model.get_sentence_embedding_dimension()
+        if dim is None:
+            raise ValueError(
+                f"Model {model} does not report embedding dimension"
+            )
+        self._dim = int(dim)
         self._cache: dict[str, np.ndarray] = {}
 
     @property

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Buffer
+
 import hyperscan
 
 
@@ -20,9 +22,7 @@ class HyperscanSearch:
             ids=ids,
         )
 
-    def scan(
-        self, data: bytes | memoryview | object
-    ) -> list[tuple[int, int, int]]:
+    def scan(self, data: Buffer) -> list[tuple[int, int, int]]:
         """Scan data for pattern matches.
 
         Accepts bytes, memoryview, or any object supporting the buffer protocol
@@ -46,7 +46,7 @@ class HyperscanSearch:
             matches.append((id_, start, end))
             return 0
 
-        self._db.scan(data, match_event_handler=on_match)
+        self._db.scan(data, match_event_handler=on_match)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         return matches
 
     def pattern_for_id(self, id_: int) -> bytes:
