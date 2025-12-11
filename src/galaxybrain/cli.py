@@ -977,7 +977,16 @@ def cmd_voyager(args: argparse.Namespace) -> int:
 
 def cmd_mcp(args: argparse.Namespace) -> int:
     """Run the MCP server for IDE/agent integration."""
+    import logging
+
     from galaxybrain.mcp_server import run_server
+
+    # configure logging to stderr so it doesn't interfere with stdio JSON-RPC
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        stream=sys.stderr,
+    )
 
     root = Path(args.directory) if args.directory else None
     if root and not root.is_dir():

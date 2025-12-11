@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from galaxybrain.file_scanner import FileScanner
+
+logger = logging.getLogger(__name__)
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
@@ -273,6 +276,8 @@ class JITIndexManager:
         processed = 0
         errors: list[str] = []
 
+        logger.info("indexing %d files in %s", total, path)
+
         semaphore = asyncio.Semaphore(parallel)
 
         async def index_with_sem(f: Path) -> IndexResult:
@@ -296,13 +301,21 @@ class JITIndexManager:
                 ):
                     errors.append(f"{f}: {result.reason}")
 
-            yield IndexProgress(
+            progress = IndexProgress(
                 processed=processed,
                 total=total,
                 current_file=str(batch[-1]) if batch else "",
                 bytes_written=self.blob.size_bytes,
                 errors=errors[-10:],
             )
+            logger.info(
+                "progress: %d/%d (%.1f%%) - %s",
+                processed,
+                total,
+                100 * processed / total if total else 0,
+                progress.current_file,
+            )
+            yield progress
 
     async def full_index(
         self,
@@ -338,6 +351,8 @@ class JITIndexManager:
         all_files.sort()
         total = len(all_files)
 
+        logger.info("full index: found %d files in %s", total, root)
+
         start_idx = 0
         if resume:
             checkpoint = self.tracker.get_latest_checkpoint()
@@ -353,6 +368,13 @@ class JITIndexManager:
 
             if (i + 1) % checkpoint_interval == 0:
                 self.tracker.save_checkpoint(i + 1, total, str(file_path))
+                logger.info(
+                    "checkpoint: %d/%d (%.1f%%) - %s",
+                    i + 1,
+                    total,
+                    100 * (i + 1) / total if total else 0,
+                    file_path.name,
+                )
 
             yield IndexProgress(
                 processed=i + 1,
