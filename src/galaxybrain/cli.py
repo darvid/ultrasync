@@ -1170,6 +1170,132 @@ def cmd_warm(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_patterns(args: argparse.Namespace) -> int:
+    """PatternSet management commands."""
+    from galaxybrain.patterns import PatternSetManager
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+
+    subcmd = args.patterns_command
+
+    if subcmd == "list":
+        patterns = manager.list_all()
+        if not patterns:
+            print("no pattern sets loaded")
+            return 0
+
+        print(f"{'ID':<25} {'Patterns':>8}  Description")
+        print("-" * 60)
+        for ps in patterns:
+            desc = ps['description']
+            print(f"{ps['id']:<25} {ps['pattern_count']:>8}  {desc}")
+        return 0
+
+    elif subcmd == "load":
+        patterns_path = Path(args.file)
+        if not patterns_path.exists():
+            print(f"error: file not found: {patterns_path}", file=sys.stderr)
+            return 1
+
+        patterns = [
+            line.strip()
+            for line in patterns_path.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+
+        if not patterns:
+            print("error: no patterns found in file", file=sys.stderr)
+            return 1
+
+        pattern_id = args.name or f"pat:{patterns_path.stem}"
+        desc = args.description or f"Loaded from {patterns_path.name}"
+        ps = manager.load({
+            "id": pattern_id,
+            "patterns": patterns,
+            "description": desc,
+            "tags": args.tags.split(",") if args.tags else [],
+        })
+
+        print(f"loaded pattern set: {ps.id}")
+        print(f"  patterns: {len(ps.patterns)}")
+        print(f"  description: {ps.description}")
+        return 0
+
+    elif subcmd == "scan":
+        pattern_id = args.pattern_set
+
+        ps = manager.get(pattern_id)
+        if not ps:
+            print(
+                f"error: pattern set not found: {pattern_id}", file=sys.stderr
+            )
+            print("available pattern sets:")
+            for p in manager.list_all():
+                print(f"  - {p['id']}")
+            return 1
+
+        if not data_dir.exists():
+            print(f"error: no index found at {data_dir}", file=sys.stderr)
+            return 1
+
+        tracker_db = data_dir / "tracker.db"
+        blob_file = data_dir / "blob.dat"
+
+        if not tracker_db.exists() or not blob_file.exists():
+            print("error: index not initialized", file=sys.stderr)
+            return 1
+
+        from galaxybrain.jit.blob import BlobAppender
+        from galaxybrain.jit.tracker import FileTracker
+
+        tracker = FileTracker(tracker_db)
+        blob = BlobAppender(blob_file)
+
+        total_matches = 0
+        files_with_matches = 0
+
+        for file_record in tracker.iter_files():
+            data = blob.read(file_record.blob_offset, file_record.blob_length)
+            matches = manager.scan(pattern_id, data)
+
+            if matches:
+                files_with_matches += 1
+                total_matches += len(matches)
+
+                if args.verbose:
+                    print(f"\n{file_record.path}")
+                    for m in matches:
+                        print(f"  [{m.start}:{m.end}] {m.pattern}")
+                else:
+                    print(f"{file_record.path}: {len(matches)} matches")
+
+        print(f"\n{total_matches} matches in {files_with_matches} files")
+        return 0
+
+    elif subcmd == "show":
+        pattern_id = args.pattern_set
+        ps = manager.get(pattern_id)
+        if not ps:
+            print(
+                f"error: pattern set not found: {pattern_id}", file=sys.stderr
+            )
+            return 1
+
+        print(f"ID:          {ps.id}")
+        print(f"Description: {ps.description}")
+        print(f"Tags:        {', '.join(ps.tags) if ps.tags else 'none'}")
+        print(f"\nPatterns ({len(ps.patterns)}):")
+        for i, p in enumerate(ps.patterns, 1):
+            print(f"  {i:2}. {p}")
+        return 0
+
+    print(f"unknown subcommand: {subcmd}", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="galaxybrain",
@@ -1338,6 +1464,76 @@ def main() -> int:
         "--timing",
         action="store_true",
         help="show timing breakdown",
+    )
+
+    # patterns command (with subcommands)
+    patterns_parser = subparsers.add_parser(
+        "patterns",
+        help="manage and scan with PatternSets",
+    )
+    patterns_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    patterns_subparsers = patterns_parser.add_subparsers(
+        dest="patterns_command",
+        required=True,
+    )
+
+    # patterns list
+    patterns_subparsers.add_parser(
+        "list",
+        help="list available pattern sets",
+    )
+
+    # patterns show
+    patterns_show_parser = patterns_subparsers.add_parser(
+        "show",
+        help="show patterns in a pattern set",
+    )
+    patterns_show_parser.add_argument(
+        "pattern_set",
+        help="pattern set ID (e.g., pat:security-smells)",
+    )
+
+    # patterns load
+    patterns_load_parser = patterns_subparsers.add_parser(
+        "load",
+        help="load patterns from a file",
+    )
+    patterns_load_parser.add_argument(
+        "file",
+        help="file containing patterns (one per line)",
+    )
+    patterns_load_parser.add_argument(
+        "-n",
+        "--name",
+        help="pattern set name (default: pat:<filename>)",
+    )
+    patterns_load_parser.add_argument(
+        "--description",
+        help="pattern set description",
+    )
+    patterns_load_parser.add_argument(
+        "--tags",
+        help="comma-separated tags",
+    )
+
+    # patterns scan
+    patterns_scan_parser = patterns_subparsers.add_parser(
+        "scan",
+        help="scan indexed files with a pattern set",
+    )
+    patterns_scan_parser.add_argument(
+        "pattern_set",
+        help="pattern set ID (e.g., pat:security-smells)",
+    )
+    patterns_scan_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="show match details",
     )
 
     # show command
@@ -1658,6 +1854,8 @@ def main() -> int:
         return cmd_stats(args)
     elif args.command == "warm":
         return cmd_warm(args)
+    elif args.command == "patterns":
+        return cmd_patterns(args)
 
     return 1
 
