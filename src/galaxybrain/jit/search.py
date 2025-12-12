@@ -34,6 +34,7 @@ class SearchResult:
         str  # "aot_index", "semantic", "grep_then_indexed", "unstaged", etc.
     )
     path: str | None = None
+    name: str | None = None  # symbol name (function, class, etc.)
 
 
 @dataclass
@@ -100,9 +101,17 @@ def search(
         if aot_result:
             logger.info("search: AOT hit on symbol key 0x%016x", sym_key)
             stats.aot_hit = True
+            sym_path = None
+            sym_name = None
+            sym_record = manager.tracker.get_symbol_by_key(sym_key)
+            if sym_record:
+                sym_path = sym_record.file_path
+                sym_name = sym_record.name
             return [
                 SearchResult(
                     type="symbol",
+                    path=sym_path,
+                    name=sym_name,
                     key_hash=sym_key,
                     score=1.0,
                     source="aot_index",
@@ -131,14 +140,21 @@ def search(
             output = []
             for key_hash, score, item_type in results:
                 path = None
+                name = None
                 if item_type == "file":
                     file_record = manager.tracker.get_file_by_key(key_hash)
                     if file_record:
                         path = file_record.path
+                elif item_type == "symbol":
+                    sym_record = manager.tracker.get_symbol_by_key(key_hash)
+                    if sym_record:
+                        path = sym_record.file_path
+                        name = sym_record.name
                 output.append(
                     SearchResult(
                         type=item_type,
                         path=path,
+                        name=name,
                         key_hash=key_hash,
                         score=score,
                         source="semantic",
@@ -193,14 +209,21 @@ def search(
             output = []
             for key_hash, score, item_type in results:
                 path = None
+                name = None
                 if item_type == "file":
                     file_record = manager.tracker.get_file_by_key(key_hash)
                     if file_record:
                         path = file_record.path
+                elif item_type == "symbol":
+                    sym_record = manager.tracker.get_symbol_by_key(key_hash)
+                    if sym_record:
+                        path = sym_record.file_path
+                        name = sym_record.name
                 output.append(
                     SearchResult(
                         type=item_type,
                         path=path,
+                        name=name,
                         key_hash=key_hash,
                         score=score,
                         source="grep_then_indexed",

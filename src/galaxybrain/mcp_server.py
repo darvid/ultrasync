@@ -2,7 +2,7 @@ import os
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -260,7 +260,8 @@ def create_server(
     """Create and configure the galaxybrain MCP server.
 
     Args:
-        model_name: Embedding model to use (default: sentence-transformers/all-MiniLM-L6-v2)
+        model_name: Embedding model to use
+            (default: sentence-transformers/all-MiniLM-L6-v2)
         root: Repository root path for file registration
 
     Returns:
@@ -268,11 +269,42 @@ def create_server(
     """
     state = ServerState(model_name=model_name, root=root)
 
+    # eagerly init jit_manager ONLY if index already exists
+    # this makes first search fast (AOT ready) without creating files on startup
+    if state._jit_data_dir.exists():
+        state._ensure_jit_initialized()
+
     mcp = FastMCP(
         "galaxybrain",
         instructions="""\
-Galaxybrain provides semantic indexing and search for codebases. For indexing \
-large codebases, use jit_full_index which persists to disk and shows progress.
+Galaxybrain provides semantic indexing and search for codebases.
+
+## Indexing
+For large codebases, use jit_full_index to persist and show progress.
+
+## Memory - Automatic Usage
+
+**Write memories automatically when:**
+- Design decision made → insights=["insight:decision"]
+- Constraint identified → insights=["insight:constraint"]
+- Tradeoff accepted → insights=["insight:tradeoff"]
+- Pitfall discovered → insights=["insight:pitfall"]
+- Debug session done → task="task:debug" with findings
+- Important context shared for later reference
+
+**Search memories automatically when:**
+- Starting debug session → task="task:debug"
+- User asks about prior decisions → insights=["insight:decision"]
+- User says "remember when" / "what we discussed"
+- Starting work on previously-touched file/area
+
+**Taxonomy:**
+- Tasks: task:debug, task:implement_feature, task:refactor, \
+task:architect, task:bugfix, task:optimize, task:research
+- Insights: insight:decision, insight:constraint, insight:pitfall, \
+insight:tradeoff, insight:assumption, insight:todo
+- Context: context:frontend, context:backend, context:auth, \
+context:api, context:data, context:infra
 """,
     )
 
@@ -669,8 +701,9 @@ large codebases, use jit_full_index which persists to disk and shows progress.
     async def jit_search(
         query: str,
         top_k: int = 10,
+        result_type: Literal["all", "file", "symbol"] = "all",
         fallback_glob: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         """Search the JIT index semantically with automatic fallback.
 
         Searches across all indexed files and symbols using embedding
@@ -680,33 +713,48 @@ large codebases, use jit_full_index which persists to disk and shows progress.
         Args:
             query: Natural language search query
             top_k: Maximum results to return
+            result_type: Filter results - "all", "file", or "symbol"
             fallback_glob: Glob pattern for fallback search (default: common
                 code extensions)
 
         Returns:
-            List of results with key_hash, similarity score, and match info
+            Results with timing info and match details
         """
+        import time
+
         from galaxybrain.jit.search import search
 
         root = state.root or Path(os.getcwd())
-        results, _stats = search(
+        start = time.perf_counter()
+        results, stats = search(
             query=query,
             manager=state.jit_manager,
             root=root,
             top_k=top_k,
             fallback_glob=fallback_glob,
+            result_type=result_type,
         )
+        elapsed_ms = (time.perf_counter() - start) * 1000
 
-        return [
-            {
-                "type": r.type,
-                "path": r.path,
-                "key_hash": r.key_hash,
-                "score": r.score,
-                "source": r.source,
-            }
-            for r in results
-        ]
+        if stats.grep_sources:
+            primary_source = stats.grep_sources[0]
+        else:
+            primary_source = "semantic"
+        return {
+            "elapsed_ms": round(elapsed_ms, 2),
+            "source": primary_source,
+            "results": [
+                {
+                    "type": r.type,
+                    "path": r.path,
+                    "name": r.name,
+                    "key_hash": r.key_hash,
+                    "score": r.score,
+                    "source": r.source,
+                }
+                for r in results
+            ],
+        }
 
     # -----------------------------------------------------------------------
     # Structured Memory tools (ontology-based)
