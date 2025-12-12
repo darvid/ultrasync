@@ -279,6 +279,25 @@ def create_server(
         instructions="""\
 Galaxybrain provides semantic indexing and search for codebases.
 
+## Semantic Search - Prefer jit_search
+
+**Use jit_search FIRST for natural language queries like:**
+- "find the login button component"
+- "where is user authentication handled"
+- "hide the demo button on showings page"
+- "update the payment form validation"
+
+**jit_search advantages over grep/glob:**
+- Understands intent, not just literal strings
+- Single call vs multiple grep + glob + read calls
+- Returns ranked results with file paths and symbol names
+- Use result_type="symbol" to find functions/classes directly
+
+**Only fall back to grep/glob when:**
+- Searching for exact literal strings or regex patterns
+- jit_search returns no relevant results
+- Index doesn't exist yet (run jit_full_index first)
+
 ## Indexing
 For large codebases, use jit_full_index to persist and show progress.
 
