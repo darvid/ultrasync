@@ -1115,6 +1115,26 @@ def cmd_stats(args: argparse.Namespace) -> int:
     print(f"  files:      {embedded_files}/{file_count} ({file_pct:.1f}%)")
     print(f"  symbols:    {embedded_symbols}/{symbol_count} ({sym_pct:.1f}%)")
 
+    # warnings for incomplete index
+    warnings = []
+    total_expected = file_count + symbol_count
+    if index_size == 0:
+        warnings.append("AOT index not built - run 'galaxybrain index' first")
+    elif aot_count < total_expected and total_expected > 0:
+        missing = total_expected - aot_count
+        warnings.append(f"AOT index incomplete: {missing} entries missing")
+
+    if file_count > 0 and embedded_files < file_count:
+        missing = file_count - embedded_files
+        warnings.append(
+            f"vector embeddings incomplete: {missing} files not embedded"
+        )
+
+    if warnings:
+        print("\n⚠️  Warnings:")
+        for w in warnings:
+            print(f"  - {w}")
+
     return 0
 
 

@@ -51,6 +51,9 @@ class IndexStats:
     vector_store_bytes: int = 0
     embedded_file_count: int = 0
     embedded_symbol_count: int = 0
+    # completeness
+    aot_complete: bool = False
+    vector_complete: bool = False
 
 
 @dataclass
@@ -660,9 +663,22 @@ class JITIndexManager:
             aot_capacity = self.aot_index.capacity()
             aot_size = self.aot_index.size_bytes()
 
+        file_count = self.tracker.file_count()
+        symbol_count = self.tracker.symbol_count()
+        embedded_files = self.tracker.embedded_file_count()
+        embedded_symbols = self.tracker.embedded_symbol_count()
+
+        # AOT is complete if all files+symbols have entries
+        # (aot stores both file keys and symbol keys)
+        total_expected = file_count + symbol_count
+        aot_complete = aot_count >= total_expected and total_expected > 0
+
+        # vectors are complete if all files have embeddings
+        vector_complete = embedded_files >= file_count and file_count > 0
+
         return IndexStats(
-            file_count=self.tracker.file_count(),
-            symbol_count=self.tracker.symbol_count(),
+            file_count=file_count,
+            symbol_count=symbol_count,
             memory_count=self.tracker.memory_count(),
             blob_size_bytes=self.blob.size_bytes,
             vector_cache_bytes=self.vector_cache.current_bytes,
@@ -672,8 +688,10 @@ class JITIndexManager:
             aot_index_capacity=aot_capacity,
             aot_index_size_bytes=aot_size,
             vector_store_bytes=self.vector_store.size_bytes,
-            embedded_file_count=self.tracker.embedded_file_count(),
-            embedded_symbol_count=self.tracker.embedded_symbol_count(),
+            embedded_file_count=embedded_files,
+            embedded_symbol_count=embedded_symbols,
+            aot_complete=aot_complete,
+            vector_complete=vector_complete,
         )
 
     def get_vector(self, key_hash: int):
