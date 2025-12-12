@@ -659,6 +659,72 @@ def cmd_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_get_source(args: argparse.Namespace) -> int:
+    """Get source content by key hash from the blob store."""
+    from galaxybrain.jit.blob import BlobAppender
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    tracker = FileTracker(data_dir / "tracker.db")
+    blob = BlobAppender(data_dir / "blob.dat")
+
+    key_hash = args.key_hash
+
+    # try file first
+    file_record = tracker.get_file_by_key(key_hash)
+    if file_record:
+        content = blob.read(file_record.blob_offset, file_record.blob_length)
+        source = content.decode("utf-8", errors="replace")
+
+        print("type: file")
+        print(f"path: {file_record.path}")
+        print(f"key:  0x{key_hash:016x}")
+        print("-" * 60)
+        print(source)
+        tracker.close()
+        return 0
+
+    # try symbol
+    sym_record = tracker.get_symbol_by_key(key_hash)
+    if sym_record:
+        content = blob.read(sym_record.blob_offset, sym_record.blob_length)
+        source = content.decode("utf-8", errors="replace")
+
+        print(f"type: symbol ({sym_record.kind})")
+        print(f"name: {sym_record.name}")
+        print(f"path: {sym_record.file_path}")
+        print(f"lines: {sym_record.line_start}-{sym_record.line_end or '?'}")
+        print(f"key:  0x{key_hash:016x}")
+        print("-" * 60)
+        print(source)
+        tracker.close()
+        return 0
+
+    # try memory
+    mem_record = tracker.get_memory_by_key(key_hash)
+    if mem_record:
+        content = blob.read(mem_record.blob_offset, mem_record.blob_length)
+        source = content.decode("utf-8", errors="replace")
+
+        print("type: memory")
+        print(f"id:   {mem_record.id}")
+        print(f"key:  0x{key_hash:016x}")
+        print("-" * 60)
+        print(source)
+        tracker.close()
+        return 0
+
+    tracker.close()
+    print(f"error: key_hash {key_hash} (0x{key_hash:016x}) not found")
+    return 1
+
+
 def cmd_classify(args: argparse.Namespace) -> int:
     """Classify codebase files and symbols into taxonomy categories."""
 
@@ -1597,6 +1663,22 @@ def main() -> int:
         help="lines of context (default: 2)",
     )
 
+    # get-source command
+    get_source_parser = subparsers.add_parser(
+        "get-source",
+        help="get source content by key hash from blob store",
+    )
+    get_source_parser.add_argument(
+        "key_hash",
+        type=lambda x: int(x, 0),  # accepts decimal, hex (0x...), octal
+        help="key hash (decimal or hex with 0x prefix)",
+    )
+    get_source_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+
     # classify command
     classify_parser = subparsers.add_parser(
         "classify",
@@ -1872,6 +1954,8 @@ def main() -> int:
         return cmd_semantic_grep(args)
     elif args.command == "show":
         return cmd_show(args)
+    elif args.command == "get-source":
+        return cmd_get_source(args)
     elif args.command == "classify":
         return cmd_classify(args)
     elif args.command == "callgraph":

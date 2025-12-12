@@ -305,6 +305,17 @@ task:architect, task:bugfix, task:optimize, task:research
 insight:tradeoff, insight:assumption, insight:todo
 - Context: context:frontend, context:backend, context:auth, \
 context:api, context:data, context:infra
+
+## Index Freshness
+
+**Re-index after modifying code:**
+- After editing a file with indexed symbols → jit_reindex_file(path)
+- After adding new functions/classes → jit_index_file(path)
+- Stale index = search results may reference old code
+
+**Use jit_get_source to verify:**
+- Get actual indexed source by key_hash from search results
+- Compare with current file to detect staleness
 """,
     )
 
@@ -755,6 +766,64 @@ context:api, context:data, context:infra
                 for r in results
             ],
         }
+
+    @mcp.tool()
+    def jit_get_source(key_hash: int) -> dict[str, Any]:
+        """Get source content for a file, symbol, or memory by key hash.
+
+        Retrieves the actual source code or content stored in the blob
+        for any indexed item. Use key_hash values from jit_search results.
+
+        Args:
+            key_hash: The key hash from search results
+
+        Returns:
+            Content with type, path, name, lines, and source code
+        """
+        # try file first
+        file_record = state.jit_manager.tracker.get_file_by_key(key_hash)
+        if file_record:
+            content = state.jit_manager.blob.read(
+                file_record.blob_offset, file_record.blob_length
+            )
+            return {
+                "type": "file",
+                "path": file_record.path,
+                "key_hash": key_hash,
+                "source": content.decode("utf-8", errors="replace"),
+            }
+
+        # try symbol
+        sym_record = state.jit_manager.tracker.get_symbol_by_key(key_hash)
+        if sym_record:
+            content = state.jit_manager.blob.read(
+                sym_record.blob_offset, sym_record.blob_length
+            )
+            return {
+                "type": "symbol",
+                "path": sym_record.file_path,
+                "name": sym_record.name,
+                "kind": sym_record.kind,
+                "line_start": sym_record.line_start,
+                "line_end": sym_record.line_end,
+                "key_hash": key_hash,
+                "source": content.decode("utf-8", errors="replace"),
+            }
+
+        # try memory
+        memory_record = state.jit_manager.tracker.get_memory_by_key(key_hash)
+        if memory_record:
+            content = state.jit_manager.blob.read(
+                memory_record.blob_offset, memory_record.blob_length
+            )
+            return {
+                "type": "memory",
+                "id": memory_record.id,
+                "key_hash": key_hash,
+                "source": content.decode("utf-8", errors="replace"),
+            }
+
+        return {"error": f"key_hash {key_hash} not found"}
 
     # -----------------------------------------------------------------------
     # Structured Memory tools (ontology-based)
