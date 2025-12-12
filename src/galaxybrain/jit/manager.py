@@ -433,6 +433,7 @@ class JITIndexManager:
                 [t for t, _ in texts_to_embed]
             )
 
+        file_vec_entry = self.vector_store.append(embeddings[0])
         self.vector_cache.put(file_key, embeddings[0])
 
         self.tracker.upsert_file(
@@ -441,6 +442,9 @@ class JITIndexManager:
             blob_offset=blob_entry.offset,
             blob_length=blob_entry.length,
             key_hash=file_key,
+        )
+        self.tracker.update_file_vector(
+            file_key, file_vec_entry.offset, file_vec_entry.length
         )
 
         # insert file into AOT index for sub-ms lookups
@@ -456,6 +460,8 @@ class JITIndexManager:
             sym_key = hash64_sym_key(
                 path_rel, sym.name, sym.kind, sym.line, sym.end_line or sym.line
             )
+
+            sym_vec_entry = self.vector_store.append(sym_embedding)
             self.vector_cache.put(sym_key, sym_embedding)
 
             sym_bytes = self._extract_symbol_bytes(
@@ -472,6 +478,9 @@ class JITIndexManager:
                     blob_offset=sym_blob.offset,
                     blob_length=sym_blob.length,
                     key_hash=sym_key,
+                )
+                self.tracker.update_symbol_vector(
+                    sym_key, sym_vec_entry.offset, sym_vec_entry.length
                 )
 
                 # insert symbol into AOT index
@@ -610,6 +619,156 @@ class JITIndexManager:
             )
             yield progress
 
+    async def _full_index_with_embed(
+        self,
+        files: list[Path],
+        start_idx: int,
+        total: int,
+        checkpoint_interval: int,
+        errors: list[str],
+    ) -> None:
+        """Batch embed all files for better performance."""
+        import sys
+
+        embed_batch_size = 64
+
+        print("phase 1: scanning files...", file=sys.stderr, flush=True)
+        file_data: list[tuple[Path, str, int, list[tuple[str, int]]]] = []
+
+        for i, file_path in enumerate(files):
+            if not self.tracker.needs_index(file_path):
+                continue
+
+            metadata = self.scanner.scan(file_path)
+            if not metadata:
+                continue
+
+            try:
+                content = file_path.read_bytes()
+            except (OSError, PermissionError) as e:
+                errors.append(f"{file_path}: {e}")
+                continue
+
+            content_hash = self._content_hash(content)
+            blob_entry = self.blob.append(content)
+            path_rel = str(file_path)
+            file_key = hash64_file_key(path_rel)
+
+            self.tracker.upsert_file(
+                path=file_path,
+                content_hash=content_hash,
+                blob_offset=blob_entry.offset,
+                blob_length=blob_entry.length,
+                key_hash=file_key,
+            )
+
+            if self.aot_index is not None:
+                self.aot_index.insert(
+                    file_key, blob_entry.offset, blob_entry.length
+                )
+
+            self.tracker.delete_symbols(file_path)
+
+            sym_data: list[tuple[str, int]] = []
+            for sym in metadata.symbol_info:
+                sym_key = hash64_sym_key(
+                    path_rel,
+                    sym.name,
+                    sym.kind,
+                    sym.line,
+                    sym.end_line or sym.line,
+                )
+                sym_bytes = self._extract_symbol_bytes(
+                    content, sym.line, sym.end_line
+                )
+                if sym_bytes:
+                    sym_blob = self.blob.append(sym_bytes)
+                    self.tracker.upsert_symbol(
+                        file_path=file_path,
+                        name=sym.name,
+                        kind=sym.kind,
+                        line_start=sym.line,
+                        line_end=sym.end_line,
+                        blob_offset=sym_blob.offset,
+                        blob_length=sym_blob.length,
+                        key_hash=sym_key,
+                    )
+                    if self.aot_index is not None:
+                        self.aot_index.insert(
+                            sym_key, sym_blob.offset, sym_blob.length
+                        )
+                    sym_text = f"{sym.kind} {sym.name}"
+                    sym_data.append((sym_text, sym_key))
+
+            file_text = metadata.to_embedding_text()
+            file_data.append((file_path, file_text, file_key, sym_data))
+
+            if (i + 1) % 100 == 0:
+                pct = int(100 * (i + 1) / len(files))
+                print(
+                    f"[{pct:3d}%] scanned {i + 1}/{len(files)}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        if not file_data:
+            print("no files need embedding", file=sys.stderr, flush=True)
+            return
+
+        all_texts: list[str] = []
+        text_map: list[tuple[int, str, int]] = []
+
+        for file_idx, (_, file_text, file_key, sym_data) in enumerate(
+            file_data
+        ):
+            text_map.append((file_idx, "file", file_key))
+            all_texts.append(file_text)
+            for sym_text, sym_key in sym_data:
+                text_map.append((file_idx, "symbol", sym_key))
+                all_texts.append(sym_text)
+
+        print(
+            f"phase 2: embedding {len(all_texts)} texts...",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        all_embeddings = []
+        for batch_start in range(0, len(all_texts), embed_batch_size):
+            batch_end = min(batch_start + embed_batch_size, len(all_texts))
+            batch_texts = all_texts[batch_start:batch_end]
+            batch_embeddings = self.provider.embed_batch(batch_texts)
+            all_embeddings.extend(batch_embeddings)
+
+            pct = int(100 * batch_end / len(all_texts))
+            print(
+                f"[{pct:3d}%] embedded {batch_end}/{len(all_texts)}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        print("phase 3: writing vectors...", file=sys.stderr, flush=True)
+
+        for i, (_, item_type, key_hash) in enumerate(text_map):
+            embedding = all_embeddings[i]
+            vec_entry = self.vector_store.append(embedding)
+            self.vector_cache.put(key_hash, embedding)
+
+            if item_type == "file":
+                self.tracker.update_file_vector(
+                    key_hash, vec_entry.offset, vec_entry.length
+                )
+            else:
+                self.tracker.update_symbol_vector(
+                    key_hash, vec_entry.offset, vec_entry.length
+                )
+
+        print(
+            f"embedded {len(file_data)} files, {len(all_texts)} total texts",
+            file=sys.stderr,
+            flush=True,
+        )
+
     async def full_index(
         self,
         root: Path,
@@ -689,42 +848,49 @@ class JITIndexManager:
 
         errors: list[str] = []
         last_pct = -1
-        for i, file_path in enumerate(all_files[start_idx:], start=start_idx):
-            if embed:
-                result = await self.index_file(file_path)
-            else:
+
+        self.tracker.begin_batch()
+
+        if embed:
+            await self._full_index_with_embed(
+                all_files[start_idx:],
+                start_idx,
+                total,
+                checkpoint_interval,
+                errors,
+            )
+        else:
+            for i, file_path in enumerate(
+                all_files[start_idx:], start=start_idx
+            ):
                 result = self.register_file(file_path)
 
-            if result.status == "error":
-                errors.append(f"{file_path}: {result.reason}")
+                if result.status == "error":
+                    errors.append(f"{file_path}: {result.reason}")
 
-            # progress output every 2% or every 20 files
-            pct = int(100 * (i + 1) / total) if total else 0
-            if pct >= last_pct + 2 or (i + 1) % 20 == 0:
-                last_pct = pct
-                print(
-                    f"[{pct:3d}%] {i + 1}/{total} - {file_path.name}",
-                    file=sys.stderr,
-                    flush=True,
+                pct = int(100 * (i + 1) / total) if total else 0
+                if pct >= last_pct + 2 or (i + 1) % 20 == 0:
+                    last_pct = pct
+                    print(
+                        f"[{pct:3d}%] {i + 1}/{total} - {file_path.name}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                if (i + 1) % checkpoint_interval == 0:
+                    self.tracker.end_batch()
+                    self.tracker.save_checkpoint(i + 1, total, str(file_path))
+                    self.tracker.begin_batch()
+
+                yield IndexProgress(
+                    processed=i + 1,
+                    total=total,
+                    current_file=str(file_path),
+                    bytes_written=self.blob.size_bytes,
+                    errors=errors[-10:],
                 )
 
-            if (i + 1) % checkpoint_interval == 0:
-                self.tracker.save_checkpoint(i + 1, total, str(file_path))
-                logger.info(
-                    "checkpoint: %d/%d (%.1f%%) - %s",
-                    i + 1,
-                    total,
-                    100 * (i + 1) / total if total else 0,
-                    file_path.name,
-                )
-
-            yield IndexProgress(
-                processed=i + 1,
-                total=total,
-                current_file=str(file_path),
-                bytes_written=self.blob.size_bytes,
-                errors=errors[-10:],
-            )
+        self.tracker.end_batch()
 
         print(
             f"done: {total} files, {self.blob.size_bytes} bytes",
@@ -805,60 +971,64 @@ class JITIndexManager:
         self,
         query_vector,
         top_k: int = 10,
-    ) -> list[tuple[int, float]]:
+        result_type: str = "all",
+    ) -> list[tuple[int, float, str]]:
         """Search all persisted vectors + cached vectors.
 
-        Priority:
-        1. Check in-memory cache first (fast)
-        2. Load persisted vectors from tracker (files with vector_offset)
+        Args:
+            query_vector: Embedding vector to search for
+            top_k: Maximum results to return
+            result_type: "all", "file", or "symbol"
+
+        Returns:
+            List of (key_hash, score, type) tuples
         """
         import numpy as np
 
-        results: list[tuple[int, float]] = []
+        results: list[tuple[int, float, str]] = []
         seen_keys: set[int] = set()
 
-        cached_count = self.vector_cache.count
-        persisted_count = self.tracker.embedded_file_count()
-        logger.debug(
-            "search_vectors: %d cached, %d persisted, %d registered",
-            cached_count,
-            persisted_count,
-            self.tracker.file_count(),
-        )
+        file_keys = {r.key_hash for r in self.tracker.iter_files()}
 
-        # 1. search in-memory cache first
-        for key_hash in self.vector_cache.keys():
-            vec = self.vector_cache.get(key_hash)
-            if vec is not None:
-                score = float(
-                    np.dot(query_vector, vec)
-                    / (
-                        np.linalg.norm(query_vector) * np.linalg.norm(vec)
-                        + 1e-9
-                    )
+        def compute_score(vec) -> float:
+            dot = np.dot(query_vector, vec)
+            denom = np.linalg.norm(query_vector) * np.linalg.norm(vec) + 1e-9
+            return float(dot / denom)
+
+        def get_type(key_hash: int) -> str:
+            return "file" if key_hash in file_keys else "symbol"
+
+        if result_type in ("all", "file"):
+            for file_record in self.tracker.iter_files():
+                if file_record.key_hash in seen_keys:
+                    continue
+                if file_record.vector_offset is None:
+                    continue
+
+                vec = self.vector_store.read(
+                    file_record.vector_offset, file_record.vector_length or 0
                 )
-                results.append((key_hash, score))
-                seen_keys.add(key_hash)
+                if vec is not None:
+                    self.vector_cache.put(file_record.key_hash, vec)
+                    score = compute_score(vec)
+                    results.append((file_record.key_hash, score, "file"))
+                    seen_keys.add(file_record.key_hash)
 
-        # 2. search persisted vectors (files with vector_offset set)
-        for file_record in self.tracker.iter_files():
-            if file_record.key_hash in seen_keys:
-                continue
-            if file_record.vector_offset is None:
-                continue
+        if result_type in ("all", "symbol"):
+            for sym_record in self.tracker.iter_all_symbols():
+                if sym_record.key_hash in seen_keys:
+                    continue
+                if sym_record.vector_offset is None:
+                    continue
 
-            # load vector from persistent store
-            vec = self.vector_store.read(
-                file_record.vector_offset, file_record.vector_length or 0
-            )
-            if vec is not None:
-                # cache it for future use
-                self.vector_cache.put(file_record.key_hash, vec)
-                dot = np.dot(query_vector, vec)
-                denom = np.linalg.norm(query_vector) * np.linalg.norm(vec)
-                score = float(dot / (denom + 1e-9))
-                results.append((file_record.key_hash, score))
-                seen_keys.add(file_record.key_hash)
+                vec = self.vector_store.read(
+                    sym_record.vector_offset, sym_record.vector_length or 0
+                )
+                if vec is not None:
+                    self.vector_cache.put(sym_record.key_hash, vec)
+                    score = compute_score(vec)
+                    results.append((sym_record.key_hash, score, "symbol"))
+                    seen_keys.add(sym_record.key_hash)
 
         results.sort(key=lambda x: x[1], reverse=True)
         logger.debug(

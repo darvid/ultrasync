@@ -69,7 +69,22 @@ class FileTracker:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
+        self._batch_mode = False
         self._init_schema()
+
+    def begin_batch(self) -> None:
+        """Start batch mode - commits are deferred until end_batch()."""
+        self._batch_mode = True
+
+    def end_batch(self) -> None:
+        """End batch mode and commit all pending changes."""
+        self._batch_mode = False
+        self.conn.commit()
+
+    def _maybe_commit(self) -> None:
+        """Commit only if not in batch mode."""
+        if not self._batch_mode:
+            self.conn.commit()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -156,7 +171,7 @@ class FileTracker:
                 ON memories(created_at);
         """
         )
-        self.conn.commit()
+        self._maybe_commit()
         self._migrate_schema()
 
     def _migrate_schema(self) -> None:
@@ -197,7 +212,7 @@ class FileTracker:
                 "ALTER TABLE memories ADD COLUMN vector_length INTEGER"
             )
 
-        self.conn.commit()
+        self._maybe_commit()
 
     def close(self) -> None:
         if self._conn:
@@ -304,7 +319,7 @@ class FileTracker:
                 time.time(),
             ),
         )
-        self.conn.commit()
+        self._maybe_commit()
 
     def delete_file(self, path: Path) -> bool:
         path_resolved = str(path.resolve())
@@ -317,7 +332,7 @@ class FileTracker:
             "DELETE FROM files WHERE path = ?",
             (path_resolved,),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount > 0
 
     def get_symbols(self, path: Path) -> list[SymbolRecord]:
@@ -414,7 +429,7 @@ class FileTracker:
                     existing["id"],
                 ),
             )
-            self.conn.commit()
+            self._maybe_commit()
             return existing["id"]
         else:
             cursor = self.conn.execute(
@@ -435,7 +450,7 @@ class FileTracker:
                     signed_key,
                 ),
             )
-            self.conn.commit()
+            self._maybe_commit()
             return cursor.lastrowid  # type: ignore
 
     def delete_symbols(self, path: Path) -> int:
@@ -443,7 +458,7 @@ class FileTracker:
             "DELETE FROM symbols WHERE file_path = ?",
             (str(path.resolve()),),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount
 
     def iter_stale_files(
@@ -524,7 +539,7 @@ class FileTracker:
             """,
             (vector_offset, vector_length, signed_key),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount > 0
 
     def update_symbol_vector(
@@ -539,7 +554,7 @@ class FileTracker:
             """,
             (vector_offset, vector_length, signed_key),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount > 0
 
     def update_memory_vector(
@@ -554,7 +569,7 @@ class FileTracker:
             """,
             (vector_offset, vector_length, signed_key),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount > 0
 
     def iter_files(self, batch_size: int = 100) -> Iterator[FileRecord]:
@@ -629,6 +644,8 @@ class FileTracker:
                     blob_offset=row["blob_offset"],
                     blob_length=row["blob_length"],
                     key_hash=to_unsigned_64(row["key_hash"]),
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
                 )
 
             offset += batch_size
@@ -647,7 +664,7 @@ class FileTracker:
             """,
             (time.time(), last_path, total_files, processed_files),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.lastrowid  # type: ignore
 
     def get_latest_checkpoint(self) -> Checkpoint | None:
@@ -672,7 +689,7 @@ class FileTracker:
 
     def clear_checkpoints(self) -> int:
         cursor = self.conn.execute("DELETE FROM checkpoints")
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount
 
     def get_metadata(self, key: str) -> str | None:
@@ -690,7 +707,7 @@ class FileTracker:
             """,
             (key, value),
         )
-        self.conn.commit()
+        self._maybe_commit()
 
     # -----------------------------------------------------------------------
     # Memory methods
@@ -744,7 +761,7 @@ class FileTracker:
                 now,
             ),
         )
-        self.conn.commit()
+        self._maybe_commit()
 
     def get_memory(self, memory_id: str) -> MemoryRecord | None:
         row = self.conn.execute(
@@ -866,7 +883,7 @@ class FileTracker:
             "DELETE FROM memories WHERE id = ?",
             (memory_id,),
         )
-        self.conn.commit()
+        self._maybe_commit()
         return cursor.rowcount > 0
 
     def memory_count(self) -> int:

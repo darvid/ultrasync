@@ -1,12 +1,17 @@
+import os
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 class EmbeddingProvider:
     """Wraps a sentence-transformers model for text embedding."""
 
-    def __init__(self, model: str = "intfloat/e5-base-v2") -> None:
+    def __init__(self, model: str = DEFAULT_EMBEDDING_MODEL) -> None:
         self._model_name = model
         self._model = SentenceTransformer(model)
         dim = self._model.get_sentence_embedding_dimension()

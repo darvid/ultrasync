@@ -55,6 +55,7 @@ def search(
     root: Path | None = None,
     top_k: int = 10,
     fallback_glob: str | None = None,
+    result_type: str = "all",
 ) -> tuple[list[SearchResult], SearchStats]:
     """Multi-strategy search with automatic fallback.
 
@@ -64,6 +65,7 @@ def search(
         root: Root directory for grep fallback (default: cwd)
         top_k: Maximum results to return
         fallback_glob: File extensions for rg fallback
+        result_type: Filter by type - "all", "file", or "symbol"
 
     Returns:
         Tuple of (results, stats) where stats tracks which strategies were used
@@ -117,7 +119,7 @@ def search(
         )
     else:
         q_vec = manager.provider.embed(query)
-        results = manager.search_vectors(q_vec, top_k)
+        results = manager.search_vectors(q_vec, top_k, result_type=result_type)
         stats.semantic_results = len(results)
 
         if results:
@@ -127,27 +129,21 @@ def search(
                 results[0][1] if results else 0,
             )
             output = []
-            for key_hash, score in results:
-                file_record = manager.tracker.get_file_by_key(key_hash)
-                if file_record:
-                    output.append(
-                        SearchResult(
-                            type="file",
-                            path=file_record.path,
-                            key_hash=key_hash,
-                            score=score,
-                            source="semantic",
-                        )
+            for key_hash, score, item_type in results:
+                path = None
+                if item_type == "file":
+                    file_record = manager.tracker.get_file_by_key(key_hash)
+                    if file_record:
+                        path = file_record.path
+                output.append(
+                    SearchResult(
+                        type=item_type,
+                        path=path,
+                        key_hash=key_hash,
+                        score=score,
+                        source="semantic",
                     )
-                else:
-                    output.append(
-                        SearchResult(
-                            type="symbol",
-                            key_hash=key_hash,
-                            score=score,
-                            source="semantic",
-                        )
-                    )
+                )
             return output, stats
 
         logger.debug("search: no semantic results, falling back to grep")
@@ -187,7 +183,7 @@ def search(
     # Re-search with freshly indexed content
     if manager.provider is not None and indexed_keys:
         q_vec = manager.provider.embed(query)
-        results = manager.search_vectors(q_vec, top_k)
+        results = manager.search_vectors(q_vec, top_k, result_type=result_type)
 
         if results:
             logger.info(
@@ -195,30 +191,29 @@ def search(
                 len(results),
             )
             output = []
-            for key_hash, score in results:
-                file_record = manager.tracker.get_file_by_key(key_hash)
-                if file_record:
-                    output.append(
-                        SearchResult(
-                            type="file",
-                            path=file_record.path,
-                            key_hash=key_hash,
-                            score=score,
-                            source="grep_then_indexed",
-                        )
+            for key_hash, score, item_type in results:
+                path = None
+                if item_type == "file":
+                    file_record = manager.tracker.get_file_by_key(key_hash)
+                    if file_record:
+                        path = file_record.path
+                output.append(
+                    SearchResult(
+                        type=item_type,
+                        path=path,
+                        key_hash=key_hash,
+                        score=score,
+                        source="grep_then_indexed",
                     )
-                else:
-                    output.append(
-                        SearchResult(
-                            type="symbol",
-                            key_hash=key_hash,
-                            score=score,
-                            source="grep_then_indexed",
-                        )
-                    )
+                )
             return output, stats
 
     # Fall through: return ranked grep hits (already ranked above)
+    # but only if not filtering for symbols (grep only finds files)
+    if result_type == "symbol":
+        logger.info("search: no symbols found, skipping grep for symbol filter")
+        return [], stats
+
     logger.info("search: returning ranked grep hits")
     output = []
     for file_path, source, score in ranked_files[:top_k]:

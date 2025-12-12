@@ -42,6 +42,9 @@ def _get_embedder_class() -> type[EmbeddingProvider]:
 
 
 DEFAULT_DATA_DIR = Path(".galaxybrain")
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
 def _build_line_starts(lines: list[bytes]) -> list[int]:
@@ -66,8 +69,6 @@ def cmd_index(args: argparse.Namespace) -> int:
     """Index a directory using JIT or AOT strategy."""
     import asyncio
 
-    EmbeddingProvider = _get_embedder_class()
-
     root = Path(args.directory).resolve()
     if not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
@@ -78,7 +79,9 @@ def cmd_index(args: argparse.Namespace) -> int:
     embed = getattr(args, "embed", False)
 
     # only load embedding model if we're actually embedding
+    # (importing EmbeddingProvider pulls in torch which takes ~15s)
     if embed:
+        EmbeddingProvider = _get_embedder_class()
         print(f"loading embedding model ({args.model})...")
         embedder = EmbeddingProvider(model=args.model)
     else:
@@ -184,16 +187,18 @@ def cmd_query(args: argparse.Namespace) -> int:
         embedding_provider=embedder,
     )
 
+    result_type = getattr(args, "type", "all")
+
     t0 = time.perf_counter()
     results, stats = search(
         query=args.query,
         manager=manager,
         root=root,
         top_k=args.k,
+        result_type=result_type,
     )
     t_search = time.perf_counter() - t0
 
-    # show search stats
     strategy_info = []
     if stats.aot_hit:
         strategy_info.append("aot_hit")
@@ -208,23 +213,40 @@ def cmd_query(args: argparse.Namespace) -> int:
     strategy_str = " -> ".join(strategy_info) if strategy_info else "none"
 
     print(f"\ntop {len(results)} for: {args.query!r}")
-    print(f"(search: {t_search * 1000:.1f}ms, strategy: {strategy_str})\n")
+    print(f"(search: {t_search * 1000:.1f}ms, strategy: {strategy_str})")
+    if result_type != "all":
+        print(f"(filter: {result_type})")
     print("-" * 60)
 
     for r in results:
-        if r.path:
+        if r.type == "file":
+            path_str = r.path or "unknown"
             try:
-                rel_path = Path(r.path).relative_to(Path.cwd())
+                rel_path = Path(path_str).relative_to(Path.cwd())
             except ValueError:
-                rel_path = Path(r.path)
-            print(f"[{r.score:.3f}] {rel_path}")
+                rel_path = Path(path_str)
+            print(f"[{r.score:.3f}] FILE {rel_path}")
             if r.key_hash:
                 print(f"        key: 0x{r.key_hash:016x} ({r.source})")
-            else:
-                print(f"        ({r.source})")
         else:
-            # symbol or other indexed content
-            print(f"[{r.score:.3f}] key:0x{r.key_hash:016x} ({r.source})")
+            sym_record = manager.tracker.get_symbol_by_key(r.key_hash or 0)
+            if sym_record:
+                try:
+                    rel_path = Path(sym_record.file_path).relative_to(
+                        Path.cwd()
+                    )
+                except ValueError:
+                    rel_path = Path(sym_record.file_path)
+                print(
+                    f"[{r.score:.3f}] {sym_record.kind.upper()} "
+                    f"{sym_record.name} ({rel_path}:{sym_record.line_start})"
+                )
+                print(f"        key: 0x{r.key_hash:016x} ({r.source})")
+            else:
+                print(
+                    f"[{r.score:.3f}] SYMBOL "
+                    f"key:0x{r.key_hash:016x} ({r.source})"
+                )
         print()
 
     return 0
@@ -1317,8 +1339,8 @@ def main() -> int:
     index_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     index_parser.add_argument(
         "-e",
@@ -1360,8 +1382,8 @@ def main() -> int:
     query_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     query_parser.add_argument(
         "-k",
@@ -1372,6 +1394,18 @@ def main() -> int:
     query_parser.add_argument(
         "--key",
         help="direct key lookup (e.g., 'file:src/foo.py')",
+    )
+    query_parser.add_argument(
+        "-t",
+        "--type",
+        choices=["all", "file", "symbol"],
+        default="all",
+        help="filter results by type (default: all)",
+    )
+    query_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="enable debug logging",
     )
 
     # symbols command
@@ -1450,8 +1484,8 @@ def main() -> int:
     sgrep_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     sgrep_parser.add_argument(
         "-k",
@@ -1576,8 +1610,8 @@ def main() -> int:
     classify_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     classify_parser.add_argument(
         "-o",
@@ -1626,8 +1660,8 @@ def main() -> int:
     callgraph_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     callgraph_parser.add_argument(
         "-o",
@@ -1672,8 +1706,8 @@ def main() -> int:
     refine_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     refine_parser.add_argument(
         "-o",
@@ -1724,8 +1758,8 @@ def main() -> int:
     repl_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
 
     # voyager command
@@ -1741,8 +1775,8 @@ def main() -> int:
     voyager_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
 
     # mcp command
@@ -1753,8 +1787,8 @@ def main() -> int:
     mcp_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     mcp_parser.add_argument(
         "-d",
@@ -1793,8 +1827,8 @@ def main() -> int:
     warm_parser.add_argument(
         "-m",
         "--model",
-        default="intfloat/e5-base-v2",
-        help="embedding model (default: intfloat/e5-base-v2)",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
     )
     warm_parser.add_argument(
         "-n",

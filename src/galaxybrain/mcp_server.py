@@ -13,6 +13,10 @@ from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.patterns import PatternSetManager
 from galaxybrain.threads import ThreadManager
 
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
+
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
     from galaxybrain.jit.manager import JITIndexManager
@@ -125,7 +129,7 @@ class PatternSetInfo(BaseModel):
 class ServerState:
     def __init__(
         self,
-        model_name: str = "intfloat/e5-base-v2",
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
         root: Path | None = None,
         jit_data_dir: Path | None = None,
         aot_index_path: Path | None = None,
@@ -250,13 +254,13 @@ class ServerState:
 
 
 def create_server(
-    model_name: str = "intfloat/e5-base-v2",
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
     root: Path | None = None,
 ) -> FastMCP:
     """Create and configure the galaxybrain MCP server.
 
     Args:
-        model_name: Embedding model to use (default: intfloat/e5-base-v2)
+        model_name: Embedding model to use (default: sentence-transformers/all-MiniLM-L6-v2)
         root: Repository root path for file registration
 
     Returns:
@@ -1048,7 +1052,7 @@ large codebases, use jit_full_index which persists to disk and shows progress.
 
 
 def run_server(
-    model_name: str = "intfloat/e5-base-v2",
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
     root: Path | None = None,
     transport: str = "stdio",
 ) -> None:

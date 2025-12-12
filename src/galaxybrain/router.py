@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,6 +11,10 @@ from galaxybrain_index import GlobalIndex
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
 
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
+
 
 class QueryRouter:
     """Main entry point for event processing and query routing."""
@@ -19,7 +24,7 @@ class QueryRouter:
         index_path: Path | None = None,
         blob_path: Path | None = None,
         patterns: list[bytes] | None = None,
-        model_name: str = "intfloat/e5-base-v2",
+        model_name: str = DEFAULT_EMBEDDING_MODEL,
     ) -> None:
         # lazy import to avoid pulling torch at module load time
         from galaxybrain.embeddings import EmbeddingProvider
