@@ -601,6 +601,9 @@ context:api, context:data, context:infra
         in the persistent JIT index. Skips files that haven't changed
         unless force=True.
 
+        Call this after finding a file via grep/read fallback to ensure
+        future jit_search queries find it instantly.
+
         Args:
             path: Path to the file to index
             force: Re-index even if file hasn't changed
@@ -739,21 +742,27 @@ context:api, context:data, context:infra
         result_type: Literal["all", "file", "symbol"] = "all",
         fallback_glob: str | None = None,
     ) -> dict[str, Any]:
-        """Search the JIT index semantically with automatic fallback.
+        """PREFERRED: Semantic code search - use BEFORE grep/glob/read.
 
-        Searches across all indexed files and symbols using embedding
-        similarity. If no results found, automatically falls back to
-        grep/glob search and indexes discovered files for future queries.
+        USE THIS FIRST for natural language queries like:
+        - "find the login button component"
+        - "where is authentication handled"
+        - "update the payment form"
+        - "hide the demo button on contacts page"
+
+        This replaces multiple grep + glob + read calls with ONE semantic
+        search. Returns ranked results with file paths and symbol names.
 
         Args:
-            query: Natural language search query
+            query: Natural language search query (not regex!)
             top_k: Maximum results to return
-            result_type: Filter results - "all", "file", or "symbol"
-            fallback_glob: Glob pattern for fallback search (default: common
+            result_type: "all", "file", or "symbol" (use "symbol" for
+                functions/classes)
+            fallback_glob: Glob pattern for fallback (default: common
                 code extensions)
 
         Returns:
-            Results with timing info and match details
+            Results with timing, paths, symbol names, and scores
         """
         import time
 
