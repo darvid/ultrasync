@@ -18,3 +18,4 @@ Cargo.lock
 
 # Galaxybrain
 .galaxybrain_index.json
+.galaxybrain/
