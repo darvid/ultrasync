@@ -730,6 +730,63 @@ def cmd_get_source(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_delete(args: argparse.Namespace) -> int:
+    """Delete items from the index."""
+    EmbeddingProvider = _get_embedder_class()
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        return 1
+
+    print(f"loading model ({args.model})...")
+    embedder = EmbeddingProvider(model=args.model)
+
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+
+    deleted = False
+
+    if args.type == "file":
+        if not args.path:
+            print("error: --path required for file deletion", file=sys.stderr)
+            return 1
+        deleted = manager.delete_file(Path(args.path))
+        if deleted:
+            print(f"deleted file: {args.path}")
+        else:
+            print(f"file not found: {args.path}")
+
+    elif args.type == "symbol":
+        if not args.key:
+            print("error: --key required for symbol deletion", file=sys.stderr)
+            return 1
+        key_hash = int(args.key, 0)  # accepts decimal or hex
+        deleted = manager.delete_symbol(key_hash)
+        if deleted:
+            print(f"deleted symbol: 0x{key_hash:016x}")
+        else:
+            print(f"symbol not found: 0x{key_hash:016x}")
+
+    elif args.type == "memory":
+        if not args.id:
+            print("error: --id required for memory deletion", file=sys.stderr)
+            return 1
+        deleted = manager.delete_memory(args.id)
+        if deleted:
+            print(f"deleted memory: {args.id}")
+        else:
+            print(f"memory not found: {args.id}")
+
+    else:
+        print(f"error: unknown type: {args.type}", file=sys.stderr)
+        return 1
+
+    return 0 if deleted else 1
+
+
 def cmd_classify(args: argparse.Namespace) -> int:
     """Classify codebase files and symbols into taxonomy categories."""
 
@@ -1092,17 +1149,16 @@ def cmd_mcp(args: argparse.Namespace) -> int:
 
     from galaxybrain.mcp_server import run_server
 
-    # configure logging to stderr so it doesn't interfere with stdio JSON-RPC
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        stream=sys.stderr,
-    )
+    # logging is now configured by the MCP server via logging_config module
+    # (respects GALAXYBRAIN_DEBUG env var and writes to .galaxybrain/debug.log)
 
     root = Path(args.directory) if args.directory else None
     if root and not root.is_dir():
         print(f"error: {root} is not a directory", file=sys.stderr)
         return 1
+
+    # handle agent option
+    agent = args.agent if args.agent != "auto" else None
 
     # only print status for non-stdio (stdio uses stdout for JSON-RPC)
     if args.transport != "stdio":
@@ -1112,11 +1168,19 @@ def cmd_mcp(args: argparse.Namespace) -> int:
         if root:
             print(f"root directory: {root}")
         print(f"model: {args.model}")
+        if args.watch:
+            agent_str = agent or "auto-detect"
+            learn_str = "enabled" if args.learn else "disabled"
+            print(f"transcript watching: enabled (agent={agent_str})")
+            print(f"search learning: {learn_str}")
 
     run_server(
         model_name=args.model,
         root=root,
         transport=args.transport,
+        watch_transcripts=args.watch,
+        agent=agent,
+        enable_learning=args.learn,
     )
     return 0
 
@@ -1231,6 +1295,176 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_keys(args: argparse.Namespace) -> int:
+    """Dump all indexed keys (files, symbols, memories)."""
+    import sqlite3
+
+    from galaxybrain.keys import file_key, mem_key, sym_key
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        return 1
+
+    tracker_db = data_dir / "tracker.db"
+    if not tracker_db.exists():
+        print(f"error: tracker database not found at {tracker_db}")
+        return 1
+
+    conn = sqlite3.connect(tracker_db)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+
+    key_type = args.type
+    limit = args.limit
+    show_json = args.json
+
+    results: list[dict] = []
+
+    if key_type in ("all", "files"):
+        query = "SELECT path, key_hash, vector_offset FROM files ORDER BY path"
+        if limit:
+            query += f" LIMIT {limit}"
+        for row in cur.execute(query):
+            # convert signed to unsigned for display
+            key_hash = row["key_hash"]
+            if key_hash < 0:
+                key_hash = key_hash + (1 << 64)
+            key_str = file_key(row["path"])
+            results.append(
+                {
+                    "type": "file",
+                    "key": key_str,
+                    "path": row["path"],
+                    "key_hash": f"0x{key_hash:016x}",
+                    "embedded": row["vector_offset"] is not None,
+                }
+            )
+
+    if key_type in ("all", "symbols"):
+        query = """
+            SELECT file_path, name, kind, line_start, line_end,
+                   key_hash, vector_offset
+            FROM symbols ORDER BY file_path, line_start
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        for row in cur.execute(query):
+            key_hash = row["key_hash"]
+            if key_hash < 0:
+                key_hash = key_hash + (1 << 64)
+            end_line = row["line_end"] or row["line_start"]
+            key_str = sym_key(
+                row["file_path"],
+                row["name"],
+                row["kind"],
+                row["line_start"],
+                end_line,
+            )
+            results.append(
+                {
+                    "type": "symbol",
+                    "key": key_str,
+                    "path": row["file_path"],
+                    "name": row["name"],
+                    "kind": row["kind"],
+                    "lines": f"{row['line_start']}-{end_line}",
+                    "key_hash": f"0x{key_hash:016x}",
+                    "embedded": row["vector_offset"] is not None,
+                }
+            )
+
+    if key_type in ("all", "memories"):
+        query = """
+            SELECT id, task, insights, context, tags, text, key_hash,
+                   vector_offset, created_at
+            FROM memories ORDER BY created_at DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        for row in cur.execute(query):
+            key_hash = row["key_hash"]
+            if key_hash < 0:
+                key_hash = key_hash + (1 << 64)
+            mem_id = f"{row['id']:08x}"
+            key_str = mem_key(mem_id)
+            results.append(
+                {
+                    "type": "memory",
+                    "key": key_str,
+                    "id": key_str,
+                    "task": row["task"],
+                    "insights": row["insights"],
+                    "context": row["context"],
+                    "tags": row["tags"],
+                    "text": row["text"][:80] + "..."
+                    if len(row["text"]) > 80
+                    else row["text"],
+                    "key_hash": f"0x{key_hash:016x}",
+                    "embedded": row["vector_offset"] is not None,
+                }
+            )
+
+    conn.close()
+
+    if show_json:
+        import json
+
+        print(json.dumps(results, indent=2))
+        return 0
+
+    # pretty print
+    if not results:
+        print("no keys found")
+        return 0
+
+    # group by type
+    files = [r for r in results if r["type"] == "file"]
+    symbols = [r for r in results if r["type"] == "symbol"]
+    memories = [r for r in results if r["type"] == "memory"]
+
+    if files:
+        print(f"\n{'=' * 60}")
+        print(f"FILES ({len(files)})")
+        print("=" * 60)
+        for f in files:
+            embed_mark = "✓" if f["embedded"] else "✗"
+            print(f"[{embed_mark}] {f['key']}")
+            print(f"      hash: {f['key_hash']}")
+
+    if symbols:
+        print(f"\n{'=' * 60}")
+        print(f"SYMBOLS ({len(symbols)})")
+        print("=" * 60)
+        for s in symbols:
+            embed_mark = "✓" if s["embedded"] else "✗"
+            print(f"[{embed_mark}] {s['key']}")
+            print(f"      hash: {s['key_hash']}")
+
+    if memories:
+        print(f"\n{'=' * 60}")
+        print(f"MEMORIES ({len(memories)})")
+        print("=" * 60)
+        for m in memories:
+            embed_mark = "✓" if m["embedded"] else "✗"
+            print(f"[{embed_mark}] {m['key']}")
+            print(f"      hash: {m['key_hash']}")
+            if m["task"]:
+                print(f"      task: {m['task']}")
+            if m["insights"]:
+                print(f"      insights: {m['insights']}")
+            if m["context"]:
+                print(f"      context: {m['context']}")
+            if m["tags"]:
+                print(f"      tags: {m['tags']}")
+            print(f"      text: {m['text']}")
+
+    print(f"\ntotal: {len(results)} keys")
+    return 0
+
+
 def cmd_warm(args: argparse.Namespace) -> int:
     """Warm the vector cache by embedding registered files."""
     import time
@@ -1283,7 +1517,7 @@ def cmd_patterns(args: argparse.Namespace) -> int:
         print(f"{'ID':<25} {'Patterns':>8}  Description")
         print("-" * 60)
         for ps in patterns:
-            desc = ps['description']
+            desc = ps["description"]
             print(f"{ps['id']:<25} {ps['pattern_count']:>8}  {desc}")
         return 0
 
@@ -1305,12 +1539,14 @@ def cmd_patterns(args: argparse.Namespace) -> int:
 
         pattern_id = args.name or f"pat:{patterns_path.stem}"
         desc = args.description or f"Loaded from {patterns_path.name}"
-        ps = manager.load({
-            "id": pattern_id,
-            "patterns": patterns,
-            "description": desc,
-            "tags": args.tags.split(",") if args.tags else [],
-        })
+        ps = manager.load(
+            {
+                "id": pattern_id,
+                "patterns": patterns,
+                "description": desc,
+                "tags": args.tags.split(",") if args.tags else [],
+            }
+        )
 
         print(f"loaded pattern set: {ps.id}")
         print(f"  patterns: {len(ps.patterns)}")
@@ -1684,6 +1920,40 @@ def main() -> int:
         help="directory with .galaxybrain index (default: current directory)",
     )
 
+    # delete command
+    delete_parser = subparsers.add_parser(
+        "delete",
+        help="delete items from the index (file, symbol, or memory)",
+    )
+    delete_parser.add_argument(
+        "type",
+        choices=["file", "symbol", "memory"],
+        help="type of item to delete",
+    )
+    delete_parser.add_argument(
+        "--path",
+        help="file path (for type=file)",
+    )
+    delete_parser.add_argument(
+        "--key",
+        help="key hash in decimal or hex (for type=symbol)",
+    )
+    delete_parser.add_argument(
+        "--id",
+        help="memory ID like 'mem:abc123' (for type=memory)",
+    )
+    delete_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain index (default: current directory)",
+    )
+    delete_parser.add_argument(
+        "-m",
+        "--model",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
+    )
+
     # classify command
     classify_parser = subparsers.add_parser(
         "classify",
@@ -1889,6 +2159,40 @@ def main() -> int:
         default="stdio",
         help="MCP transport (default: stdio)",
     )
+    mcp_parser.add_argument(
+        "-w",
+        "--watch",
+        dest="watch",
+        action="store_true",
+        default=None,
+        help="enable transcript watching (default: enabled)",
+    )
+    mcp_parser.add_argument(
+        "--no-watch",
+        dest="watch",
+        action="store_false",
+        help="disable transcript watching",
+    )
+    mcp_parser.add_argument(
+        "-a",
+        "--agent",
+        choices=["claude-code", "auto"],
+        default="auto",
+        help="coding agent for transcript parsing (default: auto-detect)",
+    )
+    mcp_parser.add_argument(
+        "--learn",
+        dest="learn",
+        action="store_true",
+        default=True,
+        help="enable search learning when watching (default: enabled)",
+    )
+    mcp_parser.add_argument(
+        "--no-learn",
+        dest="learn",
+        action="store_false",
+        help="disable search learning",
+    )
 
     # stats command
     stats_parser = subparsers.add_parser(
@@ -1899,6 +2203,35 @@ def main() -> int:
         "-d",
         "--directory",
         help="directory with .galaxybrain data (default: current directory)",
+    )
+
+    # keys command
+    keys_parser = subparsers.add_parser(
+        "keys",
+        help="dump all indexed keys (files, symbols, memories)",
+    )
+    keys_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+    keys_parser.add_argument(
+        "-t",
+        "--type",
+        choices=["all", "files", "symbols", "memories"],
+        default="all",
+        help="filter by key type (default: all)",
+    )
+    keys_parser.add_argument(
+        "-n",
+        "--limit",
+        type=int,
+        help="limit number of results per type",
+    )
+    keys_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="output as JSON",
     )
 
     # warm command
@@ -1961,6 +2294,8 @@ def main() -> int:
         return cmd_show(args)
     elif args.command == "get-source":
         return cmd_get_source(args)
+    elif args.command == "delete":
+        return cmd_delete(args)
     elif args.command == "classify":
         return cmd_classify(args)
     elif args.command == "callgraph":
@@ -1975,6 +2310,8 @@ def main() -> int:
         return cmd_mcp(args)
     elif args.command == "stats":
         return cmd_stats(args)
+    elif args.command == "keys":
+        return cmd_keys(args)
     elif args.command == "warm":
         return cmd_warm(args)
     elif args.command == "patterns":

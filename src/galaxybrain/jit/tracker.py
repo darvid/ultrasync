@@ -1,4 +1,3 @@
-
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -169,6 +168,12 @@ class FileTracker:
                 ON memories(key_hash);
             CREATE INDEX IF NOT EXISTS idx_memories_created
                 ON memories(created_at);
+
+            CREATE TABLE IF NOT EXISTS transcript_positions (
+                path TEXT PRIMARY KEY,
+                byte_position INTEGER NOT NULL,
+                updated_at REAL NOT NULL
+            );
         """
         )
         self._maybe_commit()
@@ -233,6 +238,17 @@ class FileTracker:
         if not row:
             return True
         return stat.st_mtime > row["mtime"] or stat.st_size != row["size"]
+
+    def needs_embed(self, path: Path) -> bool:
+        """Check if file is indexed but missing vector embedding."""
+        row = self.conn.execute(
+            "SELECT vector_offset FROM files WHERE path = ?",
+            (str(path.resolve()),),
+        ).fetchone()
+
+        if not row:
+            return False  # not indexed at all
+        return row["vector_offset"] is None
 
     def get_file(self, path: Path) -> FileRecord | None:
         row = self.conn.execute(
@@ -460,6 +476,16 @@ class FileTracker:
         )
         self._maybe_commit()
         return cursor.rowcount
+
+    def delete_symbol_by_key(self, key_hash: int) -> bool:
+        """Delete a single symbol by its key hash."""
+        signed_key = to_signed_64(key_hash)
+        cursor = self.conn.execute(
+            "DELETE FROM symbols WHERE key_hash = ?",
+            (signed_key,),
+        )
+        self._maybe_commit()
+        return cursor.rowcount > 0
 
     def iter_stale_files(
         self,
@@ -924,3 +950,48 @@ class FileTracker:
                 )
 
             offset += batch_size
+
+    # -----------------------------------------------------------------------
+    # Transcript position tracking
+    # -----------------------------------------------------------------------
+
+    def get_transcript_position(self, path: Path) -> int:
+        """Get the last read position for a transcript file.
+
+        Returns 0 if the file hasn't been tracked yet.
+        """
+        row = self.conn.execute(
+            "SELECT byte_position FROM transcript_positions WHERE path = ?",
+            (str(path),),
+        ).fetchone()
+        return row["byte_position"] if row else 0
+
+    def get_all_transcript_positions(self) -> dict[str, int]:
+        """Get all tracked transcript positions.
+
+        Returns dict mapping path string → byte position.
+        """
+        rows = self.conn.execute(
+            "SELECT path, byte_position FROM transcript_positions"
+        ).fetchall()
+        return {row["path"]: row["byte_position"] for row in rows}
+
+    def set_transcript_position(self, path: Path, position: int) -> None:
+        """Update the read position for a transcript file."""
+        self.conn.execute(
+            """
+            INSERT INTO transcript_positions (path, byte_position, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                byte_position = excluded.byte_position,
+                updated_at = excluded.updated_at
+            """,
+            (str(path), position, time.time()),
+        )
+        self._maybe_commit()
+
+    def clear_transcript_positions(self) -> int:
+        """Clear all transcript positions (for testing or reset)."""
+        cursor = self.conn.execute("DELETE FROM transcript_positions")
+        self._maybe_commit()
+        return cursor.rowcount

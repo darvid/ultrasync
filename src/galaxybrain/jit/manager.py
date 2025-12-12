@@ -568,6 +568,62 @@ class JITIndexManager:
 
         return await self.index_file(path, force=True)
 
+    def reregister_file(self, path: Path) -> IndexResult:
+        """Warm path re-register: evict stale vectors + register (no embed).
+
+        Use this for write/edit operations when you want fast registration
+        without immediate embedding. Embeddings computed lazily on search.
+        """
+        path = path.resolve()
+
+        old_file = self.tracker.get_file(path)
+        if old_file:
+            self.vector_cache.evict(old_file.key_hash)
+
+        for sym_key in self.tracker.get_symbol_keys(path):
+            self.vector_cache.evict(sym_key)
+
+        self.tracker.delete_file(path)
+
+        return self.register_file(path, force=True)
+
+    def delete_file(self, path: Path) -> bool:
+        """Delete a file and all its symbols from the index."""
+        path = path.resolve()
+
+        # evict file from cache
+        file_record = self.tracker.get_file(path)
+        if file_record:
+            self.vector_cache.evict(file_record.key_hash)
+
+        # evict all symbols from cache
+        for sym_key in self.tracker.get_symbol_keys(path):
+            self.vector_cache.evict(sym_key)
+
+        # delete symbols from tracker
+        self.tracker.delete_symbols(path)
+
+        # delete file from tracker
+        return self.tracker.delete_file(path)
+
+    def delete_symbol(self, key_hash: int) -> bool:
+        """Delete a single symbol from the index by key hash."""
+        # evict from cache
+        self.vector_cache.evict(key_hash)
+
+        # delete from tracker
+        return self.tracker.delete_symbol_by_key(key_hash)
+
+    def delete_memory(self, memory_id: str) -> bool:
+        """Delete a memory entry from the index."""
+        # get memory to evict from cache
+        mem = self.tracker.get_memory(memory_id)
+        if mem:
+            self.vector_cache.evict(mem.key_hash)
+
+        # delete from tracker
+        return self.tracker.delete_memory(memory_id)
+
     async def index_directory(
         self,
         path: Path,
@@ -657,75 +713,101 @@ class JITIndexManager:
         embed_batch_size = 64
 
         print("phase 1: scanning files...", file=sys.stderr, flush=True)
+        # file_data: (path, file_text, file_key, [(sym_text, sym_key), ...])
         file_data: list[tuple[Path, str, int, list[tuple[str, int]]]] = []
 
+        # track files needing index vs just embedding
+        indexed_count = 0
+        embed_only_count = 0
+
         for i, file_path in enumerate(files):
-            if not self.tracker.needs_index(file_path):
+            needs_index = self.tracker.needs_index(file_path)
+            needs_embed = self.tracker.needs_embed(file_path)
+
+            if not needs_index and not needs_embed:
                 continue
 
             metadata = self.scanner.scan(file_path)
             if not metadata:
                 continue
 
-            try:
-                content = file_path.read_bytes()
-            except (OSError, PermissionError) as e:
-                errors.append(f"{file_path}: {e}")
-                continue
-
-            content_hash = self._content_hash(content)
-            blob_entry = self.blob.append(content)
             path_rel = str(file_path)
             file_key = hash64_file_key(path_rel)
 
-            self.tracker.upsert_file(
-                path=file_path,
-                content_hash=content_hash,
-                blob_offset=blob_entry.offset,
-                blob_length=blob_entry.length,
-                key_hash=file_key,
-            )
+            if needs_index:
+                # full indexing: read content, store blob, update tracker
+                indexed_count += 1
+                try:
+                    content = file_path.read_bytes()
+                except (OSError, PermissionError) as e:
+                    errors.append(f"{file_path}: {e}")
+                    continue
 
-            if self.aot_index is not None:
-                self.aot_index.insert(
-                    file_key, blob_entry.offset, blob_entry.length
+                content_hash = self._content_hash(content)
+                blob_entry = self.blob.append(content)
+
+                self.tracker.upsert_file(
+                    path=file_path,
+                    content_hash=content_hash,
+                    blob_offset=blob_entry.offset,
+                    blob_length=blob_entry.length,
+                    key_hash=file_key,
                 )
 
-            self.tracker.delete_symbols(file_path)
-
-            sym_data: list[tuple[str, int]] = []
-            for sym in metadata.symbol_info:
-                sym_key = hash64_sym_key(
-                    path_rel,
-                    sym.name,
-                    sym.kind,
-                    sym.line,
-                    sym.end_line or sym.line,
-                )
-                sym_bytes = self._extract_symbol_bytes(
-                    content, sym.line, sym.end_line
-                )
-                if sym_bytes:
-                    sym_blob = self.blob.append(sym_bytes)
-                    self.tracker.upsert_symbol(
-                        file_path=file_path,
-                        name=sym.name,
-                        kind=sym.kind,
-                        line_start=sym.line,
-                        line_end=sym.end_line,
-                        blob_offset=sym_blob.offset,
-                        blob_length=sym_blob.length,
-                        key_hash=sym_key,
+                if self.aot_index is not None:
+                    self.aot_index.insert(
+                        file_key, blob_entry.offset, blob_entry.length
                     )
-                    if self.aot_index is not None:
-                        self.aot_index.insert(
-                            sym_key, sym_blob.offset, sym_blob.length
-                        )
-                    sym_text = f"{sym.kind} {sym.name}"
-                    sym_data.append((sym_text, sym_key))
 
-            file_text = metadata.to_embedding_text()
-            file_data.append((file_path, file_text, file_key, sym_data))
+                self.tracker.delete_symbols(file_path)
+
+                sym_data: list[tuple[str, int]] = []
+                for sym in metadata.symbol_info:
+                    sym_key = hash64_sym_key(
+                        path_rel,
+                        sym.name,
+                        sym.kind,
+                        sym.line,
+                        sym.end_line or sym.line,
+                    )
+                    sym_bytes = self._extract_symbol_bytes(
+                        content, sym.line, sym.end_line
+                    )
+                    if sym_bytes:
+                        sym_blob = self.blob.append(sym_bytes)
+                        self.tracker.upsert_symbol(
+                            file_path=file_path,
+                            name=sym.name,
+                            kind=sym.kind,
+                            line_start=sym.line,
+                            line_end=sym.end_line,
+                            blob_offset=sym_blob.offset,
+                            blob_length=sym_blob.length,
+                            key_hash=sym_key,
+                        )
+                        if self.aot_index is not None:
+                            self.aot_index.insert(
+                                sym_key, sym_blob.offset, sym_blob.length
+                            )
+                        sym_text = f"{sym.kind} {sym.name}"
+                        sym_data.append((sym_text, sym_key))
+
+                file_text = metadata.to_embedding_text()
+                file_data.append((file_path, file_text, file_key, sym_data))
+
+            elif needs_embed:
+                # embed-only: file is indexed, just needs vectors
+                embed_only_count += 1
+                file_text = metadata.to_embedding_text()
+
+                # get existing symbols from tracker
+                sym_data = []
+                for sym_rec in self.tracker.get_symbols(file_path):
+                    if sym_rec.vector_offset is None:
+                        sym_text = f"{sym_rec.kind} {sym_rec.name}"
+                        sym_data.append((sym_text, sym_rec.key_hash))
+
+                file_data.append((file_path, file_text, file_key, sym_data))
 
             if (i + 1) % 100 == 0:
                 pct = int(100 * (i + 1) / len(files))
@@ -738,6 +820,13 @@ class JITIndexManager:
         if not file_data:
             print("no files need embedding", file=sys.stderr, flush=True)
             return
+
+        print(
+            f"found {len(file_data)} files to embed "
+            f"({indexed_count} new, {embed_only_count} embed-only)",
+            file=sys.stderr,
+            flush=True,
+        )
 
         all_texts: list[str] = []
         text_map: list[tuple[int, str, int]] = []
