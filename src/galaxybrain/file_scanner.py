@@ -46,6 +46,9 @@ class FileScanner:
     TS_JS_EXTS = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}
     RUST_EXTS = {".rs"}
 
+    # skip symbol extraction for large files (likely bundled/minified)
+    MAX_SCAN_BYTES = 500_000  # 500KB
+
     def scan(self, path: Path) -> FileMetadata | None:
         """Scan a file and extract metadata."""
         if not path.is_file():
@@ -66,6 +69,10 @@ class FileScanner:
         try:
             content = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
+            return metadata
+
+        # skip symbol extraction for very large files (likely bundled/minified)
+        if len(content) > self.MAX_SCAN_BYTES:
             return metadata
 
         if ext in self.PYTHON_EXTS:

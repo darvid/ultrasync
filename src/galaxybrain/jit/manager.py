@@ -174,11 +174,15 @@ class JITIndexManager:
 
         Embedding happens lazily on search via ensure_embedded().
         """
+        import time
+
+        t_start = time.perf_counter()
         path = path.resolve()
 
         if not path.exists():
             return IndexResult(status="error", reason="not_found")
 
+        t_check = time.perf_counter()
         if not force and not self.tracker.needs_index(path):
             # return existing key_hash so caller can still embed
             existing = self.tracker.get_file(path)
@@ -188,8 +192,10 @@ class JITIndexManager:
                 path=str(path),
                 key_hash=existing.key_hash if existing else None,
             )
+        t_needs = time.perf_counter()
 
         metadata = self.scanner.scan(path)
+        t_scan = time.perf_counter()
         if not metadata:
             return IndexResult(
                 status="skipped", reason="unsupported_type", path=str(path)
@@ -199,9 +205,12 @@ class JITIndexManager:
             content = path.read_bytes()
         except (OSError, PermissionError) as e:
             return IndexResult(status="error", reason=str(e), path=str(path))
+        t_read = time.perf_counter()
 
         content_hash = self._content_hash(content)
+        t_hash = time.perf_counter()
         blob_entry = self.blob.append(content)
+        t_blob = time.perf_counter()
 
         path_rel = str(path)
         file_key = hash64_file_key(path_rel)
@@ -213,15 +222,18 @@ class JITIndexManager:
             blob_length=blob_entry.length,
             key_hash=file_key,
         )
+        t_upsert = time.perf_counter()
 
         # insert file into AOT index for sub-ms lookups
         if self.aot_index is not None:
             self.aot_index.insert(
                 file_key, blob_entry.offset, blob_entry.length
             )
+        t_aot = time.perf_counter()
 
         self.tracker.delete_symbols(path)
 
+        sym_count = 0
         for sym in metadata.symbol_info:
             sym_key = hash64_sym_key(
                 path_rel, sym.name, sym.kind, sym.line, sym.end_line or sym.line
@@ -248,6 +260,27 @@ class JITIndexManager:
                     self.aot_index.insert(
                         sym_key, sym_blob.offset, sym_blob.length
                     )
+                sym_count += 1
+        t_syms = time.perf_counter()
+
+        total_ms = (t_syms - t_start) * 1000
+        if total_ms > 50:  # log slow files (>50ms)
+            logger.warning(
+                "slow file %s: %.1fms total "
+                "(needs=%.1f scan=%.1f read=%.1f hash=%.1f blob=%.1f "
+                "upsert=%.1f aot=%.1f syms[%d]=%.1f)",
+                path.name,
+                total_ms,
+                (t_needs - t_check) * 1000,
+                (t_scan - t_needs) * 1000,
+                (t_read - t_scan) * 1000,
+                (t_hash - t_read) * 1000,
+                (t_blob - t_hash) * 1000,
+                (t_upsert - t_blob) * 1000,
+                (t_aot - t_upsert) * 1000,
+                sym_count,
+                (t_syms - t_aot) * 1000,
+            )
 
         return IndexResult(
             status="registered",
