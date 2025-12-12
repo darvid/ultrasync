@@ -503,12 +503,16 @@ class JITIndexManager:
         source_code: str,
         file_path: str | None = None,
         symbol_type: str = "snippet",
+        line_start: int | None = None,
+        line_end: int | None = None,
     ) -> IndexResult:
         content = source_code.encode("utf-8")
         blob_entry = self.blob.append(content)
 
+        start = line_start or 0
+        end = line_end or start
         if file_path:
-            key = hash64_sym_key(file_path, name, symbol_type, 0, 0)
+            key = hash64_sym_key(file_path, name, symbol_type, start, end)
         else:
             key = hash64(f"snippet:{name}:{source_code[:100]}")
 
@@ -522,6 +526,26 @@ class JITIndexManager:
             embedding = self.provider.embed(embed_text)
 
         self.vector_cache.put(key, embedding)
+
+        # persist embedding to vector_store for search
+        vec_entry = self.vector_store.append(embedding)
+
+        # persist to tracker if file_path provided (required for tracker)
+        if file_path:
+            self.tracker.upsert_symbol(
+                file_path=Path(file_path),
+                name=name,
+                kind=symbol_type,
+                line_start=start,
+                line_end=end if end else None,
+                blob_offset=blob_entry.offset,
+                blob_length=blob_entry.length,
+                key_hash=key,
+            )
+            # update vector location so search_vectors finds it
+            self.tracker.update_symbol_vector(
+                key, vec_entry.offset, vec_entry.length
+            )
 
         return IndexResult(
             status="added",

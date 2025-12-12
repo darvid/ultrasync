@@ -13,6 +13,22 @@ from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.patterns import PatternSetManager
 from galaxybrain.threads import ThreadManager
 
+
+def _key_to_hex(key_hash: int | None) -> str | None:
+    """Convert key_hash to hex string for JSON safety."""
+    if key_hash is None:
+        return None
+    return f"0x{key_hash:016x}"
+
+
+def _hex_to_key(key_str: str | int) -> int:
+    """Parse key_hash from hex string or int."""
+    if isinstance(key_str, int):
+        return key_str
+    if key_str.startswith("0x"):
+        return int(key_str, 16)
+    return int(key_str)
+
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -612,7 +628,18 @@ context:api, context:data, context:infra
             Index result with status, symbol count, and bytes written
         """
         result = await state.jit_manager.index_file(Path(path), force=force)
-        return asdict(result)
+        response = asdict(result)
+        response["key_hash"] = _key_to_hex(result.key_hash)
+
+        # hint when file indexed but specific symbol/component wasn't found
+        if result.status == "skipped" and result.reason == "up_to_date":
+            response["hint"] = (
+                "File already indexed but specific element not found. Use "
+                "jit_add_symbol(name='descriptive name', source_code='...', "
+                "file_path='path', line_start=N) to add inline JSX/UI "
+                "elements to the index for future searches."
+            )
+        return response
 
     @mcp.tool()
     async def jit_index_directory(
@@ -651,26 +678,33 @@ context:api, context:data, context:infra
         source_code: str,
         file_path: str | None = None,
         symbol_type: str = "snippet",
+        line_start: int | None = None,
+        line_end: int | None = None,
     ) -> dict[str, Any]:
         """Add a code symbol directly to the JIT index.
 
-        Use this to index specific code snippets without parsing a file.
-        Useful for adding context from external sources or manually
-        curated code examples.
+        Use this when jit_search can't find inline JSX, UI elements, or
+        nested code that isn't extracted as a standalone symbol. This
+        adds it to the index so future searches find it.
 
         Args:
-            name: Symbol name for retrieval
+            name: Descriptive name for retrieval (e.g. "Generate Contacts
+                menu item")
             source_code: The actual source code content
-            file_path: Optional associated file path
-            symbol_type: Type of symbol (default: "snippet")
+            file_path: Associated file path (required for persistence)
+            symbol_type: Type - "snippet", "jsx_element", "ui_component"
+            line_start: Starting line number in the file
+            line_end: Ending line number (defaults to line_start)
 
         Returns:
             Result with key_hash for later retrieval
         """
         result = await state.jit_manager.add_symbol(
-            name, source_code, file_path, symbol_type
+            name, source_code, file_path, symbol_type, line_start, line_end
         )
-        return asdict(result)
+        response = asdict(result)
+        response["key_hash"] = _key_to_hex(result.key_hash)
+        return response
 
     @mcp.tool()
     async def jit_reindex_file(path: str) -> dict[str, Any]:
@@ -686,7 +720,9 @@ context:api, context:data, context:infra
             Index result with updated stats
         """
         result = await state.jit_manager.reindex_file(Path(path))
-        return asdict(result)
+        response = asdict(result)
+        response["key_hash"] = _key_to_hex(result.key_hash)
+        return response
 
     @mcp.tool()
     def jit_get_stats() -> dict[str, Any]:
@@ -784,7 +820,17 @@ context:api, context:data, context:infra
             primary_source = stats.grep_sources[0]
         else:
             primary_source = "semantic"
-        return {
+
+        # add hint when results are weak/empty
+        hint = None
+        top_score = results[0].score if results else 0
+        if not results or top_score < 0.7:
+            hint = (
+                "Weak/no matches. If you find the file via grep/read, "
+                "call jit_index_file(path) so future searches find it."
+            )
+
+        response: dict[str, Any] = {
             "elapsed_ms": round(elapsed_ms, 2),
             "source": primary_source,
             "results": [
@@ -792,29 +838,38 @@ context:api, context:data, context:infra
                     "type": r.type,
                     "path": r.path,
                     "name": r.name,
-                    "key_hash": r.key_hash,
+                    "kind": r.kind,
+                    "key_hash": _key_to_hex(r.key_hash),
                     "score": r.score,
                     "source": r.source,
+                    "line_start": r.line_start,
+                    "line_end": r.line_end,
                 }
                 for r in results
             ],
         }
+        if hint:
+            response["hint"] = hint
+        return response
 
     @mcp.tool()
-    def jit_get_source(key_hash: int) -> dict[str, Any]:
+    def jit_get_source(key_hash: str) -> dict[str, Any]:
         """Get source content for a file, symbol, or memory by key hash.
 
         Retrieves the actual source code or content stored in the blob
         for any indexed item. Use key_hash values from jit_search results.
 
         Args:
-            key_hash: The key hash from search results
+            key_hash: The key hash from search results (hex string like
+                "0x1234..." or decimal string)
 
         Returns:
             Content with type, path, name, lines, and source code
         """
+        key = _hex_to_key(key_hash)
+
         # try file first
-        file_record = state.jit_manager.tracker.get_file_by_key(key_hash)
+        file_record = state.jit_manager.tracker.get_file_by_key(key)
         if file_record:
             content = state.jit_manager.blob.read(
                 file_record.blob_offset, file_record.blob_length
@@ -822,12 +877,12 @@ context:api, context:data, context:infra
             return {
                 "type": "file",
                 "path": file_record.path,
-                "key_hash": key_hash,
+                "key_hash": _key_to_hex(key),
                 "source": content.decode("utf-8", errors="replace"),
             }
 
         # try symbol
-        sym_record = state.jit_manager.tracker.get_symbol_by_key(key_hash)
+        sym_record = state.jit_manager.tracker.get_symbol_by_key(key)
         if sym_record:
             content = state.jit_manager.blob.read(
                 sym_record.blob_offset, sym_record.blob_length
@@ -839,12 +894,12 @@ context:api, context:data, context:infra
                 "kind": sym_record.kind,
                 "line_start": sym_record.line_start,
                 "line_end": sym_record.line_end,
-                "key_hash": key_hash,
+                "key_hash": _key_to_hex(key),
                 "source": content.decode("utf-8", errors="replace"),
             }
 
         # try memory
-        memory_record = state.jit_manager.tracker.get_memory_by_key(key_hash)
+        memory_record = state.jit_manager.tracker.get_memory_by_key(key)
         if memory_record:
             content = state.jit_manager.blob.read(
                 memory_record.blob_offset, memory_record.blob_length
@@ -852,7 +907,7 @@ context:api, context:data, context:infra
             return {
                 "type": "memory",
                 "id": memory_record.id,
-                "key_hash": key_hash,
+                "key_hash": _key_to_hex(key),
                 "source": content.decode("utf-8", errors="replace"),
             }
 
@@ -986,11 +1041,11 @@ context:api, context:data, context:infra
 
         return {
             "id": entry.id,
-            "key_hash": entry.key_hash,
+            "key_hash": _key_to_hex(entry.key_hash),
             "task": entry.task,
             "insights": entry.insights,
             "context": entry.context,
-            "symbol_keys": entry.symbol_keys,
+            "symbol_keys": [_key_to_hex(k) for k in (entry.symbol_keys or [])],
             "text": entry.text,
             "tags": entry.tags,
             "created_at": entry.created_at,
@@ -1025,7 +1080,7 @@ context:api, context:data, context:infra
         return [
             {
                 "id": e.id,
-                "key_hash": e.key_hash,
+                "key_hash": _key_to_hex(e.key_hash),
                 "task": e.task,
                 "insights": e.insights,
                 "context": e.context,
@@ -1165,7 +1220,7 @@ context:api, context:data, context:infra
                 results.append(
                     {
                         "memory_id": mem.id,
-                        "key_hash": mem.key_hash,
+                        "key_hash": _key_to_hex(mem.key_hash),
                         "task": mem.task,
                         "matches": [
                             {

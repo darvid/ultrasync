@@ -229,22 +229,27 @@ def cmd_query(args: argparse.Namespace) -> int:
             if r.key_hash:
                 print(f"        key: 0x{r.key_hash:016x} ({r.source})")
         else:
-            sym_record = manager.tracker.get_symbol_by_key(r.key_hash or 0)
-            if sym_record:
+            # use SearchResult fields directly
+            kind_label = (r.kind or "symbol").upper()
+            if r.path:
                 try:
-                    rel_path = Path(sym_record.file_path).relative_to(
-                        Path.cwd()
-                    )
+                    rel_path = Path(r.path).relative_to(Path.cwd())
                 except ValueError:
-                    rel_path = Path(sym_record.file_path)
+                    rel_path = Path(r.path)
+                line_info = ""
+                if r.line_start:
+                    if r.line_end and r.line_end != r.line_start:
+                        line_info = f":{r.line_start}-{r.line_end}"
+                    else:
+                        line_info = f":{r.line_start}"
                 print(
-                    f"[{r.score:.3f}] {sym_record.kind.upper()} "
-                    f"{sym_record.name} ({rel_path}:{sym_record.line_start})"
+                    f"[{r.score:.3f}] {kind_label} "
+                    f"{r.name or 'unknown'} ({rel_path}{line_info})"
                 )
                 print(f"        key: 0x{r.key_hash:016x} ({r.source})")
             else:
                 print(
-                    f"[{r.score:.3f}] SYMBOL "
+                    f"[{r.score:.3f}] {kind_label} "
                     f"key:0x{r.key_hash:016x} ({r.source})"
                 )
         print()
