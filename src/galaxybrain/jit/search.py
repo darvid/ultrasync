@@ -162,12 +162,19 @@ def search(
         logger.info("search: no results from any strategy")
         return [], stats
 
-    # Opportunistic JIT indexing of discovered files
+    # Rank grep results by relevance BEFORE indexing
+    # so we prioritize embedding the best matches first
+    ranked_files = _rank_grep_results(query, found_files)
     logger.info(
-        "search: grep found %d files, JIT indexing...", len(found_files)
+        "search: grep found %d files, top: %s (%.2f)",
+        len(ranked_files),
+        ranked_files[0][0].name if ranked_files else "none",
+        ranked_files[0][2] if ranked_files else 0,
     )
+
+    # Opportunistic JIT indexing of discovered files (ranked order)
     indexed_keys: list[int] = []
-    for file_path, _source in found_files[:20]:  # cap at 20
+    for file_path, _source, _score in ranked_files[:20]:  # cap at 20
         try:
             index_result = manager.register_file(file_path)
             if index_result.key_hash:
@@ -211,16 +218,16 @@ def search(
                     )
             return output, stats
 
-    # Fall through: return raw grep hits if semantic search still empty
-    logger.info("search: returning raw grep hits (no semantic match)")
+    # Fall through: return ranked grep hits (already ranked above)
+    logger.info("search: returning ranked grep hits")
     output = []
-    for file_path, source in found_files[:top_k]:
+    for file_path, source, score in ranked_files[:top_k]:
         output.append(
             SearchResult(
                 type="file",
                 path=str(file_path),
                 key_hash=None,
-                score=0.0,
+                score=score,
                 source=source,
             )
         )
@@ -339,9 +346,28 @@ def _grep_fallback(
             if "rg_fallback" not in stats.grep_sources:
                 stats.grep_sources.append("rg_fallback")
 
-    # 5. simple literal fallback if symbol patterns found nothing
+    # 5. flexible identifier pattern (matches PascalCase, snake_case, etc.)
+    # "JIT index manager" -> (?i)jit[\s_\-\.]*index[\s_\-\.]*manager
+    # matches: JITIndexManager, jit_index_manager, jit-index-manager, etc.
     if not found_files:
-        logger.debug("search: symbol patterns empty, trying literal search")
+        flexible_pattern = _build_flexible_pattern(query)
+        if flexible_pattern:
+            logger.debug(
+                "search: trying flexible pattern: %s", flexible_pattern
+            )
+            rg_flex = run_cmd(
+                ["rg", "-l", "-e", flexible_pattern, "."],
+                timeout=10,
+            )
+            for f in rg_flex:
+                path = root / f
+                found_files.append((path, "flexible_pattern"))
+                if "flexible_pattern" not in stats.grep_sources:
+                    stats.grep_sources.append("flexible_pattern")
+
+    # 6. simple literal fallback if nothing else worked
+    if not found_files:
+        logger.debug("search: trying literal search")
         rg_literal = run_cmd(
             ["rg", "-l", "-F", query, "."],
             timeout=10,
@@ -358,3 +384,97 @@ def _grep_fallback(
         stats.grep_sources,
     )
     return found_files
+
+
+def _rank_grep_results(
+    query: str,
+    found_files: list[tuple[Path, str]],
+) -> list[tuple[Path, str, float]]:
+    """Rank grep results by relevance to the query.
+
+    Scoring:
+    - Exact symbol match (class/def/fn with exact name): 1.0
+    - File path contains all query words: 0.8
+    - File name contains query words: 0.6
+    - Pattern match in content: 0.4
+    - Base score for being found: 0.2
+    """
+    query_lower = query.lower()
+    query_words = query_lower.split()
+
+    # build pattern for exact symbol definition
+    # "JIT index manager" -> "JITIndexManager", "jit_index_manager"
+    condensed = "".join(query_words)  # "jitindexmanager"
+    snake = "_".join(query_words)  # "jit_index_manager"
+
+    ranked: list[tuple[Path, str, float]] = []
+
+    for file_path, source in found_files:
+        score = 0.2  # base score for being found
+
+        path_str = str(file_path).lower()
+        file_name = file_path.name.lower()
+        file_stem = file_path.stem.lower()
+
+        # check file path/name relevance
+        if all(w in file_stem for w in query_words):
+            score = max(score, 0.7)
+        elif all(w in file_name for w in query_words):
+            score = max(score, 0.6)
+        elif all(w in path_str for w in query_words):
+            score = max(score, 0.5)
+
+        # check content for exact symbol definitions
+        try:
+            content = file_path.read_text(errors="ignore").lower()
+
+            # exact class/function/struct name match (highest priority)
+            # matches: class JITIndexManager, def jit_index_manager, etc.
+            symbol_patterns = [
+                rf"(class|def|fn|struct|interface|type)\s+{re.escape(condensed)}\b",
+                rf"(class|def|fn|struct|interface|type)\s+{re.escape(snake)}\b",
+            ]
+            for pat in symbol_patterns:
+                if re.search(pat, content):
+                    score = max(score, 1.0)
+                    break
+
+            # symbol name appears as identifier (medium priority)
+            if condensed in content or snake in content:
+                score = max(score, 0.8)
+
+        except OSError:
+            pass
+
+        ranked.append((file_path, source, score))
+
+    # sort by score descending, then by path for stability
+    ranked.sort(key=lambda x: (-x[2], str(x[0])))
+    return ranked
+
+
+def _build_flexible_pattern(query: str) -> str | None:
+    r"""Build regex matching common identifier naming conventions.
+
+    Converts natural language query to pattern matching:
+    - PascalCase: JITIndexManager
+    - camelCase: jitIndexManager
+    - snake_case: jit_index_manager
+    - kebab-case: jit-index-manager
+    - dot.case: jit.index.manager
+    - spaces: JIT Index Manager
+
+    "JIT index manager" -> (?i)jit[\s_\-\.]*index[\s_\-\.]*manager
+
+    The key insight: [\s_\-\.]* matches ZERO or more separators,
+    so for PascalCase/camelCase it matches empty string between words.
+    """
+    words = query.lower().split()
+    if len(words) < 2:
+        return None  # single word doesn't need flexible pattern
+
+    # allow optional separators (space, underscore, hyphen, dot) between words
+    sep = r"[\s_\-\.]*"
+    escaped = [re.escape(w) for w in words]
+    pattern_body = sep.join(escaped)
+    return f"(?i){pattern_body}"

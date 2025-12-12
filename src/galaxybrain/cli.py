@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -1039,6 +1040,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     tracker_db = data_dir / "tracker.db"
     blob_file = data_dir / "blob.dat"
     index_file = data_dir / "index.dat"
+    vector_file = data_dir / "vectors.dat"
 
     if not tracker_db.exists():
         print(f"error: tracker database not found at {tracker_db}")
@@ -1058,19 +1060,60 @@ def cmd_stats(args: argparse.Namespace) -> int:
     cur.execute("SELECT COUNT(*) FROM memories")
     memory_count = cur.fetchone()[0]
 
+    # count embedded files/symbols
+    cur.execute("SELECT COUNT(*) FROM files WHERE vector_offset IS NOT NULL")
+    embedded_files = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM symbols WHERE vector_offset IS NOT NULL")
+    embedded_symbols = cur.fetchone()[0]
+
     conn.close()
 
     blob_size = blob_file.stat().st_size if blob_file.exists() else 0
     index_size = index_file.stat().st_size if index_file.exists() else 0
+    vector_size = vector_file.stat().st_size if vector_file.exists() else 0
+
+    # AOT index stats
+    aot_count = 0
+    aot_capacity = 0
+    try:
+        from galaxybrain_index import MutableGlobalIndex
+
+        if index_file.exists():
+            aot = MutableGlobalIndex.open(str(index_file))
+            aot_count = aot.count()
+            aot_capacity = aot.capacity()
+    except ImportError:
+        pass
 
     print(f"Index Stats ({data_dir})")
     print("-" * 40)
-    print(f"files:      {file_count}")
-    print(f"symbols:    {symbol_count}")
-    print(f"memories:   {memory_count}")
-    print(f"blob:       {blob_size / 1024 / 1024:.2f} MB")
+
+    # tracker (sqlite) stats
+    print("Tracker (SQLite):")
+    print(f"  files:      {file_count}")
+    print(f"  symbols:    {symbol_count}")
+    print(f"  memories:   {memory_count}")
+
+    # blob store
+    print(f"\nBlob Store:   {blob_size / 1024 / 1024:.2f} MB")
+
+    # AOT index
     if index_size > 0:
-        print(f"AOT index:  {index_size / 1024:.1f} KB")
+        print(f"\nAOT Index:    {index_size / 1024:.1f} KB")
+        print(f"  entries:    {aot_count}")
+        print(f"  capacity:   {aot_capacity}")
+        load_pct = (aot_count / aot_capacity * 100) if aot_capacity else 0
+        print(f"  load:       {load_pct:.1f}%")
+    else:
+        print("\nAOT Index:    not initialized")
+
+    # vector store (persistent embeddings)
+    print(f"\nVector Store: {vector_size / 1024:.1f} KB")
+    file_pct = (embedded_files / file_count * 100) if file_count else 0
+    sym_pct = (embedded_symbols / symbol_count * 100) if symbol_count else 0
+    print(f"  files:      {embedded_files}/{file_count} ({file_pct:.1f}%)")
+    print(f"  symbols:    {embedded_symbols}/{symbol_count} ({sym_pct:.1f}%)")
 
     return 0
 
@@ -1183,11 +1226,6 @@ def main() -> int:
     query_parser.add_argument(
         "--key",
         help="direct key lookup (e.g., 'file:src/foo.py')",
-    )
-    query_parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="enable debug logging to see search strategy",
     )
 
     # symbols command
@@ -1550,6 +1588,14 @@ def main() -> int:
     )
 
     args = parser.parse_args()
+
+    # universal log level from env
+    log_level = os.environ.get("LOGLEVEL", "WARNING").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.WARNING),
+        format="%(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
     if args.command == "index":
         return cmd_index(args)

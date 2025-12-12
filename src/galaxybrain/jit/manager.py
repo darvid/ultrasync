@@ -12,6 +12,7 @@ from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
 from galaxybrain.jit.memory import MemoryManager
 from galaxybrain.jit.tracker import FileTracker
+from galaxybrain.jit.vector_store import VectorStore
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 
 try:
@@ -46,6 +47,10 @@ class IndexStats:
     aot_index_count: int = 0
     aot_index_capacity: int = 0
     aot_index_size_bytes: int = 0
+    # persisted vector stats
+    vector_store_bytes: int = 0
+    embedded_file_count: int = 0
+    embedded_symbol_count: int = 0
 
 
 @dataclass
@@ -71,6 +76,7 @@ class JITIndexManager:
 
         self.tracker = FileTracker(data_dir / "tracker.db")
         self.blob = BlobAppender(data_dir / "blob.dat")
+        self.vector_store = VectorStore(data_dir / "vectors.dat")
         self.vector_cache = VectorCache(max_vector_cache_mb * 1024 * 1024)
         self.embed_queue = EmbedQueue(embedding_provider, embed_batch_size)
         self.scanner = FileScanner()
@@ -138,8 +144,13 @@ class JITIndexManager:
             return IndexResult(status="error", reason="not_found")
 
         if not force and not self.tracker.needs_index(path):
+            # return existing key_hash so caller can still embed
+            existing = self.tracker.get_file(path)
             return IndexResult(
-                status="skipped", reason="up_to_date", path=str(path)
+                status="skipped",
+                reason="up_to_date",
+                path=str(path),
+                key_hash=existing.key_hash if existing else None,
             )
 
         metadata = self.scanner.scan(path)
@@ -215,43 +226,87 @@ class JITIndexManager:
 
         Returns True if embedding exists or was created, False on error.
         Called lazily during search to warm the cache.
+
+        Priority:
+        1. Check in-memory cache
+        2. Load from persistent vector store
+        3. Compute fresh embedding and persist
         """
+        # 1. check in-memory cache
         if self.vector_cache.get(key_hash) is not None:
             logger.debug("ensure_embedded: 0x%016x already cached", key_hash)
             return True
 
-        # look up in tracker to get file path
+        # 2. check persistent vector store
         file_record = self.tracker.get_file_by_key(key_hash)
         if file_record:
-            path = Path(file_record.path)
-            if not path.exists():
+            # try to load from persistent storage
+            if file_record.vector_offset is not None:
+                vec = self.vector_store.read(
+                    file_record.vector_offset, file_record.vector_length or 0
+                )
+                if vec is not None:
+                    self.vector_cache.put(key_hash, vec)
+                    logger.debug(
+                        "ensure_embedded: 0x%016x loaded from store",
+                        key_hash,
+                    )
+                    return True
+
+            # 3. compute fresh embedding
+            p = Path(file_record.path)
+            if not p.exists():
                 logger.debug(
                     "ensure_embedded: 0x%016x file not found: %s",
                     key_hash,
-                    path,
+                    p,
                 )
                 return False
-            metadata = self.scanner.scan(path)
+            metadata = self.scanner.scan(p)
             if metadata:
                 text = metadata.to_embedding_text()
                 embedding = self.provider.embed(text)
+                # persist to vector store
+                entry = self.vector_store.append(embedding)
+                self.tracker.update_file_vector(
+                    key_hash, entry.offset, entry.length
+                )
                 self.vector_cache.put(key_hash, embedding)
                 logger.debug(
                     "ensure_embedded: 0x%016x JIT embedded file %s",
                     key_hash,
-                    path.name,
+                    p.name,
                 )
                 return True
             logger.debug(
-                "ensure_embedded: 0x%016x scan failed for %s", key_hash, path
+                "ensure_embedded: 0x%016x scan failed for %s", key_hash, p
             )
             return False
 
         # check if it's a symbol
         sym_record = self.tracker.get_symbol_by_key(key_hash)
         if sym_record:
+            # try to load from persistent storage
+            if sym_record.vector_offset is not None:
+                vec = self.vector_store.read(
+                    sym_record.vector_offset, sym_record.vector_length or 0
+                )
+                if vec is not None:
+                    self.vector_cache.put(key_hash, vec)
+                    logger.debug(
+                        "ensure_embedded: 0x%016x loaded symbol from store",
+                        key_hash,
+                    )
+                    return True
+
+            # compute fresh embedding
             text = f"{sym_record.kind} {sym_record.name}"
             embedding = self.provider.embed(text)
+            # persist to vector store
+            entry = self.vector_store.append(embedding)
+            self.tracker.update_symbol_vector(
+                key_hash, entry.offset, entry.length
+            )
             self.vector_cache.put(key_hash, embedding)
             logger.debug(
                 "ensure_embedded: 0x%016x JIT embedded symbol %s",
@@ -616,6 +671,9 @@ class JITIndexManager:
             aot_index_count=aot_count,
             aot_index_capacity=aot_capacity,
             aot_index_size_bytes=aot_size,
+            vector_store_bytes=self.vector_store.size_bytes,
+            embedded_file_count=self.tracker.embedded_file_count(),
+            embedded_symbol_count=self.tracker.embedded_symbol_count(),
         )
 
     def get_vector(self, key_hash: int):
@@ -650,18 +708,27 @@ class JITIndexManager:
         query_vector,
         top_k: int = 10,
     ) -> list[tuple[int, float]]:
-        """Search only cached vectors (fast but may miss unembedded files)."""
+        """Search all persisted vectors + cached vectors.
+
+        Priority:
+        1. Check in-memory cache first (fast)
+        2. Load persisted vectors from tracker (files with vector_offset)
+        """
         import numpy as np
 
         results: list[tuple[int, float]] = []
+        seen_keys: set[int] = set()
 
         cached_count = self.vector_cache.count
+        persisted_count = self.tracker.embedded_file_count()
         logger.debug(
-            "search_vectors: %d cached vectors, %d registered files",
+            "search_vectors: %d cached, %d persisted, %d registered",
             cached_count,
+            persisted_count,
             self.tracker.file_count(),
         )
 
+        # 1. search in-memory cache first
         for key_hash in self.vector_cache.keys():
             vec = self.vector_cache.get(key_hash)
             if vec is not None:
@@ -673,6 +740,27 @@ class JITIndexManager:
                     )
                 )
                 results.append((key_hash, score))
+                seen_keys.add(key_hash)
+
+        # 2. search persisted vectors (files with vector_offset set)
+        for file_record in self.tracker.iter_files():
+            if file_record.key_hash in seen_keys:
+                continue
+            if file_record.vector_offset is None:
+                continue
+
+            # load vector from persistent store
+            vec = self.vector_store.read(
+                file_record.vector_offset, file_record.vector_length or 0
+            )
+            if vec is not None:
+                # cache it for future use
+                self.vector_cache.put(file_record.key_hash, vec)
+                dot = np.dot(query_vector, vec)
+                denom = np.linalg.norm(query_vector) * np.linalg.norm(vec)
+                score = float(dot / (denom + 1e-9))
+                results.append((file_record.key_hash, score))
+                seen_keys.add(file_record.key_hash)
 
         results.sort(key=lambda x: x[1], reverse=True)
         logger.debug(

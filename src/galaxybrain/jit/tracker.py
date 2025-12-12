@@ -18,6 +18,8 @@ class FileRecord:
     blob_length: int
     key_hash: int
     indexed_at: float
+    vector_offset: int | None = None
+    vector_length: int | None = None
 
 
 @dataclass
@@ -31,6 +33,8 @@ class SymbolRecord:
     blob_offset: int
     blob_length: int
     key_hash: int
+    vector_offset: int | None = None
+    vector_length: int | None = None
 
 
 @dataclass
@@ -56,6 +60,8 @@ class MemoryRecord:
     key_hash: int
     created_at: float
     updated_at: float | None
+    vector_offset: int | None = None
+    vector_length: int | None = None
 
 
 class FileTracker:
@@ -89,7 +95,9 @@ class FileTracker:
                 blob_offset INTEGER NOT NULL,
                 blob_length INTEGER NOT NULL,
                 key_hash INTEGER NOT NULL,
-                indexed_at REAL NOT NULL
+                indexed_at REAL NOT NULL,
+                vector_offset INTEGER,
+                vector_length INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
             CREATE INDEX IF NOT EXISTS idx_files_key ON files(key_hash);
@@ -104,6 +112,8 @@ class FileTracker:
                 blob_offset INTEGER NOT NULL,
                 blob_length INTEGER NOT NULL,
                 key_hash INTEGER NOT NULL,
+                vector_offset INTEGER,
+                vector_length INTEGER,
                 FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
@@ -135,7 +145,9 @@ class FileTracker:
                 blob_length INTEGER NOT NULL,
                 key_hash INTEGER UNIQUE NOT NULL,
                 created_at REAL NOT NULL,
-                updated_at REAL
+                updated_at REAL,
+                vector_offset INTEGER,
+                vector_length INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_memories_task ON memories(task);
             CREATE INDEX IF NOT EXISTS idx_memories_key_hash
@@ -144,6 +156,47 @@ class FileTracker:
                 ON memories(created_at);
         """
         )
+        self.conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """Add new columns to existing tables if missing."""
+        # check if vector columns exist in files table
+        cursor = self.conn.execute("PRAGMA table_info(files)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "vector_offset" not in columns:
+            self.conn.execute(
+                "ALTER TABLE files ADD COLUMN vector_offset INTEGER"
+            )
+            self.conn.execute(
+                "ALTER TABLE files ADD COLUMN vector_length INTEGER"
+            )
+
+        # check symbols table
+        cursor = self.conn.execute("PRAGMA table_info(symbols)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "vector_offset" not in columns:
+            self.conn.execute(
+                "ALTER TABLE symbols ADD COLUMN vector_offset INTEGER"
+            )
+            self.conn.execute(
+                "ALTER TABLE symbols ADD COLUMN vector_length INTEGER"
+            )
+
+        # check memories table
+        cursor = self.conn.execute("PRAGMA table_info(memories)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        if "vector_offset" not in columns:
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN vector_offset INTEGER"
+            )
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN vector_length INTEGER"
+            )
+
         self.conn.commit()
 
     def close(self) -> None:
@@ -184,6 +237,8 @@ class FileTracker:
             blob_length=row["blob_length"],
             key_hash=to_unsigned_64(row["key_hash"]),
             indexed_at=row["indexed_at"],
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
         )
 
     def get_file_by_key(self, key_hash: int) -> FileRecord | None:
@@ -206,6 +261,8 @@ class FileTracker:
             blob_length=row["blob_length"],
             key_hash=to_unsigned_64(row["key_hash"]),
             indexed_at=row["indexed_at"],
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
         )
 
     def upsert_file(
@@ -280,6 +337,8 @@ class FileTracker:
                 blob_offset=row["blob_offset"],
                 blob_length=row["blob_length"],
                 key_hash=to_unsigned_64(row["key_hash"]),
+                vector_offset=row["vector_offset"],
+                vector_length=row["vector_length"],
             )
             for row in rows
         ]
@@ -311,6 +370,8 @@ class FileTracker:
             blob_offset=row["blob_offset"],
             blob_length=row["blob_length"],
             key_hash=to_unsigned_64(row["key_hash"]),
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
         )
 
     def upsert_symbol(
@@ -436,6 +497,66 @@ class FileTracker:
         ).fetchone()
         return row["cnt"]
 
+    def embedded_file_count(self) -> int:
+        """Count files that have vectors stored."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM files WHERE vector_offset IS NOT NULL"
+        ).fetchone()
+        return row["cnt"]
+
+    def embedded_symbol_count(self) -> int:
+        """Count symbols that have vectors stored."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM symbols "
+            "WHERE vector_offset IS NOT NULL"
+        ).fetchone()
+        return row["cnt"]
+
+    def update_file_vector(
+        self, key_hash: int, vector_offset: int, vector_length: int
+    ) -> bool:
+        """Update vector location for a file."""
+        signed_key = to_signed_64(key_hash)
+        cursor = self.conn.execute(
+            """
+            UPDATE files SET vector_offset = ?, vector_length = ?
+            WHERE key_hash = ?
+            """,
+            (vector_offset, vector_length, signed_key),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def update_symbol_vector(
+        self, key_hash: int, vector_offset: int, vector_length: int
+    ) -> bool:
+        """Update vector location for a symbol."""
+        signed_key = to_signed_64(key_hash)
+        cursor = self.conn.execute(
+            """
+            UPDATE symbols SET vector_offset = ?, vector_length = ?
+            WHERE key_hash = ?
+            """,
+            (vector_offset, vector_length, signed_key),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def update_memory_vector(
+        self, key_hash: int, vector_offset: int, vector_length: int
+    ) -> bool:
+        """Update vector location for a memory."""
+        signed_key = to_signed_64(key_hash)
+        cursor = self.conn.execute(
+            """
+            UPDATE memories SET vector_offset = ?, vector_length = ?
+            WHERE key_hash = ?
+            """,
+            (vector_offset, vector_length, signed_key),
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
     def iter_files(self, batch_size: int = 100) -> Iterator[FileRecord]:
         """Iterate over all indexed files."""
         offset = 0
@@ -462,6 +583,8 @@ class FileTracker:
                     blob_length=row["blob_length"],
                     key_hash=to_unsigned_64(row["key_hash"]),
                     indexed_at=row["indexed_at"],
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
                 )
 
             offset += batch_size
@@ -645,6 +768,8 @@ class FileTracker:
             key_hash=to_unsigned_64(row["key_hash"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
         )
 
     def get_memory_by_key(self, key_hash: int) -> MemoryRecord | None:
@@ -670,6 +795,8 @@ class FileTracker:
             key_hash=to_unsigned_64(row["key_hash"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
         )
 
     def query_memories(
