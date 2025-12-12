@@ -665,9 +665,9 @@ class JITIndexManager:
             if result.status == "error":
                 errors.append(f"{file_path}: {result.reason}")
 
-            # progress output every 5% or every 50 files
+            # progress output every 2% or every 20 files
             pct = int(100 * (i + 1) / total) if total else 0
-            if pct >= last_pct + 5 or (i + 1) % 50 == 0:
+            if pct >= last_pct + 2 or (i + 1) % 20 == 0:
                 last_pct = pct
                 print(
                     f"[{pct:3d}%] {i + 1}/{total} - {file_path.name}",
