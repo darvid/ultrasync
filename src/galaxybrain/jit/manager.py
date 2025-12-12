@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,38 @@ class IndexResult:
     bytes: int = 0
     reason: str | None = None
     key_hash: int | None = None
+
+
+def _get_git_tracked_files(
+    root: Path,
+    extensions: set[str] | None = None,
+) -> list[Path] | None:
+    """Get list of files tracked by git, respecting .gitignore.
+
+    Returns None if not in a git repo or git command fails.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+
+        files = []
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            path = root / line
+            if path.is_file():
+                if extensions is None or path.suffix.lower() in extensions:
+                    files.append(path)
+        return files
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
 
 
 class JITIndexManager:
@@ -557,34 +590,48 @@ class JITIndexManager:
 
         By default (embed=False), only registers files (fast scan + blob).
         With embed=True, also computes embeddings (slow but enables search).
+
+        Respects .gitignore when inside a git repository.
         """
         import sys
 
         root = root.resolve()
-        patterns = patterns or [
-            "**/*.py",
-            "**/*.ts",
-            "**/*.tsx",
-            "**/*.js",
-            "**/*.rs",
-        ]
-        exclude = exclude or [
-            "node_modules",
-            ".git",
-            "__pycache__",
-            "target",
-            "dist",
-            ".venv",
-        ]
+
+        # supported extensions
+        supported_exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".rs"}
 
         mode_str = "indexing" if embed else "registering"
         print(f"scanning {root} for files...", file=sys.stderr, flush=True)
 
-        all_files: list[Path] = []
-        for pattern in patterns:
-            for f in root.glob(pattern):
-                if f.is_file() and not any(ex in str(f) for ex in exclude):
-                    all_files.append(f)
+        # try git first (respects .gitignore)
+        all_files = _get_git_tracked_files(root, supported_exts)
+
+        if all_files is not None:
+            logger.info("using git ls-files (respects .gitignore)")
+        else:
+            # fallback to glob with exclude patterns
+            logger.info("git not available, using glob with exclude list")
+            patterns = patterns or [
+                "**/*.py",
+                "**/*.ts",
+                "**/*.tsx",
+                "**/*.js",
+                "**/*.rs",
+            ]
+            exclude = exclude or [
+                "node_modules",
+                ".git",
+                "__pycache__",
+                "target",
+                "dist",
+                ".venv",
+            ]
+
+            all_files = []
+            for pattern in patterns:
+                for f in root.glob(pattern):
+                    if f.is_file() and not any(ex in str(f) for ex in exclude):
+                        all_files.append(f)
 
         all_files.sort()
         total = len(all_files)
