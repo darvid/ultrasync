@@ -298,6 +298,11 @@ Galaxybrain provides semantic indexing and search for codebases.
 - jit_search returns no relevant results
 - Index doesn't exist yet (run jit_full_index first)
 
+**After fallback search succeeds, index for next time:**
+- Found file via grep/read? → jit_index_file(path) before continuing
+- This makes future semantic searches find it instantly
+- Example: found contact-list.tsx via glob → index it → next query hits
+
 ## Indexing
 For large codebases, use jit_full_index to persist and show progress.
 
