@@ -7,7 +7,10 @@ Stores embedding vectors in a simple binary format:
 Vectors are appended and their (offset, length) stored in the tracker.
 """
 
+import shutil
 import struct
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +50,18 @@ class VectorStoreStats:
         return self.waste_ratio > 0.25 and self.dead_bytes > 1024 * 1024
 
 
+@dataclass
+class CompactionResult:
+    """Result of vector store compaction."""
+
+    bytes_before: int
+    bytes_after: int
+    bytes_reclaimed: int
+    vectors_copied: int
+    success: bool
+    error: str | None = None
+
+
 class VectorStore:
     """Append-only persistent vector storage."""
 
@@ -69,7 +84,6 @@ class VectorStore:
             vector = vector.astype(np.float32)
 
         dim = vector.shape[0]
-        # format: 4 bytes dim + dim * 4 bytes data
         header = struct.pack("<I", dim)
         data = vector.tobytes()
 
@@ -115,7 +129,6 @@ class VectorStore:
                 if len(header) < 4:
                     break
                 dim = struct.unpack("<I", header)[0]
-                # skip the vector data
                 f.seek(dim * 4, 1)
                 count += 1
 
@@ -144,3 +157,85 @@ class VectorStore:
             live_count=live_count,
             total_count=total_count,
         )
+
+    def compact(
+        self,
+        live_vectors: Iterator[tuple[int, int, int]],
+    ) -> tuple[CompactionResult, dict[int, tuple[int, int]]]:
+        """Compact the vector store by copying only live vectors.
+
+        Args:
+            live_vectors: Iterator of (key_hash, offset, length) for live
+                vectors. Must include ALL live vectors from tracker.
+
+        Returns:
+            (CompactionResult, offset_map) where offset_map is
+            {old_offset: (new_offset, length)} for updating tracker.
+        """
+        bytes_before = self._size
+        offset_map: dict[int, tuple[int, int]] = {}
+        vectors_copied = 0
+
+        live_list = list(live_vectors)
+
+        if not live_list:
+            self.path.write_bytes(b"")
+            self._size = 0
+            return CompactionResult(
+                bytes_before=bytes_before,
+                bytes_after=0,
+                bytes_reclaimed=bytes_before,
+                vectors_copied=0,
+                success=True,
+            ), {}
+
+        try:
+            temp_fd, temp_path = tempfile.mkstemp(
+                suffix=".dat",
+                prefix="vectors_compact_",
+                dir=self.path.parent,
+            )
+
+            new_offset = 0
+            with open(temp_fd, "wb") as temp_f:
+                with open(self.path, "rb") as src_f:
+                    for _key_hash, old_offset, length in live_list:
+                        src_f.seek(old_offset)
+                        data = src_f.read(length)
+
+                        if len(data) != length:
+                            raise ValueError(
+                                f"short read at {old_offset}: "
+                                f"expected {length}, got {len(data)}"
+                            )
+
+                        temp_f.write(data)
+                        offset_map[old_offset] = (new_offset, length)
+                        new_offset += length
+                        vectors_copied += 1
+
+            shutil.move(temp_path, self.path)
+            self._size = new_offset
+
+            return CompactionResult(
+                bytes_before=bytes_before,
+                bytes_after=new_offset,
+                bytes_reclaimed=bytes_before - new_offset,
+                vectors_copied=vectors_copied,
+                success=True,
+            ), offset_map
+
+        except Exception as e:
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            return CompactionResult(
+                bytes_before=bytes_before,
+                bytes_after=bytes_before,
+                bytes_reclaimed=0,
+                vectors_copied=0,
+                success=False,
+                error=str(e),
+            ), {}

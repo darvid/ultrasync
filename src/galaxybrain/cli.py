@@ -1515,6 +1515,54 @@ def cmd_warm(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compact(args: argparse.Namespace) -> int:
+    """Compact the vector store to reclaim dead bytes."""
+    EmbeddingProvider = _get_embedder_class()
+
+    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    if not data_dir.exists():
+        console.error(f"no index found at {data_dir}")
+        return 1
+
+    vector_file = data_dir / "vectors.dat"
+    if not vector_file.exists():
+        console.error("no vector store found")
+        return 1
+
+    embedder = EmbeddingProvider(model=args.model)
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+
+    stats = manager.get_stats()
+    console.header("Vector Store Compaction")
+    console.key_value("store size", f"{stats.vector_store_bytes / 1024:.1f} KB")
+    console.key_value("live bytes", f"{stats.vector_live_bytes / 1024:.1f} KB")
+    console.key_value("dead bytes", f"{stats.vector_dead_bytes / 1024:.1f} KB")
+    console.key_value("waste ratio", f"{stats.vector_waste_ratio * 100:.1f}%")
+    console.key_value("needs compaction", stats.vector_needs_compaction)
+    print()
+
+    if not args.force and not stats.vector_needs_compaction:
+        console.info("compaction not needed (use --force to override)")
+        return 0
+
+    console.info("compacting...")
+    result = manager.compact_vectors(force=args.force)
+
+    if not result.success:
+        console.error(f"compaction failed: {result.error}")
+        return 1
+
+    console.success("compaction complete")
+    console.key_value("bytes before", f"{result.bytes_before / 1024:.1f} KB")
+    console.key_value("bytes after", f"{result.bytes_after / 1024:.1f} KB")
+    console.key_value("reclaimed", f"{result.bytes_reclaimed / 1024:.1f} KB")
+    console.key_value("vectors copied", result.vectors_copied)
+
+    return 0
+
+
 def cmd_patterns(args: argparse.Namespace) -> int:
     """PatternSet management commands."""
     from galaxybrain.patterns import PatternSetManager
@@ -2275,6 +2323,29 @@ def main() -> int:
         help="max files to embed (default: all)",
     )
 
+    # compact command
+    compact_parser = subparsers.add_parser(
+        "compact",
+        help="compact vector store to reclaim dead bytes",
+    )
+    compact_parser.add_argument(
+        "-d",
+        "--directory",
+        help="directory with .galaxybrain data (default: current directory)",
+    )
+    compact_parser.add_argument(
+        "-m",
+        "--model",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
+    )
+    compact_parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="force compaction even if below thresholds",
+    )
+
     args = parser.parse_args()
 
     # configure structlog (respects GALAXYBRAIN_DEBUG env var)
@@ -2331,6 +2402,8 @@ def main() -> int:
         return cmd_warm(args)
     elif args.command == "patterns":
         return cmd_patterns(args)
+    elif args.command == "compact":
+        return cmd_compact(args)
 
     return 1
 

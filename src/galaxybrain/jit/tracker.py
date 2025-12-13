@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -19,6 +20,7 @@ class FileRecord:
     indexed_at: float
     vector_offset: int | None = None
     vector_length: int | None = None
+    detected_contexts: str | None = None  # JSON array of context types
 
 
 @dataclass
@@ -126,10 +128,13 @@ class FileTracker:
                 key_hash INTEGER NOT NULL,
                 indexed_at REAL NOT NULL,
                 vector_offset INTEGER,
-                vector_length INTEGER
+                vector_length INTEGER,
+                detected_contexts TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
             CREATE INDEX IF NOT EXISTS idx_files_key ON files(key_hash);
+            CREATE INDEX IF NOT EXISTS idx_files_contexts
+                ON files(detected_contexts);
 
             CREATE TABLE IF NOT EXISTS symbols (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,6 +236,16 @@ class FileTracker:
                 "ALTER TABLE files ADD COLUMN vector_length INTEGER"
             )
 
+        if "detected_contexts" not in columns:
+            self.conn.execute(
+                "ALTER TABLE files ADD COLUMN detected_contexts TEXT"
+            )
+            # create index for context queries
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_files_contexts "
+                "ON files(detected_contexts)"
+            )
+
         # check symbols table
         cursor = self.conn.execute("PRAGMA table_info(symbols)")
         columns = {row[1] for row in cursor.fetchall()}
@@ -308,6 +323,7 @@ class FileTracker:
             indexed_at=row["indexed_at"],
             vector_offset=row["vector_offset"],
             vector_length=row["vector_length"],
+            detected_contexts=row["detected_contexts"],
         )
 
     def get_file_by_key(self, key_hash: int) -> FileRecord | None:
@@ -332,6 +348,7 @@ class FileTracker:
             indexed_at=row["indexed_at"],
             vector_offset=row["vector_offset"],
             vector_length=row["vector_length"],
+            detected_contexts=row["detected_contexts"],
         )
 
     def upsert_file(
@@ -341,18 +358,23 @@ class FileTracker:
         blob_offset: int,
         blob_length: int,
         key_hash: int,
+        detected_contexts: list[str] | None = None,
     ) -> None:
         path_resolved = str(path.resolve())
         stat = path.stat()
         # Convert unsigned hash to signed for SQLite storage
         signed_key = to_signed_64(key_hash)
+        # Serialize contexts to JSON
+        contexts_json = (
+            json.dumps(detected_contexts) if detected_contexts else None
+        )
 
         self.conn.execute(
             """
             INSERT INTO files (
-                path, mtime, size, content_hash,
-                blob_offset, blob_length, key_hash, indexed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                path, mtime, size, content_hash, blob_offset,
+                blob_length, key_hash, indexed_at, detected_contexts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(path) DO UPDATE SET
                 mtime = excluded.mtime,
                 size = excluded.size,
@@ -360,7 +382,8 @@ class FileTracker:
                 blob_offset = excluded.blob_offset,
                 blob_length = excluded.blob_length,
                 key_hash = excluded.key_hash,
-                indexed_at = excluded.indexed_at
+                indexed_at = excluded.indexed_at,
+                detected_contexts = excluded.detected_contexts
             """,
             (
                 path_resolved,
@@ -371,6 +394,7 @@ class FileTracker:
                 blob_length,
                 signed_key,
                 time.time(),
+                contexts_json,
             ),
         )
         self._maybe_commit()
@@ -646,6 +670,137 @@ class FileTracker:
 
         return (total_bytes, total_count)
 
+    def iter_live_vectors(self) -> Iterator[tuple[int, int, int]]:
+        """Iterate all live vectors across all tables.
+
+        Yields:
+            (key_hash, vector_offset, vector_length) for each live vector
+        """
+        rows = self.conn.execute(
+            """
+            SELECT key_hash, vector_offset, vector_length
+            FROM files WHERE vector_offset IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            yield (
+                to_unsigned_64(row["key_hash"]),
+                row["vector_offset"],
+                row["vector_length"],
+            )
+
+        rows = self.conn.execute(
+            """
+            SELECT key_hash, vector_offset, vector_length
+            FROM symbols WHERE vector_offset IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            yield (
+                to_unsigned_64(row["key_hash"]),
+                row["vector_offset"],
+                row["vector_length"],
+            )
+
+        rows = self.conn.execute(
+            """
+            SELECT key_hash, vector_offset, vector_length
+            FROM memories WHERE vector_offset IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            yield (
+                to_unsigned_64(row["key_hash"]),
+                row["vector_offset"],
+                row["vector_length"],
+            )
+
+        rows = self.conn.execute(
+            """
+            SELECT key_hash, vector_offset, vector_length
+            FROM pattern_caches WHERE vector_offset IS NOT NULL
+            """
+        ).fetchall()
+        for row in rows:
+            yield (
+                to_unsigned_64(row["key_hash"]),
+                row["vector_offset"],
+                row["vector_length"],
+            )
+
+    def update_vector_offsets(
+        self, offset_map: dict[int, tuple[int, int]]
+    ) -> int:
+        """Update vector offsets after compaction.
+
+        Args:
+            offset_map: {old_offset: (new_offset, length)} mapping
+
+        Returns:
+            Number of vectors updated
+        """
+        updated = 0
+
+        for row in self.conn.execute(
+            "SELECT key_hash, vector_offset FROM files "
+            "WHERE vector_offset IS NOT NULL"
+        ).fetchall():
+            old_offset = row["vector_offset"]
+            if old_offset in offset_map:
+                new_offset, length = offset_map[old_offset]
+                self.conn.execute(
+                    "UPDATE files SET vector_offset = ?, vector_length = ? "
+                    "WHERE key_hash = ?",
+                    (new_offset, length, row["key_hash"]),
+                )
+                updated += 1
+
+        for row in self.conn.execute(
+            "SELECT key_hash, vector_offset FROM symbols "
+            "WHERE vector_offset IS NOT NULL"
+        ).fetchall():
+            old_offset = row["vector_offset"]
+            if old_offset in offset_map:
+                new_offset, length = offset_map[old_offset]
+                self.conn.execute(
+                    "UPDATE symbols SET vector_offset = ?, vector_length = ? "
+                    "WHERE key_hash = ?",
+                    (new_offset, length, row["key_hash"]),
+                )
+                updated += 1
+
+        for row in self.conn.execute(
+            "SELECT key_hash, vector_offset FROM memories "
+            "WHERE vector_offset IS NOT NULL"
+        ).fetchall():
+            old_offset = row["vector_offset"]
+            if old_offset in offset_map:
+                new_offset, length = offset_map[old_offset]
+                self.conn.execute(
+                    "UPDATE memories SET vector_offset = ?, vector_length = ? "
+                    "WHERE key_hash = ?",
+                    (new_offset, length, row["key_hash"]),
+                )
+                updated += 1
+
+        for row in self.conn.execute(
+            "SELECT key_hash, vector_offset FROM pattern_caches "
+            "WHERE vector_offset IS NOT NULL"
+        ).fetchall():
+            old_offset = row["vector_offset"]
+            if old_offset in offset_map:
+                new_offset, length = offset_map[old_offset]
+                self.conn.execute(
+                    "UPDATE pattern_caches "
+                    "SET vector_offset = ?, vector_length = ? "
+                    "WHERE key_hash = ?",
+                    (new_offset, length, row["key_hash"]),
+                )
+                updated += 1
+
+        self._maybe_commit()
+        return updated
+
     def update_file_vector(
         self, key_hash: int, vector_offset: int, vector_length: int
     ) -> bool:
@@ -717,6 +872,173 @@ class FileTracker:
                     blob_length=row["blob_length"],
                     key_hash=to_unsigned_64(row["key_hash"]),
                     indexed_at=row["indexed_at"],
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
+                    detected_contexts=row["detected_contexts"],
+                )
+
+            offset += batch_size
+
+    def iter_files_by_context(
+        self,
+        context: str,
+        batch_size: int = 100,
+    ) -> Iterator[FileRecord]:
+        """Iterate over files with a specific detected context.
+
+        This is a turbo-fast lookup using SQLite LIKE query on the
+        detected_contexts JSON array. No embeddings required.
+
+        Args:
+            context: Context type to filter by (e.g., "context:auth")
+            batch_size: Number of records to fetch per batch
+
+        Yields:
+            FileRecord objects matching the context
+        """
+        offset = 0
+        # Match context in JSON array: ["context:auth", ...]
+        like_pattern = f'%"{context}"%'
+
+        while True:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM files
+                WHERE detected_contexts LIKE ?
+                ORDER BY path
+                LIMIT ? OFFSET ?
+                """,
+                (like_pattern, batch_size, offset),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield FileRecord(
+                    path=row["path"],
+                    mtime=row["mtime"],
+                    size=row["size"],
+                    content_hash=row["content_hash"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                    indexed_at=row["indexed_at"],
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
+                    detected_contexts=row["detected_contexts"],
+                )
+
+            offset += batch_size
+
+    def get_context_stats(self) -> dict[str, int]:
+        """Get count of files for each detected context type.
+
+        Returns:
+            Dict mapping context type to file count
+        """
+        # Get all distinct contexts and count files
+        rows = self.conn.execute(
+            """
+            SELECT detected_contexts, COUNT(*) as cnt
+            FROM files
+            WHERE detected_contexts IS NOT NULL
+            GROUP BY detected_contexts
+            """
+        ).fetchall()
+
+        # Aggregate counts by individual context
+        context_counts: dict[str, int] = {}
+        for row in rows:
+            contexts_json = row["detected_contexts"]
+            if contexts_json:
+                contexts = json.loads(contexts_json)
+                for ctx in contexts:
+                    count = context_counts.get(ctx, 0)
+                    context_counts[ctx] = count + row["cnt"]
+
+        return context_counts
+
+    def list_available_contexts(self) -> list[str]:
+        """List all context types that have at least one file.
+
+        Returns:
+            Sorted list of context type strings
+        """
+        return sorted(self.get_context_stats().keys())
+
+    # -------------------------------------------------------------------------
+    # Insight queries - symbols with kind starting with "insight:"
+    # -------------------------------------------------------------------------
+
+    def get_insight_stats(self) -> dict[str, int]:
+        """Get count of symbols for each insight type.
+
+        Returns:
+            Dict mapping insight type to symbol count
+        """
+        rows = self.conn.execute(
+            """
+            SELECT kind, COUNT(*) as cnt
+            FROM symbols
+            WHERE kind LIKE 'insight:%'
+            GROUP BY kind
+            """
+        ).fetchall()
+
+        return {row["kind"]: row["cnt"] for row in rows}
+
+    def list_available_insights(self) -> list[str]:
+        """List all insight types that have at least one symbol.
+
+        Returns:
+            Sorted list of insight type strings
+        """
+        return sorted(self.get_insight_stats().keys())
+
+    def iter_insights_by_type(
+        self,
+        insight_type: str,
+        batch_size: int = 100,
+    ) -> Iterator[SymbolRecord]:
+        """Iterate over insight symbols of a specific type.
+
+        This is a turbo-fast lookup using SQLite index on kind.
+
+        Args:
+            insight_type: Insight type to filter by (e.g., "insight:todo")
+            batch_size: Number of records to fetch per batch
+
+        Yields:
+            SymbolRecord objects matching the insight type
+        """
+        offset = 0
+
+        while True:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM symbols
+                WHERE kind = ?
+                ORDER BY file_path, line_start
+                LIMIT ? OFFSET ?
+                """,
+                (insight_type, batch_size, offset),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            for row in rows:
+                yield SymbolRecord(
+                    id=row["id"],
+                    file_path=row["file_path"],
+                    name=row["name"],
+                    kind=row["kind"],
+                    line_start=row["line_start"],
+                    line_end=row["line_end"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
                     vector_offset=row["vector_offset"],
                     vector_length=row["vector_length"],
                 )

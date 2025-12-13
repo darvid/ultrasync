@@ -1037,6 +1037,161 @@ context:api, context:data, context:infra
         return asdict(stats)
 
     @mcp.tool()
+    def jit_list_contexts() -> dict[str, Any]:
+        """List all detected context types with file counts.
+
+        Returns context types auto-detected during AOT indexing via
+        pattern matching (no LLM required). Use these for turbo-fast
+        filtered queries with jit_files_by_context.
+
+        Context types include:
+        - context:auth - Authentication/authorization code
+        - context:frontend - React/Vue/DOM client-side code
+        - context:backend - Express/FastAPI/server-side code
+        - context:api - API endpoints and routes
+        - context:data - Database/ORM code
+        - context:testing - Test files
+        - context:infra - Docker/K8s/DevOps code
+        - context:ui - UI components
+        - context:billing - Payment/subscription code
+
+        Returns:
+            Dictionary with available contexts and their file counts
+        """
+        stats = state.jit_manager.tracker.get_context_stats()
+        available = state.jit_manager.tracker.list_available_contexts()
+        return {
+            "contexts": stats,
+            "available": available,
+            "total_contextualized_files": sum(stats.values()) if stats else 0,
+        }
+
+    @mcp.tool()
+    def jit_files_by_context(
+        context: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List files matching a detected context type (turbo-fast, no LLM).
+
+        This is a ~1ms SQLite query - no embedding lookup required.
+        Files are auto-classified during AOT indexing via pattern matching.
+
+        Use jit_list_contexts first to see available context types.
+
+        Args:
+            context: Context type to filter by (e.g., "context:auth")
+            limit: Maximum files to return
+
+        Returns:
+            List of file records matching the context
+        """
+        import json
+
+        results = []
+        for i, record in enumerate(
+            state.jit_manager.tracker.iter_files_by_context(context)
+        ):
+            if i >= limit:
+                break
+            results.append({
+                "path": record.path,
+                "key_hash": hex(record.key_hash),
+                "detected_contexts": json.loads(record.detected_contexts)
+                if record.detected_contexts
+                else [],
+            })
+        return results
+
+    @mcp.tool()
+    def jit_list_insights() -> dict[str, Any]:
+        """List all detected insight types with counts.
+
+        Returns insight types auto-detected during AOT indexing via
+        pattern matching (no LLM required). These are extracted as
+        symbols with line-level granularity.
+
+        Insight types include:
+        - insight:todo - TODO comments
+        - insight:fixme - FIXME comments
+        - insight:hack - HACK/workaround markers
+        - insight:bug - BUG markers
+        - insight:note - NOTE comments
+        - insight:invariant - Code invariants
+        - insight:assumption - Documented assumptions
+        - insight:decision - Design decisions
+        - insight:constraint - Constraints
+        - insight:pitfall - Pitfall/warning markers
+        - insight:optimize - Performance optimization markers
+        - insight:deprecated - Deprecation markers
+        - insight:security - Security markers
+
+        Returns:
+            Dictionary with available insights and their counts
+        """
+        stats = state.jit_manager.tracker.get_insight_stats()
+        available = state.jit_manager.tracker.list_available_insights()
+        return {
+            "insights": stats,
+            "available": available,
+            "total_insights": sum(stats.values()) if stats else 0,
+        }
+
+    @mcp.tool()
+    def jit_insights_by_type(
+        insight_type: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List insights of a specific type with file paths and line numbers.
+
+        This is a ~1ms SQLite query - no embedding lookup required.
+        Insights are auto-extracted during AOT indexing via pattern matching.
+
+        Use jit_list_insights first to see available insight types.
+
+        Args:
+            insight_type: Insight type to filter by (e.g., "insight:todo")
+            limit: Maximum insights to return
+
+        Returns:
+            List of insight records with file path, line number, and text
+        """
+        results = []
+        for i, record in enumerate(
+            state.jit_manager.tracker.iter_insights_by_type(insight_type)
+        ):
+            if i >= limit:
+                break
+            results.append({
+                "file_path": record.file_path,
+                "line": record.line_start,
+                "text": record.name,  # name stores the insight text
+                "insight_type": record.kind,
+                "key_hash": hex(record.key_hash),
+            })
+        return results
+
+    @mcp.tool()
+    def jit_compact_vectors(force: bool = False) -> dict[str, Any]:
+        """Compact the vector store to reclaim dead bytes.
+
+        This is a stop-the-world operation that rewrites vectors.dat
+        with only live vectors, reclaiming space from orphaned vectors.
+
+        Use jit_get_stats first to check vector_needs_compaction and
+        vector_dead_bytes to see if compaction is worthwhile.
+
+        Args:
+            force: Compact even if automatic threshold not met.
+                   Default thresholds: >25% waste AND >1MB reclaimable.
+
+        Returns:
+            CompactionResult with bytes_before, bytes_after,
+            bytes_reclaimed, vectors_copied, success, error
+        """
+        result = state.jit_manager.compact_vectors(force=force)
+        return asdict(result)
+
+    @mcp.tool()
     async def jit_full_index(
         path: str | None = None,
         patterns: list[str] | None = None,

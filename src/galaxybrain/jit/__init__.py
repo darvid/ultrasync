@@ -14,7 +14,11 @@ from galaxybrain.jit.tracker import (
     MemoryRecord,
     SymbolRecord,
 )
-from galaxybrain.jit.vector_store import VectorStore, VectorStoreStats
+from galaxybrain.jit.vector_store import (
+    CompactionResult,
+    VectorStore,
+    VectorStoreStats,
+)
 
 __all__ = [
     "FileTracker",
@@ -29,6 +33,7 @@ __all__ = [
     "VectorCache",
     "VectorStore",
     "VectorStoreStats",
+    "CompactionResult",
     "EmbedQueue",
     "JITIndexManager",
     "IndexProgress",

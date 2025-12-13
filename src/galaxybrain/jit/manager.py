@@ -14,8 +14,9 @@ from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
 from galaxybrain.jit.memory import MemoryManager
 from galaxybrain.jit.tracker import FileTracker
-from galaxybrain.jit.vector_store import VectorStore
+from galaxybrain.jit.vector_store import CompactionResult, VectorStore
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
+from galaxybrain.patterns import PatternSetManager
 
 try:
     from galaxybrain_index import MutableGlobalIndex
@@ -130,6 +131,9 @@ class JITIndexManager:
             embedding_provider=embedding_provider,
         )
 
+        # Pattern manager for context detection
+        self.pattern_manager = PatternSetManager(data_dir)
+
         # progressive AOT index - builds as we index files
         self.aot_index = None
         if MutableGlobalIndex is not None:
@@ -218,6 +222,10 @@ class JITIndexManager:
         blob_entry = self.blob.append(content)
         t_blob = time.perf_counter()
 
+        # Detect contexts using pattern matching (no LLM required)
+        detected_contexts = self.pattern_manager.detect_contexts(content)
+        t_ctx = time.perf_counter()
+
         path_rel = str(path)
         file_key = hash64_file_key(path_rel)
 
@@ -227,6 +235,7 @@ class JITIndexManager:
             blob_offset=blob_entry.offset,
             blob_length=blob_entry.length,
             key_hash=file_key,
+            detected_contexts=detected_contexts if detected_contexts else None,
         )
         t_upsert = time.perf_counter()
 
@@ -267,6 +276,35 @@ class JITIndexManager:
                         sym_key, sym_blob.offset, sym_blob.length
                     )
                 sym_count += 1
+
+        # Extract insights (TODOs, FIXMEs, etc.) as symbols
+        insights = self.pattern_manager.extract_insights(content)
+        for insight in insights:
+            insight_key = hash64_sym_key(
+                path_rel,
+                insight.text[:50],  # use truncated text as name
+                insight.insight_type,
+                insight.line_number,
+                insight.line_number,
+            )
+            insight_bytes = insight.text.encode("utf-8")
+            insight_blob = self.blob.append(insight_bytes)
+            self.tracker.upsert_symbol(
+                file_path=path,
+                name=insight.text[:100],  # store more of the text
+                kind=insight.insight_type,
+                line_start=insight.line_number,
+                line_end=insight.line_number,
+                blob_offset=insight_blob.offset,
+                blob_length=insight_blob.length,
+                key_hash=insight_key,
+            )
+            if self.aot_index is not None:
+                self.aot_index.insert(
+                    insight_key, insight_blob.offset, insight_blob.length
+                )
+            sym_count += 1
+
         t_syms = time.perf_counter()
 
         total_ms = (t_syms - t_start) * 1000
@@ -274,7 +312,7 @@ class JITIndexManager:
             logger.warning(
                 "slow file %s: %.1fms total "
                 "(needs=%.1f scan=%.1f read=%.1f hash=%.1f blob=%.1f "
-                "upsert=%.1f aot=%.1f syms[%d]=%.1f)",
+                "ctx=%.1f upsert=%.1f aot=%.1f syms[%d]=%.1f)",
                 path.name,
                 total_ms,
                 (t_needs - t_check) * 1000,
@@ -282,7 +320,8 @@ class JITIndexManager:
                 (t_read - t_scan) * 1000,
                 (t_hash - t_read) * 1000,
                 (t_blob - t_hash) * 1000,
-                (t_upsert - t_blob) * 1000,
+                (t_ctx - t_blob) * 1000,
+                (t_upsert - t_ctx) * 1000,
                 (t_aot - t_upsert) * 1000,
                 sym_count,
                 (t_syms - t_aot) * 1000,
@@ -419,6 +458,9 @@ class JITIndexManager:
         content_hash = self._content_hash(content)
         blob_entry = self.blob.append(content)
 
+        # Detect contexts using pattern matching (no LLM required)
+        detected_contexts = self.pattern_manager.detect_contexts(content)
+
         path_rel = str(path)
         file_key = hash64_file_key(path_rel)
 
@@ -448,6 +490,7 @@ class JITIndexManager:
             blob_offset=blob_entry.offset,
             blob_length=blob_entry.length,
             key_hash=file_key,
+            detected_contexts=detected_contexts if detected_contexts else None,
         )
         self.tracker.update_file_vector(
             file_key, file_vec_entry.offset, file_vec_entry.length
@@ -495,10 +538,37 @@ class JITIndexManager:
                         sym_key, sym_blob.offset, sym_blob.length
                     )
 
+        # Extract insights (TODOs, FIXMEs, etc.) as symbols (no embedding)
+        insights = self.pattern_manager.extract_insights(content)
+        for insight in insights:
+            insight_key = hash64_sym_key(
+                path_rel,
+                insight.text[:50],
+                insight.insight_type,
+                insight.line_number,
+                insight.line_number,
+            )
+            insight_bytes = insight.text.encode("utf-8")
+            insight_blob = self.blob.append(insight_bytes)
+            self.tracker.upsert_symbol(
+                file_path=path,
+                name=insight.text[:100],
+                kind=insight.insight_type,
+                line_start=insight.line_number,
+                line_end=insight.line_number,
+                blob_offset=insight_blob.offset,
+                blob_length=insight_blob.length,
+                key_hash=insight_key,
+            )
+            if self.aot_index is not None:
+                self.aot_index.insert(
+                    insight_key, insight_blob.offset, insight_blob.length
+                )
+
         return IndexResult(
             status="indexed",
             path=str(path),
-            symbols=len(metadata.symbol_info),
+            symbols=len(metadata.symbol_info) + len(insights),
             bytes=blob_entry.length,
             key_hash=file_key,
         )
@@ -765,12 +835,18 @@ class JITIndexManager:
                 content_hash = self._content_hash(content)
                 blob_entry = self.blob.append(content)
 
+                # Detect contexts via pattern matching (no LLM)
+                detected_contexts = self.pattern_manager.detect_contexts(
+                    content
+                )
+
                 self.tracker.upsert_file(
                     path=file_path,
                     content_hash=content_hash,
                     blob_offset=blob_entry.offset,
                     blob_length=blob_entry.length,
                     key_hash=file_key,
+                    detected_contexts=detected_contexts or None,
                 )
 
                 if self.aot_index is not None:
@@ -810,6 +886,35 @@ class JITIndexManager:
                             )
                         sym_text = f"{sym.kind} {sym.name}"
                         sym_data.append((sym_text, sym_key))
+
+                # Extract insights (TODOs, FIXMEs, etc.) as symbols
+                insights = self.pattern_manager.extract_insights(content)
+                for insight in insights:
+                    insight_key = hash64_sym_key(
+                        path_rel,
+                        insight.text[:50],
+                        insight.insight_type,
+                        insight.line_number,
+                        insight.line_number,
+                    )
+                    insight_bytes = insight.text.encode("utf-8")
+                    insight_blob = self.blob.append(insight_bytes)
+                    self.tracker.upsert_symbol(
+                        file_path=file_path,
+                        name=insight.text[:100],
+                        kind=insight.insight_type,
+                        line_start=insight.line_number,
+                        line_end=insight.line_number,
+                        blob_offset=insight_blob.offset,
+                        blob_length=insight_blob.length,
+                        key_hash=insight_key,
+                    )
+                    if self.aot_index is not None:
+                        self.aot_index.insert(
+                            insight_key,
+                            insight_blob.offset,
+                            insight_blob.length,
+                        )
 
                 file_text = metadata.to_embedding_text()
                 file_data.append((file_path, file_text, file_key, sym_data))
@@ -1079,6 +1184,72 @@ class JITIndexManager:
             aot_complete=aot_complete,
             vector_complete=vector_complete,
         )
+
+    def compact_vectors(self, force: bool = False) -> CompactionResult:
+        """Compact the vector store to reclaim dead bytes.
+
+        This is a stop-the-world operation that:
+        1. Collects all live vectors from tracker
+        2. Rewrites vectors.dat with only live vectors
+        3. Updates all offsets in tracker
+        4. Clears the vector cache (offsets changed)
+
+        Args:
+            force: Compact even if needs_compaction is False
+
+        Returns:
+            CompactionResult with bytes reclaimed
+        """
+        live_bytes, live_count = self.tracker.live_vector_stats()
+        stats = self.vector_store.compute_stats(live_bytes, live_count)
+
+        if not force and not stats.needs_compaction:
+            return CompactionResult(
+                bytes_before=stats.total_bytes,
+                bytes_after=stats.total_bytes,
+                bytes_reclaimed=0,
+                vectors_copied=0,
+                success=True,
+                error="compaction not needed (use force=True to override)",
+            )
+
+        self.tracker.begin_batch()
+
+        try:
+            live_vectors = self.tracker.iter_live_vectors()
+            result, offset_map = self.vector_store.compact(live_vectors)
+
+            if not result.success:
+                self.tracker.end_batch()
+                return result
+
+            updated = self.tracker.update_vector_offsets(offset_map)
+            logger.info(
+                "compaction updated %d vector offsets",
+                updated,
+            )
+
+            self.tracker.end_batch()
+            self.vector_cache.clear()
+
+            logger.info(
+                "vector compaction complete: %d bytes reclaimed",
+                result.bytes_reclaimed,
+            )
+
+            return result
+
+        except Exception as e:
+            self.tracker.end_batch()
+            logger.error("compaction failed: %s", e)
+            return CompactionResult(
+                bytes_before=stats.total_bytes,
+                bytes_after=stats.total_bytes,
+                bytes_reclaimed=0,
+                vectors_copied=0,
+                success=False,
+                error=str(e),
+            )
 
     def get_vector(self, key_hash: int):
         return self.vector_cache.get(key_hash)
