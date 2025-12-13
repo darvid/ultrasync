@@ -1,8 +1,9 @@
-
 import ast
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from galaxybrain.regex_safety import RegexTimeout, safe_compile
 
 
 @dataclass
@@ -193,12 +194,11 @@ class FileScanner:
 
     def _scan_typescript(self, content: str, metadata: FileMetadata) -> None:
         """Extract symbols from TypeScript/JavaScript code (regex-based)."""
-        lines = content.split("\n")
 
         def get_line_number(pos: int) -> int:
             return content[:pos].count("\n") + 1
 
-        # exported functions and classes
+        # exported functions and classes - safe pattern, no timeout needed
         export_pattern = re.compile(
             r"export\s+(?:default\s+)?(?:async\s+)?"
             r"(function|class|const|let|var|interface|type|enum)\s+"
@@ -220,16 +220,21 @@ class FileScanner:
         # React components (function components)
         # matches: function ComponentName, const ComponentName =
         # handles arrow functions with destructured params like ({ foo }) =>
-        # pattern uses atomic groups via (?>...) emulation with (?=(...))\\1
-        component_pattern = re.compile(
-            r"(?:export\s+(?:default\s+)?)?(?:function|const)\s+"
-            r"([A-Z]\w*)\s*(?:=\s*\([^)]*\)\s*=>|=\s*\w+\s*=>|\()",
-            re.MULTILINE,
-        )
-        for match in component_pattern.finditer(content):
-            name = match.group(1)
-            if name not in metadata.component_names:
-                metadata.component_names.append(name)
+        # uses safe_compile with timeout to prevent ReDoS on pathological input
+        try:
+            component_pattern = safe_compile(
+                r"(?:export\s+(?:default\s+)?)?(?:function|const)\s+"
+                r"([A-Z]\w*)\s*(?:=\s*\([^)]*\)\s*=>|=\s*\w+\s*=>|\()",
+                flags=re.MULTILINE,
+                timeout_ms=500,  # 500ms should be plenty for any real file
+            )
+            for match in component_pattern.finditer(content):
+                name = match.group(1)
+                if name not in metadata.component_names:
+                    metadata.component_names.append(name)
+        except RegexTimeout:
+            # pathological input - skip component detection for this file
+            pass
 
         # top-level comments (JSDoc or // comments at start)
         lines = content.split("\n")
