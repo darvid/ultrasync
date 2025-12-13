@@ -21,6 +21,32 @@ class VectorEntry:
     dim: int
 
 
+@dataclass
+class VectorStoreStats:
+    """Statistics about vector store usage and waste."""
+
+    total_bytes: int
+    live_bytes: int
+    dead_bytes: int
+    live_count: int
+    total_count: int
+
+    @property
+    def waste_ratio(self) -> float:
+        """Fraction of storage that is dead/orphaned (0.0 to 1.0)."""
+        if self.total_bytes == 0:
+            return 0.0
+        return self.dead_bytes / self.total_bytes
+
+    @property
+    def needs_compaction(self) -> bool:
+        """Whether compaction would reclaim significant space.
+
+        Returns True if >25% waste and >1MB reclaimable.
+        """
+        return self.waste_ratio > 0.25 and self.dead_bytes > 1024 * 1024
+
+
 class VectorStore:
     """Append-only persistent vector storage."""
 
@@ -94,3 +120,27 @@ class VectorStore:
                 count += 1
 
         return count
+
+    def compute_stats(
+        self, live_bytes: int, live_count: int
+    ) -> VectorStoreStats:
+        """Compute storage statistics given live vector info.
+
+        Args:
+            live_bytes: Sum of vector_length for all live vectors in tracker
+            live_count: Number of live vectors in tracker
+
+        Returns:
+            VectorStoreStats with waste metrics
+        """
+        total_bytes = self._size
+        total_count = self.vector_count()
+        dead_bytes = max(0, total_bytes - live_bytes)
+
+        return VectorStoreStats(
+            total_bytes=total_bytes,
+            live_bytes=live_bytes,
+            dead_bytes=dead_bytes,
+            live_count=live_count,
+            total_count=total_count,
+        )

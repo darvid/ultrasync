@@ -14,6 +14,7 @@ from galaxybrain.jit.tracker import (
     MemoryRecord,
     SymbolRecord,
 )
+from galaxybrain.jit.vector_store import VectorStore, VectorStoreStats
 
 __all__ = [
     "FileTracker",
@@ -26,6 +27,8 @@ __all__ = [
     "BlobAppender",
     "BlobEntry",
     "VectorCache",
+    "VectorStore",
+    "VectorStoreStats",
     "EmbedQueue",
     "JITIndexManager",
     "IndexProgress",

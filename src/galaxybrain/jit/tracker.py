@@ -591,6 +591,61 @@ class FileTracker:
         ).fetchone()
         return row["cnt"]
 
+    def live_vector_stats(self) -> tuple[int, int]:
+        """Sum live vector bytes and count across all tables.
+
+        Returns:
+            (total_bytes, count) of vectors that are still referenced
+        """
+        total_bytes = 0
+        total_count = 0
+
+        # files with vectors
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(vector_length), 0) as bytes,
+                   COUNT(*) as cnt
+            FROM files WHERE vector_offset IS NOT NULL
+            """
+        ).fetchone()
+        total_bytes += row["bytes"]
+        total_count += row["cnt"]
+
+        # symbols with vectors
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(vector_length), 0) as bytes,
+                   COUNT(*) as cnt
+            FROM symbols WHERE vector_offset IS NOT NULL
+            """
+        ).fetchone()
+        total_bytes += row["bytes"]
+        total_count += row["cnt"]
+
+        # memories with vectors
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(vector_length), 0) as bytes,
+                   COUNT(*) as cnt
+            FROM memories WHERE vector_offset IS NOT NULL
+            """
+        ).fetchone()
+        total_bytes += row["bytes"]
+        total_count += row["cnt"]
+
+        # pattern caches with vectors
+        row = self.conn.execute(
+            """
+            SELECT COALESCE(SUM(vector_length), 0) as bytes,
+                   COUNT(*) as cnt
+            FROM pattern_caches WHERE vector_offset IS NOT NULL
+            """
+        ).fetchone()
+        total_bytes += row["bytes"]
+        total_count += row["cnt"]
+
+        return (total_bytes, total_count)
+
     def update_file_vector(
         self, key_hash: int, vector_offset: int, vector_length: int
     ) -> bool:

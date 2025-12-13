@@ -1024,6 +1024,12 @@ context:api, context:data, context:infra
         Returns file count, symbol count, blob size, vector cache usage,
         and database location.
 
+        Includes vector waste diagnostics:
+        - vector_live_bytes: bytes used by referenced vectors
+        - vector_dead_bytes: orphaned bytes from re-indexed files
+        - vector_waste_ratio: dead/total ratio (0.0-1.0)
+        - vector_needs_compaction: True if >25% waste and >1MB reclaimable
+
         Returns:
             Dictionary of index statistics
         """

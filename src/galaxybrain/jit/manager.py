@@ -53,6 +53,11 @@ class IndexStats:
     vector_store_bytes: int = 0
     embedded_file_count: int = 0
     embedded_symbol_count: int = 0
+    # vector waste diagnostics
+    vector_live_bytes: int = 0
+    vector_dead_bytes: int = 0
+    vector_waste_ratio: float = 0.0
+    vector_needs_compaction: bool = False
     # completeness
     aot_complete: bool = False
     vector_complete: bool = False
@@ -1049,6 +1054,10 @@ class JITIndexManager:
         # vectors are complete if all files have embeddings
         vector_complete = embedded_files >= file_count and file_count > 0
 
+        # vector waste diagnostics
+        live_bytes, live_count = self.tracker.live_vector_stats()
+        vector_stats = self.vector_store.compute_stats(live_bytes, live_count)
+
         return IndexStats(
             file_count=file_count,
             symbol_count=symbol_count,
@@ -1063,6 +1072,10 @@ class JITIndexManager:
             vector_store_bytes=self.vector_store.size_bytes,
             embedded_file_count=embedded_files,
             embedded_symbol_count=embedded_symbols,
+            vector_live_bytes=vector_stats.live_bytes,
+            vector_dead_bytes=vector_stats.dead_bytes,
+            vector_waste_ratio=vector_stats.waste_ratio,
+            vector_needs_compaction=vector_stats.needs_compaction,
             aot_complete=aot_complete,
             vector_complete=vector_complete,
         )

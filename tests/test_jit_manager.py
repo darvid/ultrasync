@@ -141,6 +141,39 @@ class TestGetStats(TestJITIndexManager):
         assert stats.symbol_count > 0
         assert stats.blob_size_bytes > 0
 
+    @pytest.mark.asyncio
+    async def test_stats_vector_waste_initial(self, manager, sample_python_file):
+        """Vector waste should be zero before any re-indexing."""
+        await manager.index_file(sample_python_file)
+        stats = manager.get_stats()
+
+        # initially no waste - all vectors are live
+        assert stats.vector_live_bytes > 0
+        assert stats.vector_dead_bytes == 0
+        assert stats.vector_waste_ratio == 0.0
+        assert stats.vector_needs_compaction is False
+
+    @pytest.mark.asyncio
+    async def test_stats_vector_waste_after_reindex(
+        self, manager, sample_python_file
+    ):
+        """Re-indexing should create dead bytes (orphaned vectors)."""
+        # first index
+        await manager.index_file(sample_python_file)
+        stats1 = manager.get_stats()
+        live_before = stats1.vector_live_bytes
+
+        # modify file and force re-index
+        sample_python_file.write_text("def new_func(): pass\n")
+        await manager.index_file(sample_python_file, force=True)
+
+        stats2 = manager.get_stats()
+        # old vectors are now dead, new vectors are live
+        assert stats2.vector_dead_bytes > 0
+        assert stats2.vector_waste_ratio > 0
+        # total store grew (appended new, kept old dead bytes)
+        assert stats2.vector_store_bytes > live_before
+
 
 class TestIndexDirectory(TestJITIndexManager):
     @pytest.fixture
