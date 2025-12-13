@@ -469,3 +469,98 @@ class TestFileScannerDirectory:
         # Python and TypeScript
         results = scanner.scan_directory(tmp_path, extensions={".py", ".ts"})
         assert len(results) == 2
+
+
+class TestFileScannerReDoSProtection:
+    """Test that regex patterns don't cause catastrophic backtracking.
+
+    These tests use pathological inputs that would cause exponential time
+    complexity if the regex patterns are vulnerable to ReDoS attacks.
+    Each test should complete in under 1 second - if they hang, the
+    pattern needs to be fixed.
+    """
+
+    @pytest.fixture
+    def scanner(self) -> FileScanner:
+        return FileScanner()
+
+    def test_typescript_component_pattern_no_backtracking(
+        self, scanner: FileScanner, tmp_path: Path
+    ):
+        """Pathological input that could trigger backtracking in component regex.
+
+        Pattern like 'export const Foo = aaaa...aaaa' with no arrow function
+        could cause backtracking if using [^;]* or similar greedy patterns.
+        """
+        # create pathological content: lots of 'a's that don't end with =>
+        pathological = "export const Component = " + "a" * 10000 + ";"
+
+        tsx_file = tmp_path / "pathological.tsx"
+        tsx_file.write_text(pathological)
+
+        import time
+
+        start = time.perf_counter()
+        meta = scanner.scan(tsx_file)
+        elapsed = time.perf_counter() - start
+
+        # should complete in well under 1 second (actual: ~1ms)
+        assert elapsed < 1.0, f"scan took {elapsed:.2f}s - possible ReDoS!"
+        assert meta is not None
+
+    def test_typescript_export_pattern_no_backtracking(
+        self, scanner: FileScanner, tmp_path: Path
+    ):
+        """Pathological input for export detection pattern."""
+        # nested/repeated patterns that could trigger backtracking
+        pathological = "export " + "{ a, " * 1000 + "z }"
+
+        ts_file = tmp_path / "exports.ts"
+        ts_file.write_text(pathological)
+
+        import time
+
+        start = time.perf_counter()
+        meta = scanner.scan(ts_file)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0, f"scan took {elapsed:.2f}s - possible ReDoS!"
+        assert meta is not None
+
+    def test_rust_impl_pattern_no_backtracking(
+        self, scanner: FileScanner, tmp_path: Path
+    ):
+        """Pathological input for Rust impl block detection."""
+        # many impl-like patterns that don't fully match
+        pathological = "\n".join([f"impl_{i}" for i in range(5000)])
+
+        rs_file = tmp_path / "impls.rs"
+        rs_file.write_text(pathological)
+
+        import time
+
+        start = time.perf_counter()
+        meta = scanner.scan(rs_file)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0, f"scan took {elapsed:.2f}s - possible ReDoS!"
+        assert meta is not None
+
+    def test_python_class_pattern_no_backtracking(
+        self, scanner: FileScanner, tmp_path: Path
+    ):
+        """Pathological input for Python class detection."""
+        # many class-like patterns
+        pathological = "\n".join([f"class_{i} = None" for i in range(5000)])
+
+        py_file = tmp_path / "classes.py"
+        py_file.write_text(pathological)
+
+        import time
+
+        start = time.perf_counter()
+        meta = scanner.scan(py_file)
+        elapsed = time.perf_counter() - start
+
+        assert elapsed < 1.0, f"scan took {elapsed:.2f}s - possible ReDoS!"
+        assert meta is not None

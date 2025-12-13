@@ -3,13 +3,13 @@
 
 import argparse
 import json
-import logging
 import os
 import sys
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from galaxybrain import console
 from galaxybrain.call_graph import CallGraph, CallSite, build_call_graph
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.jit.manager import JITIndexManager
@@ -71,7 +71,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     root = Path(args.directory).resolve()
     if not root.is_dir():
-        print(f"error: {root} is not a directory", file=sys.stderr)
+        console.error(f"{root} is not a directory")
         return 1
 
     data_dir = root / DEFAULT_DATA_DIR
@@ -82,8 +82,8 @@ def cmd_index(args: argparse.Namespace) -> int:
     # (importing EmbeddingProvider pulls in torch which takes ~15s)
     if embed:
         EmbeddingProvider = _get_embedder_class()
-        print(f"loading embedding model ({args.model})...")
-        embedder = EmbeddingProvider(model=args.model)
+        with console.status(f"loading embedding model ({args.model})..."):
+            embedder = EmbeddingProvider(model=args.model)
     else:
         embedder = None
 
@@ -113,16 +113,19 @@ def cmd_index(args: argparse.Namespace) -> int:
     stats = asyncio.run(run_index())
 
     action = "indexed" if embed else "registered"
-    print(f"\n{'=' * 50}")
-    print(f"{action} {stats.file_count} files, {stats.symbol_count} symbols")
-    print(f"blob: {stats.blob_size_bytes / 1024 / 1024:.2f} MB")
-    print(f"vectors: {stats.vector_cache_count} cached")
+    console.header("indexing complete")
+    console.success(
+        f"{action} {stats.file_count} files, {stats.symbol_count} symbols"
+    )
+    console.key_value("blob", f"{stats.blob_size_bytes / 1024 / 1024:.2f} MB")
+    console.key_value("vectors", f"{stats.vector_cache_count} cached")
     if stats.aot_index_count > 0:
-        print(
-            f"AOT index: {stats.aot_index_count} entries "
-            f"({stats.aot_index_size_bytes / 1024:.1f} KB)"
+        console.key_value(
+            "AOT index",
+            f"{stats.aot_index_count} entries "
+            f"({stats.aot_index_size_bytes / 1024:.1f} KB)",
         )
-    print(f"data: {data_dir}")
+    console.key_value("data", str(data_dir))
 
     return 0
 
@@ -131,11 +134,7 @@ def cmd_query(args: argparse.Namespace) -> int:
     """Semantic search across indexed files and symbols."""
     debug = getattr(args, "debug", False)
     if debug:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(name)s: %(message)s"))
-        logger = logging.getLogger("galaxybrain")
-        logger.addHandler(handler)
-        logger.setLevel(logging.DEBUG)
+        os.environ["GALAXYBRAIN_DEBUG"] = "1"
 
     EmbeddingProvider = _get_embedder_class()
 
@@ -143,8 +142,8 @@ def cmd_query(args: argparse.Namespace) -> int:
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
+        console.error(f"no index found at {data_dir}")
+        console.dim("run 'galaxybrain index <directory>' first")
         return 1
 
     # key lookup mode - direct AOT lookup (sub-ms), no model needed
@@ -155,32 +154,32 @@ def cmd_query(args: argparse.Namespace) -> int:
         )
 
         target_hash = hash64(args.key)
-        print(f"looking up key: {args.key}")
-        print(f"hash: 0x{target_hash:016x}\n")
+        console.info(f"looking up key: {args.key}")
+        console.dim(f"hash: 0x{target_hash:016x}")
 
         result = manager.aot_lookup(target_hash)
         if result:
             offset, length = result
             content = manager.blob.read(offset, length)
-            print(f"found: {length} bytes at offset {offset}")
+            console.success(f"found: {length} bytes at offset {offset}")
             print("-" * 40)
             print(content.decode(errors="replace")[:2000])
             if length > 2000:
-                print(f"\n... ({length - 2000} more bytes)")
+                console.dim(f"\n... ({length - 2000} more bytes)")
             return 0
 
         # try tracker as fallback
         file_record = manager.tracker.get_file_by_key(target_hash)
         if file_record:
-            print(f"FILE: {file_record.path}")
+            console.success(f"FILE: {file_record.path}")
             return 0
 
-        print(f"no match for key: {args.key}", file=sys.stderr)
+        console.error(f"no match for key: {args.key}")
         return 1
 
     # semantic search mode - uses shared search with full fallback
-    print(f"loading model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    with console.status(f"loading model ({args.model})..."):
+        embedder = EmbeddingProvider(model=args.model)
 
     manager = JITIndexManager(
         data_dir=data_dir,
@@ -212,11 +211,10 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     strategy_str = " -> ".join(strategy_info) if strategy_info else "none"
 
-    print(f"\ntop {len(results)} for: {args.query!r}")
-    print(f"(search: {t_search * 1000:.1f}ms, strategy: {strategy_str})")
+    console.header(f"top {len(results)} for: {args.query!r}")
+    console.dim(f"search: {t_search * 1000:.1f}ms, strategy: {strategy_str}")
     if result_type != "all":
-        print(f"(filter: {result_type})")
-    print("-" * 60)
+        console.dim(f"filter: {result_type}")
 
     for r in results:
         if r.type == "file":
@@ -225,9 +223,9 @@ def cmd_query(args: argparse.Namespace) -> int:
                 rel_path = Path(path_str).relative_to(Path.cwd())
             except ValueError:
                 rel_path = Path(path_str)
-            print(f"[{r.score:.3f}] FILE {rel_path}")
+            console.score(r.score, f"FILE {rel_path}")
             if r.key_hash:
-                print(f"        key: 0x{r.key_hash:016x} ({r.source})")
+                console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
         else:
             # use SearchResult fields directly
             kind_label = (r.kind or "symbol").upper()
@@ -242,15 +240,16 @@ def cmd_query(args: argparse.Namespace) -> int:
                         line_info = f":{r.line_start}-{r.line_end}"
                     else:
                         line_info = f":{r.line_start}"
-                print(
-                    f"[{r.score:.3f}] {kind_label} "
-                    f"{r.name or 'unknown'} ({rel_path}{line_info})"
+                name = r.name or "unknown"
+                console.score(
+                    r.score,
+                    f"{kind_label} {name} ({rel_path}{line_info})",
                 )
-                print(f"        key: 0x{r.key_hash:016x} ({r.source})")
+                console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
             else:
-                print(
-                    f"[{r.score:.3f}] {kind_label} "
-                    f"key:0x{r.key_hash:016x} ({r.source})"
+                console.score(
+                    r.score,
+                    f"{kind_label} key:0x{r.key_hash:016x} ({r.source})",
                 )
         print()
 
@@ -1191,7 +1190,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
+        console.error(f"no index found at {data_dir}")
         return 1
 
     tracker_db = data_dir / "tracker.db"
@@ -1200,7 +1199,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     vector_file = data_dir / "vectors.dat"
 
     if not tracker_db.exists():
-        print(f"error: tracker database not found at {tracker_db}")
+        console.error(f"tracker database not found at {tracker_db}")
         return 1
 
     import sqlite3
@@ -1243,57 +1242,73 @@ def cmd_stats(args: argparse.Namespace) -> int:
     except ImportError:
         pass
 
-    print(f"Index Stats ({data_dir})")
-    print("-" * 40)
+    console.header(f"Index Stats ({data_dir})")
 
     # tracker (sqlite) stats
-    print("Tracker (SQLite):")
-    print(f"  files:      {file_count}")
-    print(f"  symbols:    {symbol_count}")
-    print(f"  memories:   {memory_count}")
+    console.subheader("Tracker (SQLite)")
+    console.key_value("files", file_count, indent=2)
+    console.key_value("symbols", symbol_count, indent=2)
+    console.key_value("memories", memory_count, indent=2)
 
     # blob store
-    print(f"\nBlob Store:   {blob_size / 1024 / 1024:.2f} MB")
+    console.subheader("\nBlob Store")
+    console.key_value("size", f"{blob_size / 1024 / 1024:.2f} MB", indent=2)
 
     # AOT index
+    console.subheader("\nAOT Index")
     if index_size > 0:
-        print(f"\nAOT Index:    {index_size / 1024:.1f} KB")
-        print(f"  entries:    {aot_count}")
-        print(f"  capacity:   {aot_capacity}")
+        console.key_value("size", f"{index_size / 1024:.1f} KB", indent=2)
+        console.key_value("entries", aot_count, indent=2)
+        console.key_value("capacity", aot_capacity, indent=2)
         load_pct = (aot_count / aot_capacity * 100) if aot_capacity else 0
-        print(f"  load:       {load_pct:.1f}%")
+        console.key_value("load", f"{load_pct:.1f}%", indent=2)
     else:
-        print("\nAOT Index:    not initialized")
+        console.dim("  not initialized")
 
     # vector store (persistent embeddings)
-    print(f"\nVector Store: {vector_size / 1024:.1f} KB")
+    console.subheader("\nVector Store")
+    console.key_value("size", f"{vector_size / 1024:.1f} KB", indent=2)
     file_pct = (embedded_files / file_count * 100) if file_count else 0
     sym_pct = (embedded_symbols / symbol_count * 100) if symbol_count else 0
-    print(f"  files:      {embedded_files}/{file_count} ({file_pct:.1f}%)")
-    print(f"  symbols:    {embedded_symbols}/{symbol_count} ({sym_pct:.1f}%)")
+    console.key_value(
+        "files", f"{embedded_files}/{file_count} ({file_pct:.1f}%)", indent=2
+    )
+    console.key_value(
+        "symbols",
+        f"{embedded_symbols}/{symbol_count} ({sym_pct:.1f}%)",
+        indent=2,
+    )
 
     # warnings for incomplete index
-    warnings = []
+    warnings_list = []
     total_expected = file_count + symbol_count
     if index_size == 0:
-        warnings.append("AOT index not built - run 'galaxybrain index' first")
+        warnings_list.append(
+            "AOT index not built - run 'galaxybrain index' first"
+        )
     elif aot_count < total_expected and total_expected > 0:
         missing = total_expected - aot_count
-        warnings.append(f"AOT index incomplete: {missing} entries missing")
+        warnings_list.append(f"AOT index incomplete: {missing} entries missing")
 
     if file_count > 0 and embedded_files < file_count:
         missing = file_count - embedded_files
-        warnings.append(
+        warnings_list.append(
             f"vector embeddings incomplete: {missing} files not embedded"
         )
 
-    if warnings:
-        print("\n⚠️  Warnings:")
-        for w in warnings:
-            print(f"  - {w}")
-        print("\n💡 To fix:")
-        print("  galaxybrain index --embed .  # full index with embeddings")
-        print("  galaxybrain warm             # embed registered files only")
+    if warnings_list:
+        print()
+        console.warning("Warnings:")
+        for w in warnings_list:
+            console.dim(f"  - {w}")
+        print()
+        console.info("To fix:")
+        console.dim(
+            "  galaxybrain index --embed .  # full index with embeddings"
+        )
+        console.dim(
+            "  galaxybrain warm             # embed registered files only"
+        )
 
     return 0
 
@@ -2262,13 +2277,10 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    # universal log level from env
-    log_level = os.environ.get("LOGLEVEL", "WARNING").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.WARNING),
-        format="%(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    # configure structlog (respects GALAXYBRAIN_DEBUG env var)
+    from galaxybrain.logging_config import configure_logging
+
+    configure_logging()
 
     if args.command == "index":
         return cmd_index(args)

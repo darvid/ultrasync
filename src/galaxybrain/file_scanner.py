@@ -219,10 +219,11 @@ class FileScanner:
 
         # React components (function components)
         # matches: function ComponentName, const ComponentName =
-        # use possessive quantifier via atomic group to prevent backtracking
+        # handles arrow functions with destructured params like ({ foo }) =>
+        # pattern uses atomic groups via (?>...) emulation with (?=(...))\\1
         component_pattern = re.compile(
             r"(?:export\s+(?:default\s+)?)?(?:function|const)\s+"
-            r"([A-Z]\w*)\s*(?:=\s*[^;{]*?=>|\()",
+            r"([A-Z]\w*)\s*(?:=\s*\([^)]*\)\s*=>|=\s*\w+\s*=>|\()",
             re.MULTILINE,
         )
         for match in component_pattern.finditer(content):

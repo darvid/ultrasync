@@ -199,9 +199,10 @@ class TestSearchVectors(TestJITIndexManager):
         results = manager.search_vectors(query_vec, top_k=5)
 
         assert len(results) > 0
-        for key_hash, score in results:
+        for key_hash, score, result_type in results:
             assert isinstance(key_hash, int)
             assert -1.0 <= score <= 1.0
+            assert result_type in ("file", "symbol")
 
     def test_search_vectors_empty(self, manager):
         query_vec = manager.provider.embed("anything")

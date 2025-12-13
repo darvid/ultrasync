@@ -12,13 +12,17 @@ dependencies = [
     "mcp>=1.2.0",
     "numpy>=1.24",
     "sentence-transformers>=3",
+    "structlog>=24.0",
 ]
 
 [tool.uv.sources]
 galaxybrain-index = { path = "crates/galaxybrain_index", editable = true }
 
 [project.optional-dependencies]
-voyager = ["textual>=0.50"]
+cli = [
+    "rich>=13.0",
+    "textual>=0.50",
+]
 
 [build-system]
 requires = ["uv_build>=0.9.15,<0.10.0"]
