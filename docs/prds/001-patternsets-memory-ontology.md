@@ -1,8 +1,6 @@
-# Galaxybrain PatternSets + Memory Ontology + Symbolization
+# Patternsets & Memory Ontology (MVP)
 
-**PRD / Implementation Spec (MVP, JIT-Integrated)**
-
-## 0. Scope and Compatibility Notes
+## 0. Overview
 
 This PRD extends Galaxybrain with:
 
@@ -678,30 +676,30 @@ pattern_scan:
 
 ---
 
-## 7. Implementation Phases
+## 7. Testing
 
-### Phase 1: Memory Storage (Week 1)
+### Phase 1: Memory Storage
 
 1. Extend `FileTracker` with `memories` table
 2. Add `upsert_memory`, `get_memory`, `query_memories` methods
 3. Implement memory JSON serialization to blob
 4. Wire memory embeddings into `VectorCache`
 
-### Phase 2: Memory MCP Tools (Week 1-2)
+### Phase 2: Memory MCP Tools
 
 1. Implement `memory_write_structured`
 2. Implement `memory_search_structured`
 3. Implement `memory_get`, `memory_list_structured`
 4. Add tool routing descriptions
 
-### Phase 3: PatternSets (Week 2)
+### Phase 3: PatternSets
 
 1. Create `PatternSetManager` class
 2. Implement Hyperscan compilation and caching
 3. Implement blob slice scanning
 4. Add `pattern_load`, `pattern_scan`, `pattern_list` tools
 
-### Phase 4: Integration (Week 2-3)
+### Phase 4: Integration
 
 1. Cross-reference memories with symbols via `symbol_keys`
 2. Pattern scanning across memories
@@ -710,7 +708,18 @@ pattern_scan:
 
 ---
 
-## 8. Acceptance Criteria
+## 8. Open Questions
+
+- How should search associations decay over time to prevent stale
+  mappings from dominating results?
+- Should PatternSet compilation cache to disk for faster startup?
+- What's the right cardinality limit for taxonomy categories?
+- How to handle memory conflicts when multiple sessions write
+  overlapping insights?
+
+---
+
+## 9. Acceptance Criteria
 
 - [ ] `memories` table added to tracker.db schema
 - [ ] Memory entries persist to blob.dat with correct offsets
@@ -726,7 +735,7 @@ pattern_scan:
 
 ---
 
-## 9. Data Model Summary
+## 10. Data Model Summary
 
 ### Key Namespaces
 

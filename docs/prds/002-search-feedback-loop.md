@@ -1,6 +1,4 @@
-# Galaxybrain Search Feedback Loop
-
-**PRD / Implementation Spec (MVP)**
+# Search Feedback Loop (MVP)
 
 ## 0. Overview
 
@@ -472,7 +470,7 @@ User: "add validation to it"
 
 ## 8. Implementation Phases
 
-### Phase 1: Core Learning (This PR)
+### Phase 1: Core Learning
 
 1. Add `SearchSession` and `SearchLearner` classes
 2. Extend `ClaudeCodeParser` with `parse_tool_calls`
@@ -493,7 +491,17 @@ User: "add validation to it"
 
 ---
 
-## 9. Acceptance Criteria
+## 9. Open Questions
+
+- What's the optimal score threshold for triggering session tracking?
+- How to handle overlapping search sessions from rapid queries?
+- Should associations persist across index rebuilds or be transient?
+- How to weight search associations vs direct file/symbol matches?
+- What's the right decay strategy for stale associations?
+
+---
+
+## 10. Acceptance Criteria
 
 - [ ] `SearchLearner` detects weak `jit_search` results
 - [ ] Fallback Read calls tracked within session window
