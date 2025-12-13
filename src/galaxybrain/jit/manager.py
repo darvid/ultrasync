@@ -13,6 +13,7 @@ from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
 from galaxybrain.jit.memory import MemoryManager
+from galaxybrain.jit.progress import IndexingProgress
 from galaxybrain.jit.tracker import FileTracker
 from galaxybrain.jit.vector_store import CompactionResult, VectorStore
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
@@ -795,13 +796,15 @@ class JITIndexManager:
         total: int,
         checkpoint_interval: int,
         errors: list[str],
+        progress: IndexingProgress | None = None,
     ) -> None:
         """Batch embed all files for better performance."""
-        import sys
-
         embed_batch_size = 64
 
-        print("phase 1: scanning files...", file=sys.stderr, flush=True)
+        # Phase 1: Scanning files
+        if progress:
+            progress.start_phase("scan", "Scanning files", len(files))
+
         # file_data: (path, file_text, file_key, [(sym_text, sym_key), ...])
         file_data: list[tuple[Path, str, int, list[tuple[str, int]]]] = []
 
@@ -814,10 +817,22 @@ class JITIndexManager:
             needs_embed = self.tracker.needs_embed(file_path)
 
             if not needs_index and not needs_embed:
+                if progress:
+                    progress.update(
+                        "scan",
+                        current_item=file_path.name,
+                        files_scanned=i + 1,
+                    )
                 continue
 
             metadata = self.scanner.scan(file_path)
             if not metadata:
+                if progress:
+                    progress.update(
+                        "scan",
+                        current_item=file_path.name,
+                        files_scanned=i + 1,
+                    )
                 continue
 
             path_rel = str(file_path)
@@ -933,25 +948,25 @@ class JITIndexManager:
 
                 file_data.append((file_path, file_text, file_key, sym_data))
 
-            if (i + 1) % 100 == 0:
-                pct = int(100 * (i + 1) / len(files))
-                print(
-                    f"[{pct:3d}%] scanned {i + 1}/{len(files)}",
-                    file=sys.stderr,
-                    flush=True,
+            if progress:
+                progress.update(
+                    "scan",
+                    current_item=file_path.name,
+                    files_scanned=i + 1,
+                    indexed=indexed_count,
+                    embed_only=embed_only_count,
+                    blob_size=self.blob.size_bytes,
                 )
 
+        if progress:
+            progress.complete_phase("scan", f"Scanned {len(files)} files")
+
         if not file_data:
-            print("no files need embedding", file=sys.stderr, flush=True)
+            if progress:
+                progress.log("No files need embedding")
             return
 
-        print(
-            f"found {len(file_data)} files to embed "
-            f"({indexed_count} new, {embed_only_count} embed-only)",
-            file=sys.stderr,
-            flush=True,
-        )
-
+        # Build text list for embedding
         all_texts: list[str] = []
         text_map: list[tuple[int, str, int]] = []
 
@@ -964,11 +979,13 @@ class JITIndexManager:
                 text_map.append((file_idx, "symbol", sym_key))
                 all_texts.append(sym_text)
 
-        print(
-            f"phase 2: embedding {len(all_texts)} texts...",
-            file=sys.stderr,
-            flush=True,
-        )
+        # Phase 2: Embedding
+        if progress:
+            progress.start_phase(
+                "embed",
+                "Embedding texts",
+                len(all_texts),
+            )
 
         all_embeddings = []
         for batch_start in range(0, len(all_texts), embed_batch_size):
@@ -977,14 +994,19 @@ class JITIndexManager:
             batch_embeddings = self.provider.embed_batch(batch_texts)
             all_embeddings.extend(batch_embeddings)
 
-            pct = int(100 * batch_end / len(all_texts))
-            print(
-                f"[{pct:3d}%] embedded {batch_end}/{len(all_texts)}",
-                file=sys.stderr,
-                flush=True,
-            )
+            if progress:
+                progress.update_absolute(
+                    "embed",
+                    completed=batch_end,
+                    texts_embedded=batch_end,
+                )
 
-        print("phase 3: writing vectors...", file=sys.stderr, flush=True)
+        if progress:
+            progress.complete_phase("embed", f"Embedded {len(all_texts)} texts")
+
+        # Phase 3: Writing vectors
+        if progress:
+            progress.start_phase("write", "Writing vectors", len(text_map))
 
         for i, (_, item_type, key_hash) in enumerate(text_map):
             embedding = all_embeddings[i]
@@ -1000,11 +1022,16 @@ class JITIndexManager:
                     key_hash, vec_entry.offset, vec_entry.length
                 )
 
-        print(
-            f"embedded {len(file_data)} files, {len(all_texts)} total texts",
-            file=sys.stderr,
-            flush=True,
-        )
+            if progress and (i + 1) % 100 == 0:
+                progress.update_absolute(
+                    "write",
+                    completed=i + 1,
+                    vectors_written=i + 1,
+                )
+
+        if progress:
+            progress.update_absolute("write", completed=len(text_map))
+            progress.complete_phase("write", f"Wrote {len(text_map)} vectors")
 
     async def full_index(
         self,
@@ -1014,6 +1041,7 @@ class JITIndexManager:
         checkpoint_interval: int = 100,
         resume: bool = True,
         embed: bool = False,
+        show_progress: bool = True,
     ) -> AsyncIterator[IndexProgress]:
         """Index all files in a directory.
 
@@ -1021,16 +1049,22 @@ class JITIndexManager:
         With embed=True, also computes embeddings (slow but enables search).
 
         Respects .gitignore when inside a git repository.
-        """
-        import sys
 
+        Args:
+            root: Root directory to index
+            patterns: Glob patterns for files to include
+            exclude: Patterns to exclude
+            checkpoint_interval: How often to save checkpoints
+            resume: Whether to resume from checkpoint
+            embed: Whether to compute embeddings (slower)
+            show_progress: Show rich progress bars (if available)
+        """
         root = root.resolve()
 
         # supported extensions
         supported_exts = {".py", ".ts", ".tsx", ".js", ".jsx", ".rs"}
 
-        mode_str = "indexing" if embed else "registering"
-        print(f"scanning {root} for files...", file=sys.stderr, flush=True)
+        progress = IndexingProgress(use_rich=show_progress)
 
         # try git first (respects .gitignore)
         all_files = _get_git_tracked_files(root, supported_exts)
@@ -1065,11 +1099,7 @@ class JITIndexManager:
         all_files.sort()
         total = len(all_files)
 
-        print(
-            f"found {total} files to {mode_str.rstrip('ing')}",
-            file=sys.stderr,
-            flush=True,
-        )
+        mode_str = "Indexing" if embed else "Registering"
         logger.info("full index: found %d files in %s", total, root)
 
         start_idx = 0
@@ -1077,62 +1107,70 @@ class JITIndexManager:
             checkpoint = self.tracker.get_latest_checkpoint()
             if checkpoint:
                 start_idx = checkpoint.processed_files
-                print(
-                    f"resuming from checkpoint: {start_idx}/{total}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                progress.log(f"Resuming from checkpoint: {start_idx}/{total}")
 
         errors: list[str] = []
-        last_pct = -1
 
         self.tracker.begin_batch()
 
-        if embed:
-            await self._full_index_with_embed(
-                all_files[start_idx:],
-                start_idx,
-                total,
-                checkpoint_interval,
-                errors,
-            )
-        else:
-            for i, file_path in enumerate(
-                all_files[start_idx:], start=start_idx
-            ):
-                result = self.register_file(file_path)
+        with progress.live_context():
+            if embed:
+                await self._full_index_with_embed(
+                    all_files[start_idx:],
+                    start_idx,
+                    total,
+                    checkpoint_interval,
+                    errors,
+                    progress=progress,
+                )
+            else:
+                progress.start_phase(
+                    "register",
+                    f"{mode_str} files",
+                    total - start_idx,
+                )
 
-                if result.status == "error":
-                    errors.append(f"{file_path}: {result.reason}")
+                for i, file_path in enumerate(
+                    all_files[start_idx:], start=start_idx
+                ):
+                    result = self.register_file(file_path)
 
-                pct = int(100 * (i + 1) / total) if total else 0
-                if pct >= last_pct + 2 or (i + 1) % 20 == 0:
-                    last_pct = pct
-                    print(
-                        f"[{pct:3d}%] {i + 1}/{total} - {file_path.name}",
-                        file=sys.stderr,
-                        flush=True,
+                    if result.status == "error":
+                        errors.append(f"{file_path}: {result.reason}")
+
+                    progress.update_absolute(
+                        "register",
+                        completed=i + 1 - start_idx,
+                        current_item=file_path.name,
+                        files=i + 1,
+                        blob_size=self.blob.size_bytes,
+                        errors=len(errors),
                     )
 
-                if (i + 1) % checkpoint_interval == 0:
-                    self.tracker.end_batch()
-                    self.tracker.save_checkpoint(i + 1, total, str(file_path))
-                    self.tracker.begin_batch()
+                    if (i + 1) % checkpoint_interval == 0:
+                        self.tracker.end_batch()
+                        self.tracker.save_checkpoint(
+                            i + 1, total, str(file_path)
+                        )
+                        self.tracker.begin_batch()
 
-                yield IndexProgress(
-                    processed=i + 1,
-                    total=total,
-                    current_file=str(file_path),
-                    bytes_written=self.blob.size_bytes,
-                    errors=errors[-10:],
-                )
+                    yield IndexProgress(
+                        processed=i + 1,
+                        total=total,
+                        current_file=str(file_path),
+                        bytes_written=self.blob.size_bytes,
+                        errors=errors[-10:],
+                    )
+
+                progress.complete_phase("register", f"Registered {total} files")
 
         self.tracker.end_batch()
 
-        print(
-            f"done: {total} files, {self.blob.size_bytes} bytes",
-            file=sys.stderr,
-            flush=True,
+        progress.print_summary(
+            "Indexing Complete",
+            files=total,
+            blob_size=self.blob.size_bytes,
+            errors=len(errors),
         )
 
         self.tracker.clear_checkpoints()

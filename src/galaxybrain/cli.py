@@ -1338,19 +1338,49 @@ def cmd_keys(args: argparse.Namespace) -> int:
     key_type = args.type
     limit = args.limit
     show_json = args.json
+    context_filter = getattr(args, "context", None)
+
+    # if --context is specified, implicitly filter to files only
+    if context_filter and key_type == "all":
+        key_type = "files"
 
     results: list[dict] = []
 
     if key_type in ("all", "files"):
-        query = "SELECT path, key_hash, vector_offset FROM files ORDER BY path"
-        if limit:
-            query += f" LIMIT {limit}"
-        for row in cur.execute(query):
+        if context_filter:
+            # filter by context using LIKE on JSON array
+            like_pattern = f'%"{context_filter}"%'
+            query = """
+                SELECT path, key_hash, vector_offset, detected_contexts
+                FROM files
+                WHERE detected_contexts LIKE ?
+                ORDER BY path
+            """
+            params: tuple = (like_pattern,)
+            if limit:
+                query += f" LIMIT {limit}"
+            rows = cur.execute(query, params).fetchall()
+        else:
+            query = """
+                SELECT path, key_hash, vector_offset, detected_contexts
+                FROM files ORDER BY path
+            """
+            if limit:
+                query += f" LIMIT {limit}"
+            rows = cur.execute(query).fetchall()
+
+        for row in rows:
             # convert signed to unsigned for display
             key_hash = row["key_hash"]
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
             key_str = file_key(row["path"])
+            # parse contexts
+            contexts = []
+            if row["detected_contexts"]:
+                import json
+
+                contexts = json.loads(row["detected_contexts"])
             results.append(
                 {
                     "type": "file",
@@ -1358,6 +1388,7 @@ def cmd_keys(args: argparse.Namespace) -> int:
                     "path": row["path"],
                     "key_hash": f"0x{key_hash:016x}",
                     "embedded": row["vector_offset"] is not None,
+                    "contexts": contexts,
                 }
             )
 
@@ -1425,6 +1456,34 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 }
             )
 
+    # contexts - aggregate from files with detected_contexts
+    if key_type in ("all", "contexts"):
+        import json
+
+        query = """
+            SELECT detected_contexts, COUNT(*) as cnt
+            FROM files
+            WHERE detected_contexts IS NOT NULL
+            GROUP BY detected_contexts
+        """
+        context_counts: dict[str, int] = {}
+        for row in cur.execute(query):
+            contexts_json = row["detected_contexts"]
+            if contexts_json:
+                contexts = json.loads(contexts_json)
+                for ctx in contexts:
+                    prev = context_counts.get(ctx, 0)
+                    context_counts[ctx] = prev + row["cnt"]
+
+        for ctx, count in sorted(context_counts.items()):
+            results.append(
+                {
+                    "type": "context",
+                    "key": ctx,
+                    "file_count": count,
+                }
+            )
+
     conn.close()
 
     if show_json:
@@ -1442,44 +1501,109 @@ def cmd_keys(args: argparse.Namespace) -> int:
     files = [r for r in results if r["type"] == "file"]
     symbols = [r for r in results if r["type"] == "symbol"]
     memories = [r for r in results if r["type"] == "memory"]
+    contexts = [r for r in results if r["type"] == "context"]
 
-    if files:
-        print(f"\n{'=' * 60}")
-        print(f"FILES ({len(files)})")
-        print("=" * 60)
-        for f in files:
-            embed_mark = "✓" if f["embedded"] else "✗"
-            print(f"[{embed_mark}] {f['key']}")
-            print(f"      hash: {f['key_hash']}")
+    # try rich output
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
 
-    if symbols:
-        print(f"\n{'=' * 60}")
-        print(f"SYMBOLS ({len(symbols)})")
-        print("=" * 60)
-        for s in symbols:
-            embed_mark = "✓" if s["embedded"] else "✗"
-            print(f"[{embed_mark}] {s['key']}")
-            print(f"      hash: {s['key_hash']}")
+        console = Console()
 
-    if memories:
-        print(f"\n{'=' * 60}")
-        print(f"MEMORIES ({len(memories)})")
-        print("=" * 60)
-        for m in memories:
-            embed_mark = "✓" if m["embedded"] else "✗"
-            print(f"[{embed_mark}] {m['key']}")
-            print(f"      hash: {m['key_hash']}")
-            if m["task"]:
-                print(f"      task: {m['task']}")
-            if m["insights"]:
-                print(f"      insights: {m['insights']}")
-            if m["context"]:
-                print(f"      context: {m['context']}")
-            if m["tags"]:
-                print(f"      tags: {m['tags']}")
-            print(f"      text: {m['text']}")
+        if contexts:
+            table = Table(title=f"Contexts ({len(contexts)})")
+            table.add_column("Context", style="cyan")
+            table.add_column("Files", justify="right", style="green")
+            for c in contexts:
+                table.add_row(c["key"], str(c["file_count"]))
+            console.print(table)
+            console.print()
 
-    print(f"\ntotal: {len(results)} keys")
+        if files:
+            table = Table(title=f"Files ({len(files)})", show_lines=True)
+            table.add_column("", width=1)
+            table.add_column("Key", style="blue", overflow="fold")
+            table.add_column("Contexts", style="cyan", overflow="fold")
+            for f in files:
+                embed = "[green]✓[/]" if f["embedded"] else "[red]✗[/]"
+                ctx_str = ", ".join(f.get("contexts", [])) or "-"
+                table.add_row(embed, f["key"], ctx_str)
+            console.print(table)
+            console.print()
+
+        if symbols:
+            table = Table(title=f"Symbols ({len(symbols)})")
+            table.add_column("", width=1)
+            table.add_column("Key", style="blue", no_wrap=True, max_width=60)
+            table.add_column("Kind", style="magenta")
+            for s in symbols:
+                embed = "[green]✓[/]" if s["embedded"] else "[red]✗[/]"
+                table.add_row(embed, s["key"], s["kind"])
+            console.print(table)
+            console.print()
+
+        if memories:
+            table = Table(title=f"Memories ({len(memories)})")
+            table.add_column("", width=1)
+            table.add_column("ID", style="blue")
+            table.add_column("Task", style="cyan")
+            table.add_column("Text", max_width=40)
+            for m in memories:
+                embed = "[green]✓[/]" if m["embedded"] else "[red]✗[/]"
+                table.add_row(
+                    embed,
+                    m["id"],
+                    m.get("task") or "-",
+                    m["text"][:40] + "…" if len(m["text"]) > 40 else m["text"],
+                )
+            console.print(table)
+            console.print()
+
+        console.print(
+            Panel(f"[bold]Total: {len(results)} keys[/]", border_style="dim")
+        )
+
+    except ImportError:
+        # fallback to plain output
+        if contexts:
+            print(f"\n{'=' * 60}")
+            print(f"CONTEXTS ({len(contexts)})")
+            print("=" * 60)
+            for c in contexts:
+                print(f"  {c['key']}: {c['file_count']} files")
+
+        if files:
+            print(f"\n{'=' * 60}")
+            print(f"FILES ({len(files)})")
+            print("=" * 60)
+            for f in files:
+                embed_mark = "✓" if f["embedded"] else "✗"
+                print(f"[{embed_mark}] {f['key']}")
+                if f.get("contexts"):
+                    print(f"      contexts: {', '.join(f['contexts'])}")
+
+        if symbols:
+            print(f"\n{'=' * 60}")
+            print(f"SYMBOLS ({len(symbols)})")
+            print("=" * 60)
+            for s in symbols:
+                embed_mark = "✓" if s["embedded"] else "✗"
+                print(f"[{embed_mark}] {s['key']}")
+
+        if memories:
+            print(f"\n{'=' * 60}")
+            print(f"MEMORIES ({len(memories)})")
+            print("=" * 60)
+            for m in memories:
+                embed_mark = "✓" if m["embedded"] else "✗"
+                print(f"[{embed_mark}] {m['key']}")
+                if m["task"]:
+                    print(f"      task: {m['task']}")
+                print(f"      text: {m['text']}")
+
+        print(f"\ntotal: {len(results)} keys")
+
     return 0
 
 
@@ -2284,7 +2408,7 @@ def main() -> int:
     keys_parser.add_argument(
         "-t",
         "--type",
-        choices=["all", "files", "symbols", "memories"],
+        choices=["all", "files", "symbols", "memories", "contexts"],
         default="all",
         help="filter by key type (default: all)",
     )
@@ -2298,6 +2422,11 @@ def main() -> int:
         "--json",
         action="store_true",
         help="output as JSON",
+    )
+    keys_parser.add_argument(
+        "-c",
+        "--context",
+        help="filter files by context (e.g., context:auth)",
     )
 
     # warm command
