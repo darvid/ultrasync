@@ -1,5 +1,6 @@
 import os
 import time
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -10,8 +11,15 @@ from pydantic import BaseModel, Field
 from galaxybrain.events import EventType, SessionEvent
 from galaxybrain.file_registry import FileRegistry
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
+from galaxybrain.logging_config import configure_logging, get_logger
 from galaxybrain.patterns import PatternSetManager
 from galaxybrain.threads import ThreadManager
+from galaxybrain.transcript_watcher import (
+    ClaudeCodeParser,
+    TranscriptParser,
+    TranscriptWatcher,
+    WatcherStats,
+)
 
 
 def _key_to_hex(key_hash: int | None) -> str | None:
@@ -29,9 +37,102 @@ def _hex_to_key(key_str: str | int) -> int:
         return int(key_str, 16)
     return int(key_str)
 
+
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
+
+# env var for enabling transcript watching
+ENV_WATCH_TRANSCRIPTS = "GALAXYBRAIN_WATCH_TRANSCRIPTS"
+
+logger = get_logger("mcp_server")
+
+
+def _check_parent_process_tree() -> str | None:
+    """Walk parent process tree to detect coding agent (Linux only).
+
+    Returns:
+        Agent name or None if not detected
+    """
+    pid = os.getpid()
+
+    while pid > 1:
+        try:
+            # read process name
+            with open(f"/proc/{pid}/comm") as f:
+                comm = f.read().strip().lower()
+
+            # check for known agents
+            if comm == "claude":
+                return "claude-code"
+            if comm == "codex":
+                return "codex"
+            if comm == "cursor":
+                return "cursor"
+
+            # get parent pid
+            with open(f"/proc/{pid}/status") as f:
+                for line in f:
+                    if line.startswith("PPid:"):
+                        pid = int(line.split()[1])
+                        break
+                else:
+                    break
+        except (FileNotFoundError, PermissionError, ValueError):
+            break
+
+    return None
+
+
+def detect_coding_agent() -> str | None:
+    """Auto-detect which coding agent is running.
+
+    Detection order:
+    1. Environment variables (fast, explicit)
+    2. Parent process tree (works when env vars aren't inherited)
+
+    Returns:
+        Agent name ("claude-code", "codex", etc.) or None if unknown
+    """
+    # env vars (fast path)
+    if os.environ.get("CLAUDECODE"):
+        return "claude-code"
+    if os.environ.get("CODEX_CLI"):
+        return "codex"
+    if os.environ.get("CURSOR_WORKSPACE"):
+        return "cursor"
+
+    # fallback: check parent process tree (Linux)
+    if os.path.exists("/proc"):
+        agent = _check_parent_process_tree()
+        if agent:
+            logger.debug("detected agent from process tree: %s", agent)
+            return agent
+
+    return None
+
+
+def get_transcript_parser(agent: str | None) -> TranscriptParser | None:
+    """Get the transcript parser for a coding agent.
+
+    Args:
+        agent: Agent name or None for auto-detection
+
+    Returns:
+        TranscriptParser instance or None if agent is unknown/unsupported
+    """
+    if agent is None:
+        agent = detect_coding_agent()
+
+    if agent == "claude-code":
+        return ClaudeCodeParser()
+
+    # Add more parsers here as they're implemented
+    # elif agent == "codex":
+    #     return CodexParser()
+
+    return None
+
 
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
@@ -137,6 +238,28 @@ class PatternSetInfo(BaseModel):
     tags: list[str] = Field(description="Classification tags")
 
 
+class WatcherStatsInfo(BaseModel):
+    """Statistics about transcript watcher activity."""
+
+    running: bool = Field(description="Whether watcher is running")
+    agent_name: str = Field(description="Coding agent being watched")
+    project_slug: str = Field(description="Project identifier/slug")
+    watch_dir: str = Field(description="Transcript watch directory")
+    files_indexed: int = Field(description="Files auto-indexed")
+    files_skipped: int = Field(description="Files skipped (up to date)")
+    transcripts_processed: int = Field(description="Transcripts processed")
+    tool_calls_seen: int = Field(description="File access tool calls seen")
+    errors: list[str] = Field(description="Recent errors (last 10)")
+    # search learning stats
+    learning_enabled: bool = Field(description="Search learning enabled")
+    sessions_started: int = Field(description="Weak searches detected")
+    sessions_resolved: int = Field(description="Searches resolved via fallback")
+    files_learned: int = Field(description="Files indexed from learning")
+    associations_created: int = Field(description="Query-file associations")
+    # pattern cache stats
+    patterns_cached: int = Field(description="Grep/glob patterns cached")
+
+
 # ---------------------------------------------------------------------------
 # Server state management
 # ---------------------------------------------------------------------------
@@ -150,6 +273,9 @@ class ServerState:
         jit_data_dir: Path | None = None,
         aot_index_path: Path | None = None,
         aot_blob_path: Path | None = None,
+        watch_transcripts: bool = False,
+        agent: str | None = None,
+        enable_learning: bool = True,
     ) -> None:
         self._model_name = model_name
         self._root = root
@@ -165,6 +291,11 @@ class ServerState:
         self._aot_index: GlobalIndex | None = None
         self._aot_checked = False
         self._pattern_manager: PatternSetManager | None = None
+        self._watch_transcripts = watch_transcripts
+        self._agent = agent
+        self._enable_learning = enable_learning
+        self._watcher: TranscriptWatcher | None = None
+        self._watcher_started = False
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -263,6 +394,60 @@ class ServerState:
     def root(self) -> Path | None:
         return self._root
 
+    async def start_watcher(self) -> None:
+        """Start the transcript watcher if configured."""
+        if not self._watch_transcripts or self._watcher_started:
+            return
+
+        project_root = self._root or Path.cwd()
+        parser = get_transcript_parser(self._agent)
+
+        if parser is None:
+            detected = detect_coding_agent()
+            logger.warning(
+                "transcript watching enabled but no parser available "
+                "(agent=%s, detected=%s)",
+                self._agent,
+                detected,
+            )
+            return
+
+        self._ensure_jit_initialized()
+        assert self._jit_manager is not None
+
+        self._watcher = TranscriptWatcher(
+            project_root=project_root,
+            jit_manager=self._jit_manager,
+            parser=parser,
+            enable_learning=self._enable_learning,
+        )
+        await self._watcher.start()
+        self._watcher_started = True
+
+        logger.info(
+            "transcript watcher started: agent=%s project=%s",
+            parser.agent_name,
+            project_root,
+        )
+
+    async def stop_watcher(self) -> None:
+        """Stop the transcript watcher if running."""
+        if self._watcher:
+            await self._watcher.stop()
+            self._watcher = None
+            self._watcher_started = False
+
+    @property
+    def watcher(self) -> TranscriptWatcher | None:
+        """Get the transcript watcher instance."""
+        return self._watcher
+
+    def get_watcher_stats(self) -> WatcherStats | None:
+        """Get transcript watcher statistics."""
+        if self._watcher:
+            return self._watcher.get_stats()
+        return None
+
 
 # ---------------------------------------------------------------------------
 # MCP Server setup
@@ -272,6 +457,9 @@ class ServerState:
 def create_server(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     root: Path | None = None,
+    watch_transcripts: bool | None = None,
+    agent: str | None = None,
+    enable_learning: bool = True,
 ) -> FastMCP:
     """Create and configure the galaxybrain MCP server.
 
@@ -279,19 +467,59 @@ def create_server(
         model_name: Embedding model to use
             (default: sentence-transformers/all-MiniLM-L6-v2)
         root: Repository root path for file registration
+        watch_transcripts: Enable automatic transcript watching
+            (default: auto from GALAXYBRAIN_WATCH_TRANSCRIPTS env var)
+        agent: Coding agent name for transcript parser
+            (default: auto-detect from environment)
+        enable_learning: Enable search learning when watching
+            (default: True)
 
     Returns:
         Configured FastMCP server instance
     """
-    state = ServerState(model_name=model_name, root=root)
+    # determine data directory early for logging
+    data_dir = root / ".galaxybrain" if root else Path.cwd() / ".galaxybrain"
+
+    # configure logging (writes to data_dir/debug.log if GALAXYBRAIN_DEBUG set)
+    configure_logging(data_dir=data_dir)
+
+    # check env var if watch_transcripts not explicitly set (defaults to True)
+    if watch_transcripts is None:
+        env_val = os.environ.get(ENV_WATCH_TRANSCRIPTS, "").lower()
+        # only disable if explicitly set to false/0/no
+        watch_transcripts = env_val not in ("0", "false", "no")
+
+    state = ServerState(
+        model_name=model_name,
+        root=root,
+        watch_transcripts=watch_transcripts,
+        agent=agent,
+        enable_learning=enable_learning,
+    )
 
     # eagerly init jit_manager ONLY if index already exists
     # this makes first search fast (AOT ready) without creating files on startup
     if state._jit_data_dir.exists():
         state._ensure_jit_initialized()
 
+    # lifespan context manager for startup/shutdown hooks
+    # this runs AFTER the event loop starts, so async code works properly
+    @asynccontextmanager
+    async def lifespan(app: FastMCP):
+        """Lifecycle hooks for the MCP server."""
+        # startup: auto-start transcript watcher if configured
+        if watch_transcripts:
+            logger.info("auto-starting transcript watcher...")
+            await state.start_watcher()
+        yield
+        # shutdown: stop watcher gracefully
+        if state.watcher:
+            logger.info("stopping transcript watcher...")
+            await state.stop_watcher()
+
     mcp = FastMCP(
         "galaxybrain",
+        lifespan=lifespan,
         instructions="""\
 Galaxybrain provides semantic indexing and search for codebases.
 
@@ -303,6 +531,13 @@ Galaxybrain provides semantic indexing and search for codebases.
 - "hide the demo button on showings page"
 - "update the payment form validation"
 
+**Rephrase regex patterns as natural language:**
+- Instead of: grep("def index_file")
+- Try: jit_search("index_file method definition")
+- Instead of: grep("class.*Parser")
+- Try: jit_search("Parser classes")
+This helps the search learner improve from your queries.
+
 **jit_search advantages over grep/glob:**
 - Understands intent, not just literal strings
 - Single call vs multiple grep + glob + read calls
@@ -310,8 +545,8 @@ Galaxybrain provides semantic indexing and search for codebases.
 - Use result_type="symbol" to find functions/classes directly
 
 **Only fall back to grep/glob when:**
-- Searching for exact literal strings or regex patterns
 - jit_search returns no relevant results
+- You need exact regex matching (rare)
 - Index doesn't exist yet (run jit_full_index first)
 
 **After fallback search succeeds, index for next time:**
@@ -723,6 +958,64 @@ context:api, context:data, context:infra
         response = asdict(result)
         response["key_hash"] = _key_to_hex(result.key_hash)
         return response
+
+    @mcp.tool()
+    def jit_delete_file(path: str) -> dict[str, Any]:
+        """Delete a file and all its symbols from the index.
+
+        Use when a file is deleted from the codebase or you want to
+        remove it from search results entirely.
+
+        Args:
+            path: Path to the file to remove
+
+        Returns:
+            Status indicating if the file was found and deleted
+        """
+        deleted = state.jit_manager.delete_file(Path(path))
+        return {
+            "status": "deleted" if deleted else "not_found",
+            "path": path,
+        }
+
+    @mcp.tool()
+    def jit_delete_symbol(key_hash: str) -> dict[str, Any]:
+        """Delete a single symbol from the index by key hash.
+
+        Use to remove manually added symbols (via jit_add_symbol) or
+        individual extracted symbols.
+
+        Args:
+            key_hash: The key hash of the symbol (hex string from search)
+
+        Returns:
+            Status indicating if the symbol was found and deleted
+        """
+        key = _hex_to_key(key_hash)
+        deleted = state.jit_manager.delete_symbol(key)
+        return {
+            "status": "deleted" if deleted else "not_found",
+            "key_hash": key_hash,
+        }
+
+    @mcp.tool()
+    def jit_delete_memory(memory_id: str) -> dict[str, Any]:
+        """Delete a memory entry from the index.
+
+        Use to remove memories that are no longer relevant or were
+        created in error.
+
+        Args:
+            memory_id: The memory ID (e.g., "mem:a1b2c3d4")
+
+        Returns:
+            Status indicating if the memory was found and deleted
+        """
+        deleted = state.jit_manager.delete_memory(memory_id)
+        return {
+            "status": "deleted" if deleted else "not_found",
+            "memory_id": memory_id,
+        }
 
     @mcp.tool()
     def jit_get_stats() -> dict[str, Any]:
@@ -1253,6 +1546,78 @@ context:api, context:data, context:infra
             for ps in state.pattern_manager.list_all()
         ]
 
+    # -----------------------------------------------------------------------
+    # Transcript Watcher tools
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def watcher_stats() -> WatcherStatsInfo | None:
+        """Get transcript watcher statistics.
+
+        Returns information about the background transcript watcher that
+        auto-indexes files accessed during coding sessions.
+
+        Returns:
+            Watcher statistics or None if watcher is not enabled
+        """
+        stats = state.get_watcher_stats()
+        if stats is None:
+            return None
+
+        return WatcherStatsInfo(
+            running=stats.running,
+            agent_name=stats.agent_name,
+            project_slug=stats.project_slug,
+            watch_dir=stats.watch_dir,
+            files_indexed=stats.files_indexed,
+            files_skipped=stats.files_skipped,
+            transcripts_processed=stats.transcripts_processed,
+            tool_calls_seen=stats.tool_calls_seen,
+            errors=stats.errors[-10:] if stats.errors else [],
+            # learning stats
+            learning_enabled=stats.learning_enabled,
+            sessions_started=stats.sessions_started,
+            sessions_resolved=stats.sessions_resolved,
+            files_learned=stats.files_learned,
+            associations_created=stats.associations_created,
+            # pattern cache stats
+            patterns_cached=stats.patterns_cached,
+        )
+
+    @mcp.tool()
+    async def watcher_start() -> dict[str, Any]:
+        """Start the transcript watcher.
+
+        Enables automatic indexing of files accessed during coding sessions.
+        The watcher monitors transcript files and indexes any files that
+        are read, written, or edited.
+
+        Returns:
+            Status of the watcher after starting
+        """
+        await state.start_watcher()
+        stats = state.get_watcher_stats()
+        if stats:
+            return {
+                "status": "started",
+                "agent": stats.agent_name,
+                "watch_dir": stats.watch_dir,
+            }
+        return {"status": "failed", "reason": "no compatible agent detected"}
+
+    @mcp.tool()
+    async def watcher_stop() -> dict[str, str]:
+        """Stop the transcript watcher.
+
+        Disables automatic indexing. Files can still be indexed manually
+        using jit_index_file.
+
+        Returns:
+            Status confirmation
+        """
+        await state.stop_watcher()
+        return {"status": "stopped"}
+
     return mcp
 
 
@@ -1260,6 +1625,9 @@ def run_server(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     root: Path | None = None,
     transport: str = "stdio",
+    watch_transcripts: bool | None = None,
+    agent: str | None = None,
+    enable_learning: bool = True,
 ) -> None:
     """Run the galaxybrain MCP server.
 
@@ -1267,8 +1635,17 @@ def run_server(
         model_name: Embedding model to use
         root: Repository root path
         transport: Transport type ("stdio" or "streamable-http")
+        watch_transcripts: Enable automatic transcript watching
+        agent: Coding agent name for transcript parser
+        enable_learning: Enable search learning when watching
     """
-    mcp = create_server(model_name=model_name, root=root)
+    mcp = create_server(
+        model_name=model_name,
+        root=root,
+        watch_transcripts=watch_transcripts,
+        agent=agent,
+        enable_learning=enable_learning,
+    )
     mcp.run(transport=transport)
 
 

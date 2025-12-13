@@ -1291,6 +1291,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print("\n⚠️  Warnings:")
         for w in warnings:
             print(f"  - {w}")
+        print("\n💡 To fix:")
+        print("  galaxybrain index --embed .  # full index with embeddings")
+        print("  galaxybrain warm             # embed registered files only")
 
     return 0
 

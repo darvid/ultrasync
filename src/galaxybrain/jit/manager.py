@@ -564,6 +564,9 @@ class JITIndexManager:
         for sym_key in self.tracker.get_symbol_keys(path):
             self.vector_cache.evict(sym_key)
 
+        # evict pattern caches that reference this file
+        self._evict_patterns_for_file(path)
+
         self.tracker.delete_file(path)
 
         return await self.index_file(path, force=True)
@@ -583,6 +586,9 @@ class JITIndexManager:
         for sym_key in self.tracker.get_symbol_keys(path):
             self.vector_cache.evict(sym_key)
 
+        # evict pattern caches that reference this file
+        self._evict_patterns_for_file(path)
+
         self.tracker.delete_file(path)
 
         return self.register_file(path, force=True)
@@ -599,6 +605,9 @@ class JITIndexManager:
         # evict all symbols from cache
         for sym_key in self.tracker.get_symbol_keys(path):
             self.vector_cache.evict(sym_key)
+
+        # evict pattern caches that reference this file
+        self._evict_patterns_for_file(path)
 
         # delete symbols from tracker
         self.tracker.delete_symbols(path)
@@ -1278,3 +1287,116 @@ class JITIndexManager:
             )
 
         return entries
+
+    # -----------------------------------------------------------------------
+    # Pattern caching
+    # -----------------------------------------------------------------------
+
+    def _evict_patterns_for_file(self, path: Path) -> int:
+        """Evict pattern caches that reference a modified file.
+
+        Called when a file is reindexed/reregistered/deleted to invalidate
+        any cached grep/glob patterns that included this file.
+        """
+        file_path = str(path.resolve())
+
+        # get pattern keys that reference this file
+        pattern_keys = self.tracker.get_patterns_for_file(file_path)
+
+        # evict from vector cache
+        for key in pattern_keys:
+            self.vector_cache.evict(key)
+
+        # evict from tracker (returns count)
+        count = self.tracker.evict_patterns_for_file(file_path)
+
+        if count > 0:
+            logger.debug(
+                "evicted %d stale pattern cache(s) for %s",
+                count,
+                path.name,
+            )
+
+        return count
+
+    async def cache_pattern_result(
+        self,
+        pattern: str,
+        tool_type: str,
+        matched_files: list[str],
+    ) -> IndexResult:
+        """Cache a grep/glob pattern result for semantic search.
+
+        The pattern and its matched files are embedded and stored so future
+        semantic searches can find them. Automatically evicted when any
+        matched file is modified.
+
+        Args:
+            pattern: The search pattern (regex for grep, glob for glob)
+            tool_type: "grep" or "glob"
+            matched_files: List of file paths that matched
+
+        Returns:
+            IndexResult with the cache key hash
+        """
+        # build content that captures the pattern and matches
+        content_lines = [
+            f"# Pattern Cache ({tool_type})",
+            f"# Pattern: {pattern}",
+            f"# Matched {len(matched_files)} file(s):",
+        ]
+        for f in matched_files[:20]:  # cap at 20 for embedding
+            content_lines.append(f"#   - {f}")
+        if len(matched_files) > 20:
+            content_lines.append(f"#   ... and {len(matched_files) - 20} more")
+
+        content = "\n".join(content_lines)
+        content_bytes = content.encode("utf-8")
+
+        # compute key hash
+        key = hash64(f"pattern:{tool_type}:{pattern}")
+
+        # store in blob
+        blob_entry = self.blob.append(content_bytes)
+
+        # embed
+        files_preview = matched_files[:5]
+        embed_text = f"{tool_type} pattern {pattern}: matches {files_preview}"
+        if self._started:
+            embedding = await self.embed_queue.embed(
+                embed_text, {"type": "pattern_cache"}
+            )
+        else:
+            embedding = self.provider.embed(embed_text)
+
+        self.vector_cache.put(key, embedding)
+
+        # persist embedding to vector store
+        vec_entry = self.vector_store.append(embedding)
+
+        # persist to tracker
+        self.tracker.cache_pattern(
+            key_hash=key,
+            pattern=pattern,
+            tool_type=tool_type,
+            matched_files=matched_files,
+            blob_offset=blob_entry.offset,
+            blob_length=blob_entry.length,
+        )
+        self.tracker.update_pattern_vector(
+            key, vec_entry.offset, vec_entry.length
+        )
+
+        logger.info(
+            "cached pattern result: %s %r → %d files",
+            tool_type,
+            pattern[:30],
+            len(matched_files),
+        )
+
+        return IndexResult(
+            status="cached",
+            key_hash=key,
+            path=None,
+            bytes=blob_entry.length,
+        )

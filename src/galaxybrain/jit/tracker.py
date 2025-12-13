@@ -63,6 +63,21 @@ class MemoryRecord:
     vector_length: int | None = None
 
 
+@dataclass
+class PatternCacheRecord:
+    """Cached grep/glob pattern result."""
+
+    key_hash: int
+    pattern: str
+    tool_type: str  # "grep" or "glob"
+    matched_files: list[str]  # file paths that matched
+    created_at: float
+    blob_offset: int
+    blob_length: int
+    vector_offset: int | None = None
+    vector_length: int | None = None
+
+
 class FileTracker:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -174,6 +189,29 @@ class FileTracker:
                 byte_position INTEGER NOT NULL,
                 updated_at REAL NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS pattern_caches (
+                key_hash INTEGER PRIMARY KEY,
+                pattern TEXT NOT NULL,
+                tool_type TEXT NOT NULL,
+                blob_offset INTEGER NOT NULL,
+                blob_length INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                vector_offset INTEGER,
+                vector_length INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_pattern_caches_pattern
+                ON pattern_caches(pattern);
+
+            CREATE TABLE IF NOT EXISTS pattern_cache_files (
+                pattern_key_hash INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                PRIMARY KEY (pattern_key_hash, file_path),
+                FOREIGN KEY(pattern_key_hash)
+                    REFERENCES pattern_caches(key_hash) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pattern_cache_files_path
+                ON pattern_cache_files(file_path);
         """
         )
         self._maybe_commit()
@@ -993,5 +1031,165 @@ class FileTracker:
     def clear_transcript_positions(self) -> int:
         """Clear all transcript positions (for testing or reset)."""
         cursor = self.conn.execute("DELETE FROM transcript_positions")
+        self._maybe_commit()
+        return cursor.rowcount
+
+    # -----------------------------------------------------------------------
+    # Pattern cache tracking
+    # -----------------------------------------------------------------------
+
+    def cache_pattern(
+        self,
+        key_hash: int,
+        pattern: str,
+        tool_type: str,
+        matched_files: list[str],
+        blob_offset: int,
+        blob_length: int,
+    ) -> None:
+        """Cache a grep/glob pattern result.
+
+        Args:
+            key_hash: Hash key for the pattern
+            pattern: The search pattern (regex or glob)
+            tool_type: "grep" or "glob"
+            matched_files: List of file paths that matched
+            blob_offset: Offset in blob store
+            blob_length: Length in blob store
+        """
+        signed_key = to_signed_64(key_hash)
+        now = time.time()
+
+        # upsert the pattern cache entry
+        self.conn.execute(
+            """
+            INSERT INTO pattern_caches
+                (key_hash, pattern, tool_type, blob_offset, blob_length,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key_hash) DO UPDATE SET
+                pattern = excluded.pattern,
+                tool_type = excluded.tool_type,
+                blob_offset = excluded.blob_offset,
+                blob_length = excluded.blob_length,
+                created_at = excluded.created_at
+            """,
+            (signed_key, pattern, tool_type, blob_offset, blob_length, now),
+        )
+
+        # clear old file associations and insert new ones
+        self.conn.execute(
+            "DELETE FROM pattern_cache_files WHERE pattern_key_hash = ?",
+            (signed_key,),
+        )
+
+        for file_path in matched_files:
+            self.conn.execute(
+                """
+                INSERT INTO pattern_cache_files (pattern_key_hash, file_path)
+                VALUES (?, ?)
+                """,
+                (signed_key, file_path),
+            )
+
+        self._maybe_commit()
+
+    def get_pattern_cache(self, key_hash: int) -> PatternCacheRecord | None:
+        """Get a cached pattern result by key hash."""
+        signed_key = to_signed_64(key_hash)
+
+        row = self.conn.execute(
+            "SELECT * FROM pattern_caches WHERE key_hash = ?",
+            (signed_key,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        # get associated files
+        file_rows = self.conn.execute(
+            "SELECT file_path FROM pattern_cache_files "
+            "WHERE pattern_key_hash = ?",
+            (signed_key,),
+        ).fetchall()
+        matched_files = [r["file_path"] for r in file_rows]
+
+        return PatternCacheRecord(
+            key_hash=to_unsigned_64(row["key_hash"]),
+            pattern=row["pattern"],
+            tool_type=row["tool_type"],
+            matched_files=matched_files,
+            created_at=row["created_at"],
+            blob_offset=row["blob_offset"],
+            blob_length=row["blob_length"],
+            vector_offset=row["vector_offset"],
+            vector_length=row["vector_length"],
+        )
+
+    def get_patterns_for_file(self, file_path: str) -> list[int]:
+        """Get all pattern key hashes that include a specific file.
+
+        Used to find which patterns need eviction when a file changes.
+        """
+        rows = self.conn.execute(
+            "SELECT pattern_key_hash FROM pattern_cache_files "
+            "WHERE file_path = ?",
+            (file_path,),
+        ).fetchall()
+        return [to_unsigned_64(row["pattern_key_hash"]) for row in rows]
+
+    def evict_patterns_for_file(self, file_path: str) -> int:
+        """Evict all pattern caches that include a specific file.
+
+        Called when a file is modified to invalidate stale pattern results.
+        Returns the number of patterns evicted.
+        """
+        # find patterns that reference this file
+        pattern_keys = self.conn.execute(
+            "SELECT DISTINCT pattern_key_hash FROM pattern_cache_files "
+            "WHERE file_path = ?",
+            (file_path,),
+        ).fetchall()
+
+        if not pattern_keys:
+            return 0
+
+        # delete the pattern caches (cascade will clean up junction table)
+        count = 0
+        for row in pattern_keys:
+            self.conn.execute(
+                "DELETE FROM pattern_caches WHERE key_hash = ?",
+                (row["pattern_key_hash"],),
+            )
+            count += 1
+
+        self._maybe_commit()
+        return count
+
+    def update_pattern_vector(
+        self, key_hash: int, vector_offset: int, vector_length: int
+    ) -> bool:
+        """Update vector location for a pattern cache."""
+        signed_key = to_signed_64(key_hash)
+        cursor = self.conn.execute(
+            """
+            UPDATE pattern_caches SET vector_offset = ?, vector_length = ?
+            WHERE key_hash = ?
+            """,
+            (vector_offset, vector_length, signed_key),
+        )
+        self._maybe_commit()
+        return cursor.rowcount > 0
+
+    def count_pattern_caches(self) -> int:
+        """Count total pattern caches."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM pattern_caches"
+        ).fetchone()
+        return row["cnt"]
+
+    def clear_pattern_caches(self) -> int:
+        """Clear all pattern caches (for testing or reset)."""
+        cursor = self.conn.execute("DELETE FROM pattern_caches")
         self._maybe_commit()
         return cursor.rowcount
