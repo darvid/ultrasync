@@ -226,6 +226,7 @@ name = "galaxybrain"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "galaxybrain-index" },
     { name = "hyperscan" },
     { name = "mcp" },
@@ -251,6 +252,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.1" },
     { name = "galaxybrain-index", editable = "crates/galaxybrain_index" },
     { name = "hyperscan", specifier = ">=0.8.0" },
     { name = "mcp", specifier = ">=1.2.0" },

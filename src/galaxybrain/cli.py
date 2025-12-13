@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """galaxybrain CLI - index and query codebases."""
 
-import argparse
 import json
 import os
 import sys
@@ -9,8 +8,10 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import click
+
 from galaxybrain import console
-from galaxybrain.call_graph import CallGraph, CallSite, build_call_graph
+from galaxybrain.call_graph import CallGraph, build_call_graph
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.jit.manager import JITIndexManager
 from galaxybrain.jit.search import search
@@ -65,25 +66,103 @@ def _offset_to_line(offset: int, line_starts: list[int], num_lines: int) -> int:
     return num_lines
 
 
-def cmd_index(args: argparse.Namespace) -> int:
-    """Index a directory using JIT or AOT strategy."""
+# common options as decorators
+def model_option(default: str = DEFAULT_EMBEDDING_MODEL):
+    return click.option(
+        "-m",
+        "--model",
+        default=default,
+        help=f"Embedding model (default: {default})",
+        show_default=False,
+    )
+
+
+def directory_option(help_text: str = "Directory with .galaxybrain index"):
+    return click.option(
+        "-d",
+        "--directory",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+        help=help_text,
+    )
+
+
+class AliasedGroup(click.Group):
+    """Group that supports command aliases."""
+
+    def get_command(
+        self, ctx: click.Context, cmd_name: str
+    ) -> click.Command | None:
+        rv = click.Group.get_command(self, ctx, cmd_name)
+        if rv is not None:
+            return rv
+        # aliases
+        aliases = {
+            "q": "query",
+            "s": "search",
+            "sg": "sgrep",
+        }
+        if cmd_name in aliases:
+            return click.Group.get_command(self, ctx, aliases[cmd_name])
+        return None
+
+
+@click.group(cls=AliasedGroup)
+@click.version_option(package_name="galaxybrain")
+def cli():
+    """Index and query codebases with semantic search."""
+    # configure structlog (respects GALAXYBRAIN_DEBUG env var)
+    from galaxybrain.logging_config import configure_logging
+
+    configure_logging()
+
+
+@cli.command()
+@click.argument(
+    "directory",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+)
+@model_option()
+@click.option(
+    "-e",
+    "--extensions",
+    help="Comma-separated file extensions (e.g., .py,.rs)",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["jit", "aot"]),
+    default="jit",
+    help="Indexing strategy",
+)
+@click.option(
+    "--no-resume",
+    is_flag=True,
+    help="Don't resume from checkpoint, start fresh (jit mode only)",
+)
+@click.option(
+    "--embed",
+    is_flag=True,
+    help="Compute embeddings upfront (slow, enables immediate search)",
+)
+def index(
+    directory: Path,
+    model: str,
+    extensions: str | None,
+    mode: str,
+    no_resume: bool,
+    embed: bool,
+):
+    """Index a directory (writes to .galaxybrain/)."""
     import asyncio
 
-    root = Path(args.directory).resolve()
-    if not root.is_dir():
-        console.error(f"{root} is not a directory")
-        return 1
-
+    root = directory.resolve()
     data_dir = root / DEFAULT_DATA_DIR
-    mode = getattr(args, "mode", "jit")
-    embed = getattr(args, "embed", False)
 
     # only load embedding model if we're actually embedding
-    # (importing EmbeddingProvider pulls in torch which takes ~15s)
     if embed:
         EmbeddingProvider = _get_embedder_class()
-        with console.status(f"loading embedding model ({args.model})..."):
-            embedder = EmbeddingProvider(model=args.model)
+        with console.status(f"loading embedding model ({model})..."):
+            embedder = EmbeddingProvider(model=model)
     else:
         embedder = None
 
@@ -93,12 +172,11 @@ def cmd_index(args: argparse.Namespace) -> int:
     )
 
     patterns = None
-    if args.extensions:
-        # convert extensions to glob patterns
-        exts = [e.strip().lstrip(".") for e in args.extensions.split(",")]
+    if extensions:
+        exts = [e.strip().lstrip(".") for e in extensions.split(",")]
         patterns = [f"**/*.{ext}" for ext in exts]
 
-    resume = mode == "jit" and not getattr(args, "no_resume", False)
+    resume = mode == "jit" and not no_resume
 
     async def run_index():
         async for _progress in manager.full_index(
@@ -107,7 +185,7 @@ def cmd_index(args: argparse.Namespace) -> int:
             resume=resume,
             embed=embed,
         ):
-            pass  # progress output handled by manager
+            pass
         return manager.get_stats()
 
     stats = asyncio.run(run_index())
@@ -127,34 +205,57 @@ def cmd_index(args: argparse.Namespace) -> int:
         )
     console.key_value("data", str(data_dir))
 
-    return 0
 
-
-def cmd_query(args: argparse.Namespace) -> int:
-    """Semantic search across indexed files and symbols."""
-    debug = getattr(args, "debug", False)
+@cli.command()
+@click.argument("query_text", required=False)
+@directory_option()
+@model_option()
+@click.option("-k", type=int, default=10, help="Number of results")
+@click.option("--key", help="Direct key lookup (e.g., 'file:src/foo.py')")
+@click.option(
+    "-t",
+    "--type",
+    "result_type",
+    type=click.Choice(["all", "file", "symbol"]),
+    default="all",
+    help="Filter results by type",
+)
+@click.option("--debug", is_flag=True, help="Enable debug logging")
+def query(
+    query_text: str | None,
+    directory: Path | None,
+    model: str,
+    k: int,
+    key: str | None,
+    result_type: str,
+    debug: bool,
+):
+    """Semantic search across indexed files."""
     if debug:
         os.environ["GALAXYBRAIN_DEBUG"] = "1"
 
+    if not query_text and not key:
+        raise click.UsageError("Provide a query or --key")
+
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
         console.error(f"no index found at {data_dir}")
         console.dim("run 'galaxybrain index <directory>' first")
-        return 1
+        sys.exit(1)
 
     # key lookup mode - direct AOT lookup (sub-ms), no model needed
-    if args.key:
+    if key:
         manager = JITIndexManager(
             data_dir=data_dir,
             embedding_provider=None,
         )
 
-        target_hash = hash64(args.key)
-        console.info(f"looking up key: {args.key}")
+        target_hash = hash64(key)
+        console.info(f"looking up key: {key}")
         console.dim(f"hash: 0x{target_hash:016x}")
 
         result = manager.aot_lookup(target_hash)
@@ -162,38 +263,36 @@ def cmd_query(args: argparse.Namespace) -> int:
             offset, length = result
             content = manager.blob.read(offset, length)
             console.success(f"found: {length} bytes at offset {offset}")
-            print("-" * 40)
-            print(content.decode(errors="replace")[:2000])
+            click.echo("-" * 40)
+            click.echo(content.decode(errors="replace")[:2000])
             if length > 2000:
                 console.dim(f"\n... ({length - 2000} more bytes)")
-            return 0
+            return
 
         # try tracker as fallback
         file_record = manager.tracker.get_file_by_key(target_hash)
         if file_record:
             console.success(f"FILE: {file_record.path}")
-            return 0
+            return
 
-        console.error(f"no match for key: {args.key}")
-        return 1
+        console.error(f"no match for key: {key}")
+        sys.exit(1)
 
-    # semantic search mode - uses shared search with full fallback
-    with console.status(f"loading model ({args.model})..."):
-        embedder = EmbeddingProvider(model=args.model)
+    # semantic search mode
+    with console.status(f"loading model ({model})..."):
+        embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(
         data_dir=data_dir,
         embedding_provider=embedder,
     )
 
-    result_type = getattr(args, "type", "all")
-
     t0 = time.perf_counter()
     results, stats = search(
-        query=args.query,
+        query=query_text,
         manager=manager,
         root=root,
-        top_k=args.k,
+        top_k=k,
         result_type=result_type,
     )
     t_search = time.perf_counter() - t0
@@ -211,7 +310,7 @@ def cmd_query(args: argparse.Namespace) -> int:
 
     strategy_str = " -> ".join(strategy_info) if strategy_info else "none"
 
-    console.header(f"top {len(results)} for: {args.query!r}")
+    console.header(f"top {len(results)} for: {query_text!r}")
     console.dim(f"search: {t_search * 1000:.1f}ms, strategy: {strategy_str}")
     if result_type != "all":
         console.dim(f"filter: {result_type}")
@@ -227,7 +326,6 @@ def cmd_query(args: argparse.Namespace) -> int:
             if r.key_hash:
                 console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
         else:
-            # use SearchResult fields directly
             kind_label = (r.kind or "symbol").upper()
             if r.path:
                 try:
@@ -251,56 +349,25 @@ def cmd_query(args: argparse.Namespace) -> int:
                     r.score,
                     f"{kind_label} key:0x{r.key_hash:016x} ({r.source})",
                 )
-        print()
-
-    return 0
+        click.echo()
 
 
-def _print_entry(entry: dict[str, object]) -> None:
-    """Print a file entry match."""
-    path = str(entry["path"])
-    try:
-        rel_path = Path(path).relative_to(Path.cwd())
-    except ValueError:
-        rel_path = Path(path)
-
-    print(f"FILE: {rel_path}")
-    print(f"  key: 0x{entry.get('key_hash', 0):016x}")
-    symbols = cast(list[str], entry.get("symbols", []))
-    if symbols:
-        print(f"  symbols: {', '.join(symbols[:10])}")
-        if len(symbols) > 10:
-            print(f"           ... and {len(symbols) - 10} more")
-
-
-def _print_symbol(entry: dict[str, object], sym: dict[str, object]) -> None:
-    """Print a symbol match."""
-    path = str(entry["path"])
-    try:
-        rel_path = Path(path).relative_to(Path.cwd())
-    except ValueError:
-        rel_path = Path(path)
-
-    print(f"SYMBOL: {sym['kind']} {sym['name']}")
-    print(f"  file: {rel_path}:{sym['line']}")
-    print(f"  key: 0x{sym.get('key_hash', 0):016x}")
-
-
-def cmd_symbols(args: argparse.Namespace) -> int:
+@cli.command()
+@directory_option()
+@click.option("-f", "--filter", "name_filter", help="Filter by substring")
+def symbols(directory: Path | None, name_filter: str | None):
     """List all indexed symbols."""
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
     tracker = FileTracker(data_dir / "tracker.db")
 
-    name_filter = args.filter if args.filter else None
     count = 0
-
     for sym in tracker.iter_all_symbols(name_filter=name_filter):
         try:
             rel_path = Path(sym.file_path).relative_to(Path.cwd())
@@ -310,68 +377,86 @@ def cmd_symbols(args: argparse.Namespace) -> int:
         loc = f"{rel_path}:{sym.line_start}"
         kind_str = f" [{sym.kind}]" if sym.kind else ""
         hash_str = f" 0x{sym.key_hash:016x}"
-        print(f"{sym.name:<40} {loc}{kind_str}{hash_str}")
+        click.echo(f"{sym.name:<40} {loc}{kind_str}{hash_str}")
         count += 1
 
     tracker.close()
-    print(f"\n{count} symbols")
-    return 0
+    click.echo(f"\n{count} symbols")
 
 
-def cmd_grep(args: argparse.Namespace) -> int:
-    """Regex pattern matching across indexed files using Hyperscan."""
+@cli.command()
+@click.argument("pattern", required=False)
+@click.option(
+    "-p", "--patterns-file", help="File containing patterns (one per line)"
+)
+@directory_option()
+@click.option(
+    "-v", "--verbose", is_flag=True, help="Show pattern name for each match"
+)
+@click.option("-t", "--timing", is_flag=True, help="Show timing breakdown")
+def grep(
+    pattern: str | None,
+    patterns_file: str | None,
+    directory: Path | None,
+    verbose: bool,
+    timing: bool,
+):
+    """Regex pattern matching with Hyperscan."""
+    if not pattern and not patterns_file:
+        raise click.UsageError("Provide a pattern or --patterns-file")
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
     tracker = FileTracker(data_dir / "tracker.db")
     file_count = tracker.file_count()
 
     if file_count == 0:
-        print("index is empty")
+        click.echo("index is empty")
         tracker.close()
-        return 0
+        return
 
     # load patterns from file or use single pattern
-    if args.patterns_file:
-        patterns_path = Path(args.patterns_file)
+    if patterns_file:
+        patterns_path = Path(patterns_file)
         if not patterns_path.exists():
-            print(
-                f"error: patterns file not found: {patterns_path}",
-                file=sys.stderr,
+            click.echo(
+                f"error: patterns file not found: {patterns_path}", err=True
             )
             tracker.close()
-            return 1
-        patterns = [
+            sys.exit(1)
+        patterns_list = [
             line.strip().encode()
             for line in patterns_path.read_text().splitlines()
             if line.strip() and not line.startswith("#")
         ]
     else:
-        patterns = [args.pattern.encode()]
+        patterns_list = [pattern.encode()]
 
-    if not patterns:
-        print("error: no patterns provided", file=sys.stderr)
+    if not patterns_list:
+        click.echo("error: no patterns provided", err=True)
         tracker.close()
-        return 1
+        sys.exit(1)
 
-    print(f"searching {file_count} files with {len(patterns)} pattern(s)...")
+    click.echo(
+        f"searching {file_count} files with {len(patterns_list)} pattern(s)..."
+    )
 
     t_compile = time.perf_counter()
     try:
-        hs = HyperscanSearch(patterns)
+        hs = HyperscanSearch(patterns_list)
     except Exception as e:
-        print(f"error: failed to compile patterns: {e}", file=sys.stderr)
+        click.echo(f"error: failed to compile patterns: {e}", err=True)
         tracker.close()
-        return 1
+        sys.exit(1)
     timings["compile"] = time.perf_counter() - t_compile
 
     total_matches = 0
@@ -394,13 +479,11 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
         files_with_matches += 1
 
-        # make path relative for display
         try:
             rel_path = path.relative_to(Path.cwd())
         except ValueError:
             rel_path = path
 
-        # build line offset table
         lines = content.split(b"\n")
         line_starts = _build_line_starts(lines)
 
@@ -415,97 +498,114 @@ def cmd_grep(args: argparse.Namespace) -> int:
 
             if line_num <= len(lines):
                 line_content = lines[line_num - 1].decode(errors="replace")
-                pattern = hs.pattern_for_id(pattern_id).decode(errors="replace")
+                pat = hs.pattern_for_id(pattern_id).decode(errors="replace")
 
-                if args.verbose:
-                    print(f"{rel_path}:{line_num} [{pattern}]")
-                    print(f"  {line_content.strip()}")
+                if verbose:
+                    click.echo(f"{rel_path}:{line_num} [{pat}]")
+                    click.echo(f"  {line_content.strip()}")
                 else:
-                    print(f"{rel_path}:{line_num}: {line_content.strip()}")
+                    click.echo(f"{rel_path}:{line_num}: {line_content.strip()}")
 
     tracker.close()
     timings["scan"] = time.perf_counter() - t_scan
     timings["total"] = time.perf_counter() - t_start
 
-    print(f"\n{total_matches} matches in {files_with_matches} files")
+    click.echo(f"\n{total_matches} matches in {files_with_matches} files")
 
-    if args.timing:
+    if timing:
         mb_scanned = total_bytes_scanned / (1024 * 1024)
         scan_speed = mb_scanned / timings["scan"] if timings["scan"] > 0 else 0
-        print("\ntiming:")
-        print(f"  compile:  {timings['compile'] * 1000:>7.2f} ms")
-        print(
+        click.echo("\ntiming:")
+        click.echo(f"  compile:  {timings['compile'] * 1000:>7.2f} ms")
+        click.echo(
             f"  scan:     {timings['scan'] * 1000:>7.2f} ms "
             f"({mb_scanned:.2f} MB @ {scan_speed:.1f} MB/s)"
         )
-        print(f"  total:    {timings['total'] * 1000:>7.2f} ms")
-
-    return 0
+        click.echo(f"  total:    {timings['total'] * 1000:>7.2f} ms")
 
 
-def cmd_semantic_grep(args: argparse.Namespace) -> int:
-    """Regex pattern match, then semantic search the matches."""
+@cli.command()
+@click.argument("query_text")
+@click.argument("pattern", required=False)
+@click.option(
+    "-p", "--patterns-file", help="File containing patterns (one per line)"
+)
+@directory_option()
+@model_option()
+@click.option("-k", type=int, default=10, help="Number of results")
+@click.option("-t", "--timing", is_flag=True, help="Show timing breakdown")
+def sgrep(
+    query_text: str,
+    pattern: str | None,
+    patterns_file: str | None,
+    directory: Path | None,
+    model: str,
+    k: int,
+    timing: bool,
+):
+    """Regex match then semantic search (semantic grep)."""
+    if not pattern and not patterns_file:
+        raise click.UsageError("Provide a pattern or --patterns-file")
 
     EmbeddingProvider = _get_embedder_class()
 
     timings: dict[str, float] = {}
     t_start = time.perf_counter()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
     tracker = FileTracker(data_dir / "tracker.db")
     file_count = tracker.file_count()
 
     if file_count == 0:
-        print("index is empty")
+        click.echo("index is empty")
         tracker.close()
-        return 0
+        return
 
     # load patterns
-    if args.patterns_file:
-        patterns_path = Path(args.patterns_file)
+    if patterns_file:
+        patterns_path = Path(patterns_file)
         if not patterns_path.exists():
-            print(
-                f"error: patterns file not found: {patterns_path}",
-                file=sys.stderr,
+            click.echo(
+                f"error: patterns file not found: {patterns_path}", err=True
             )
             tracker.close()
-            return 1
-        patterns = [
+            sys.exit(1)
+        patterns_list = [
             line.strip().encode()
             for line in patterns_path.read_text().splitlines()
             if line.strip() and not line.startswith("#")
         ]
     else:
-        patterns = [args.pattern.encode()]
+        patterns_list = [pattern.encode()]
 
-    if not patterns:
-        print("error: no patterns provided", file=sys.stderr)
+    if not patterns_list:
+        click.echo("error: no patterns provided", err=True)
         tracker.close()
-        return 1
+        sys.exit(1)
 
-    print(f"scanning {file_count} files with {len(patterns)} pattern(s)...")
+    click.echo(
+        f"scanning {file_count} files with {len(patterns_list)} pattern(s)..."
+    )
 
     t_compile = time.perf_counter()
     try:
-        hs = HyperscanSearch(patterns)
+        hs = HyperscanSearch(patterns_list)
     except Exception as e:
-        print(f"error: failed to compile patterns: {e}", file=sys.stderr)
+        click.echo(f"error: failed to compile patterns: {e}", err=True)
         tracker.close()
-        return 1
+        sys.exit(1)
     timings["compile"] = time.perf_counter() - t_compile
 
     # collect all matching lines with their context
     match_texts: list[str] = []
-    match_locations: list[
-        tuple[Path, int, str]
-    ] = []  # (path, line_num, line_text)
+    match_locations: list[tuple[Path, int, str]] = []
 
     t_scan = time.perf_counter()
     for file_record in tracker.iter_files():
@@ -520,7 +620,6 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
         if not matches:
             continue
 
-        # build line offset table
         lines = content.split(b"\n")
         line_starts = _build_line_starts(lines)
 
@@ -541,14 +640,14 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
     timings["scan"] = time.perf_counter() - t_scan
 
     if not match_texts:
-        print("no pattern matches found")
-        return 0
+        click.echo("no pattern matches found")
+        return
 
-    print(f"found {len(match_texts)} matching lines, embedding...")
+    click.echo(f"found {len(match_texts)} matching lines, embedding...")
 
     # embed all matching lines
     t_embed = time.perf_counter()
-    embedder = EmbeddingProvider(model=args.model)
+    embedder = EmbeddingProvider(model=model)
     match_vecs = embedder.embed_batch(match_texts)
     timings["embed"] = time.perf_counter() - t_embed
 
@@ -561,12 +660,12 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
 
     # embed query and search
     t_search = time.perf_counter()
-    query_vec = embedder.embed(args.query).tolist()
-    results = idx.search(query_vec, k=args.k)
+    query_vec = embedder.embed(query_text).tolist()
+    results = idx.search(query_vec, k=k)
     timings["search"] = time.perf_counter() - t_search
 
-    print(f"\ntop {len(results)} semantic matches for: {args.query!r}\n")
-    print("-" * 70)
+    click.echo(f"\ntop {len(results)} semantic matches for: {query_text!r}\n")
+    click.echo("-" * 70)
 
     for match_id, score in results:
         path, line_num, line_text = match_locations[match_id]
@@ -576,58 +675,62 @@ def cmd_semantic_grep(args: argparse.Namespace) -> int:
         except ValueError:
             rel_path = path
 
-        print(f"[{score:.3f}] {rel_path}:{line_num}")
-        print(f"         {line_text[:80]}")
-        print()
+        click.echo(f"[{score:.3f}] {rel_path}:{line_num}")
+        click.echo(f"         {line_text[:80]}")
+        click.echo()
 
     timings["total"] = time.perf_counter() - t_start
 
-    if args.timing:
-        print("timing:")
-        print(f"  compile:  {timings['compile'] * 1000:>7.2f} ms")
-        print(f"  scan:     {timings['scan'] * 1000:>7.2f} ms")
+    if timing:
+        click.echo("timing:")
+        click.echo(f"  compile:  {timings['compile'] * 1000:>7.2f} ms")
+        click.echo(f"  scan:     {timings['scan'] * 1000:>7.2f} ms")
         n_lines = len(match_texts)
-        print(
+        click.echo(
             f"  embed:    {timings['embed'] * 1000:>7.2f} ms ({n_lines} lines)"
         )
-        print(f"  index:    {timings['index'] * 1000:>7.2f} ms")
-        print(f"  search:   {timings['search'] * 1000:>7.2f} ms")
-        print(f"  total:    {timings['total'] * 1000:>7.2f} ms")
-
-    return 0
+        click.echo(f"  index:    {timings['index'] * 1000:>7.2f} ms")
+        click.echo(f"  search:   {timings['search'] * 1000:>7.2f} ms")
+        click.echo(f"  total:    {timings['total'] * 1000:>7.2f} ms")
 
 
-def cmd_show(args: argparse.Namespace) -> int:
-    """Show symbol details with source code."""
-
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+@cli.command()
+@click.argument("symbol")
+@click.option("-f", "--file", "file_filter", help="Filter by file path")
+@directory_option()
+@click.option("-c", "--context", type=int, default=2, help="Lines of context")
+def show(
+    symbol: str, file_filter: str | None, directory: Path | None, context: int
+):
+    """Show symbol source code."""
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
     tracker = FileTracker(data_dir / "tracker.db")
 
     # find matching symbols
     matches: list[SymbolRecord] = []
-    for sym in tracker.iter_all_symbols(name_filter=args.symbol):
-        if args.file and args.file not in sym.file_path:
+    for sym in tracker.iter_all_symbols(name_filter=symbol):
+        if file_filter and file_filter not in sym.file_path:
             continue
         matches.append(sym)
 
     tracker.close()
 
     if not matches:
-        if args.file:
-            print(
-                f"no symbol matching '{args.symbol}' in '{args.file}'",
-                file=sys.stderr,
+        if file_filter:
+            click.echo(
+                f"no symbol matching '{symbol}' in '{file_filter}'",
+                err=True,
             )
         else:
-            print(f"no symbol matching '{args.symbol}' found", file=sys.stderr)
-        return 1
+            click.echo(f"no symbol matching '{symbol}' found", err=True)
+        sys.exit(1)
 
     for sym in matches:
         try:
@@ -638,485 +741,566 @@ def cmd_show(args: argparse.Namespace) -> int:
         line = sym.line_start
         end_line = sym.line_end or line
 
-        print(f"\n{sym.kind} {sym.name}")
-        print(f"  {rel_path}:{line}")
-        print(f"  key: 0x{sym.key_hash:016x}")
-        print("-" * 60)
+        click.echo(f"\n{sym.kind} {sym.name}")
+        click.echo(f"  {rel_path}:{line}")
+        click.echo(f"  key: 0x{sym.key_hash:016x}")
+        click.echo("-" * 60)
 
         # read and display source
         try:
             file_lines = Path(sym.file_path).read_text().split("\n")
 
-            # show context: lines before, symbol, lines after
-            start = max(0, line - 1 - args.context)
-            end = min(len(file_lines), end_line + args.context)
+            start = max(0, line - 1 - context)
+            end = min(len(file_lines), end_line + context)
 
             for i in range(start, end):
                 line_num = i + 1
                 marker = ">" if line <= line_num <= end_line else " "
-                print(f"{marker} {line_num:4d} | {file_lines[i]}")
+                click.echo(f"{marker} {line_num:4d} | {file_lines[i]}")
         except (OSError, IndexError) as e:
-            print(f"  (could not read source: {e})")
+            click.echo(f"  (could not read source: {e})")
 
-        print()
-
-    return 0
+        click.echo()
 
 
-def cmd_get_source(args: argparse.Namespace) -> int:
-    """Get source content by key hash from the blob store."""
+@cli.command("get-source")
+@click.argument("key_hash", type=str)
+@directory_option()
+def get_source(key_hash: str, directory: Path | None):
+    """Get source content by key hash from blob store."""
     from galaxybrain.jit.blob import BlobAppender
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    # parse key_hash (accepts decimal, hex with 0x)
+    key_hash_int = int(key_hash, 0)
+
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
     tracker = FileTracker(data_dir / "tracker.db")
     blob = BlobAppender(data_dir / "blob.dat")
 
-    key_hash = args.key_hash
-
     # try file first
-    file_record = tracker.get_file_by_key(key_hash)
+    file_record = tracker.get_file_by_key(key_hash_int)
     if file_record:
         content = blob.read(file_record.blob_offset, file_record.blob_length)
         source = content.decode("utf-8", errors="replace")
 
-        print("type: file")
-        print(f"path: {file_record.path}")
-        print(f"key:  0x{key_hash:016x}")
-        print("-" * 60)
-        print(source)
+        click.echo("type: file")
+        click.echo(f"path: {file_record.path}")
+        click.echo(f"key:  0x{key_hash_int:016x}")
+        click.echo("-" * 60)
+        click.echo(source)
         tracker.close()
-        return 0
+        return
 
     # try symbol
-    sym_record = tracker.get_symbol_by_key(key_hash)
+    sym_record = tracker.get_symbol_by_key(key_hash_int)
     if sym_record:
         content = blob.read(sym_record.blob_offset, sym_record.blob_length)
         source = content.decode("utf-8", errors="replace")
 
-        print(f"type: symbol ({sym_record.kind})")
-        print(f"name: {sym_record.name}")
-        print(f"path: {sym_record.file_path}")
-        print(f"lines: {sym_record.line_start}-{sym_record.line_end or '?'}")
-        print(f"key:  0x{key_hash:016x}")
-        print("-" * 60)
-        print(source)
+        click.echo(f"type: symbol ({sym_record.kind})")
+        click.echo(f"name: {sym_record.name}")
+        click.echo(f"path: {sym_record.file_path}")
+        click.echo(
+            f"lines: {sym_record.line_start}-{sym_record.line_end or '?'}"
+        )
+        click.echo(f"key:  0x{key_hash_int:016x}")
+        click.echo("-" * 60)
+        click.echo(source)
         tracker.close()
-        return 0
+        return
 
     # try memory
-    mem_record = tracker.get_memory_by_key(key_hash)
+    mem_record = tracker.get_memory_by_key(key_hash_int)
     if mem_record:
         content = blob.read(mem_record.blob_offset, mem_record.blob_length)
         source = content.decode("utf-8", errors="replace")
 
-        print("type: memory")
-        print(f"id:   {mem_record.id}")
-        print(f"key:  0x{key_hash:016x}")
-        print("-" * 60)
-        print(source)
+        click.echo("type: memory")
+        click.echo(f"id:   {mem_record.id}")
+        click.echo(f"key:  0x{key_hash_int:016x}")
+        click.echo("-" * 60)
+        click.echo(source)
         tracker.close()
-        return 0
+        return
 
     tracker.close()
-    print(f"error: key_hash {key_hash} (0x{key_hash:016x}) not found")
-    return 1
+    click.echo(
+        f"error: key_hash {key_hash_int} (0x{key_hash_int:016x}) not found"
+    )
+    sys.exit(1)
 
 
-def cmd_delete(args: argparse.Namespace) -> int:
-    """Delete items from the index."""
+@cli.command()
+@click.argument("item_type", type=click.Choice(["file", "symbol", "memory"]))
+@click.option("--path", help="File path (for type=file)")
+@click.option("--key", help="Key hash in decimal or hex (for type=symbol)")
+@click.option(
+    "--id", "memory_id", help="Memory ID like 'mem:abc123' (for type=memory)"
+)
+@directory_option()
+@model_option()
+def delete(
+    item_type: str,
+    path: str | None,
+    key: str | None,
+    memory_id: str | None,
+    directory: Path | None,
+    model: str,
+):
+    """Delete items from the index (file, symbol, or memory)."""
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
-    print(f"loading model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    click.echo(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
 
     deleted = False
 
-    if args.type == "file":
-        if not args.path:
-            print("error: --path required for file deletion", file=sys.stderr)
-            return 1
-        deleted = manager.delete_file(Path(args.path))
+    if item_type == "file":
+        if not path:
+            raise click.UsageError("--path required for file deletion")
+        deleted = manager.delete_file(Path(path))
         if deleted:
-            print(f"deleted file: {args.path}")
+            click.echo(f"deleted file: {path}")
         else:
-            print(f"file not found: {args.path}")
+            click.echo(f"file not found: {path}")
 
-    elif args.type == "symbol":
-        if not args.key:
-            print("error: --key required for symbol deletion", file=sys.stderr)
-            return 1
-        key_hash = int(args.key, 0)  # accepts decimal or hex
+    elif item_type == "symbol":
+        if not key:
+            raise click.UsageError("--key required for symbol deletion")
+        key_hash = int(key, 0)
         deleted = manager.delete_symbol(key_hash)
         if deleted:
-            print(f"deleted symbol: 0x{key_hash:016x}")
+            click.echo(f"deleted symbol: 0x{key_hash:016x}")
         else:
-            print(f"symbol not found: 0x{key_hash:016x}")
+            click.echo(f"symbol not found: 0x{key_hash:016x}")
 
-    elif args.type == "memory":
-        if not args.id:
-            print("error: --id required for memory deletion", file=sys.stderr)
-            return 1
-        deleted = manager.delete_memory(args.id)
+    elif item_type == "memory":
+        if not memory_id:
+            raise click.UsageError("--id required for memory deletion")
+        deleted = manager.delete_memory(memory_id)
         if deleted:
-            print(f"deleted memory: {args.id}")
+            click.echo(f"deleted memory: {memory_id}")
         else:
-            print(f"memory not found: {args.id}")
+            click.echo(f"memory not found: {memory_id}")
 
-    else:
-        print(f"error: unknown type: {args.type}", file=sys.stderr)
-        return 1
-
-    return 0 if deleted else 1
+    sys.exit(0 if deleted else 1)
 
 
-def cmd_classify(args: argparse.Namespace) -> int:
-    """Classify codebase files and symbols into taxonomy categories."""
-
+@cli.command()
+@directory_option()
+@model_option()
+@click.option("-o", "--output", help="Output JSON file for IR")
+@click.option(
+    "-t", "--taxonomy", "taxonomy_file", help="Custom taxonomy JSON file"
+)
+@click.option(
+    "--threshold",
+    type=float,
+    default=0.7,
+    help="Minimum score for category assignment",
+)
+@click.option(
+    "--max-categories", type=int, default=3, help="Max categories per file"
+)
+@click.option("--files-only", is_flag=True, help="Skip symbol classification")
+@click.option(
+    "-v", "--verbose", is_flag=True, help="Show detailed file breakdown"
+)
+def classify(
+    directory: Path | None,
+    model: str,
+    output: str | None,
+    taxonomy_file: str | None,
+    threshold: float,
+    max_categories: int,
+    files_only: bool,
+    verbose: bool,
+):
+    """Classify files/symbols into taxonomy categories."""
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
-    print(f"loading model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    click.echo(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
     entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty (no vectors cached)")
-        return 0
+        click.echo("index is empty (no vectors cached)")
+        return
 
     # use custom taxonomy if provided
     taxonomy = DEFAULT_TAXONOMY
-    if args.taxonomy:
-        taxonomy_path = Path(args.taxonomy)
+    if taxonomy_file:
+        taxonomy_path = Path(taxonomy_file)
         if not taxonomy_path.exists():
-            print(f"error: taxonomy file not found: {taxonomy_path}")
-            return 1
+            click.echo(f"error: taxonomy file not found: {taxonomy_path}")
+            sys.exit(1)
         with open(taxonomy_path) as f:
             taxonomy = json.load(f)
 
-    print(f"classifying {len(entries)} files...")
+    click.echo(f"classifying {len(entries)} files...")
     classifier = Classifier(
         embedder,
         taxonomy=taxonomy,
-        threshold=args.threshold,
-        max_categories=args.max_categories,
+        threshold=threshold,
+        max_categories=max_categories,
     )
 
     ir = classifier.classify_entries(
         entries,
-        include_symbols=not args.files_only,
+        include_symbols=not files_only,
     )
     ir.root = str(root)
 
-    if args.output:
-        # write JSON IR to file
-        with open(args.output, "w") as f:
+    if output:
+        with open(output, "w") as f:
             json.dump(ir.to_dict(), f, indent=2)
-        print(f"wrote IR to {args.output}")
+        click.echo(f"wrote IR to {output}")
     else:
-        # pretty print to stdout
-        # category summary
-        print("\nCATEGORIES:\n")
+        click.echo("\nCATEGORIES:\n")
         for cat, files in sorted(ir.category_index.items()):
             if files:
-                print(f"  {cat} ({len(files)} files):")
+                click.echo(f"  {cat} ({len(files)} files):")
                 for f in files[:5]:
-                    print(f"    - {f}")
+                    click.echo(f"    - {f}")
                 if len(files) > 5:
-                    print(f"    ... and {len(files) - 5} more")
-                print()
+                    click.echo(f"    ... and {len(files) - 5} more")
+                click.echo()
 
-        # file details
-        if args.verbose:
-            print(f"{'=' * 70}")
-            print("FILE DETAILS:\n")
+        if verbose:
+            click.echo(f"{'=' * 70}")
+            click.echo("FILE DETAILS:\n")
             for file_ir in ir.files:
                 cats = ", ".join(file_ir.categories) or "(none)"
-                print(f"{file_ir.path_rel}")
-                print(f"  categories: {cats}")
-                print(f"  key: 0x{file_ir.key_hash:016x}")
-                if file_ir.symbols and not args.files_only:
-                    print(f"  symbols ({len(file_ir.symbols)}):")
+                click.echo(f"{file_ir.path_rel}")
+                click.echo(f"  categories: {cats}")
+                click.echo(f"  key: 0x{file_ir.key_hash:016x}")
+                if file_ir.symbols and not files_only:
+                    click.echo(f"  symbols ({len(file_ir.symbols)}):")
                     for sym in file_ir.symbols[:10]:
                         sym_cats = ", ".join(sym.top_categories) or "-"
                         key_str = (
                             f" [0x{sym.key_hash:016x}]" if sym.key_hash else ""
                         )
-                        print(f"    {sym.kind} {sym.name}: {sym_cats}{key_str}")
+                        click.echo(
+                            f"    {sym.kind} {sym.name}: {sym_cats}{key_str}"
+                        )
                     if len(file_ir.symbols) > 10:
-                        print(f"    ... and {len(file_ir.symbols) - 10} more")
-                print()
+                        click.echo(
+                            f"    ... and {len(file_ir.symbols) - 10} more"
+                        )
+                click.echo()
 
-    return 0
 
-
-def cmd_callgraph(args: argparse.Namespace) -> int:
-    """Build call graph from classification IR + hyperscan."""
-
+@cli.command()
+@directory_option()
+@model_option()
+@click.option("-o", "--output", help="Output file (JSON, DOT, or Mermaid)")
+@click.option(
+    "-f",
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "dot", "mermaid"]),
+    default="json",
+    help="Output format",
+)
+@click.option(
+    "--min-calls",
+    type=int,
+    default=0,
+    help="Only include symbols with >= N calls in diagrams",
+)
+@click.option("-s", "--symbol", help="Show details for specific symbol")
+@click.option("-v", "--verbose", is_flag=True, help="Show call site context")
+def callgraph(
+    directory: Path | None,
+    model: str,
+    output: str | None,
+    output_format: str,
+    min_calls: int,
+    symbol: str | None,
+    verbose: bool,
+):
+    """Build call graph from classification + hyperscan."""
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
-    print(f"loading model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    click.echo(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
     entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty (no vectors cached)")
-        return 0
+        click.echo("index is empty (no vectors cached)")
+        return
 
-    print(f"classifying {len(entries)} files...")
+    click.echo(f"classifying {len(entries)} files...")
     classifier = Classifier(embedder, threshold=0.6)
     ir = classifier.classify_entries(entries, include_symbols=True)
     ir.root = str(root)
 
-    print("building call graph...")
+    click.echo("building call graph...")
     t0 = time.perf_counter()
     graph, pattern_stats = build_call_graph(ir, root)
     t_build = time.perf_counter() - t0
 
     stats = graph.to_dict()["stats"]
-    print(f"\ncall graph built in {t_build * 1000:.0f}ms:")
-    print(f"  symbols: {stats['total_symbols']}")
-    print(f"  edges:   {stats['total_edges']}")
-    print(f"  calls:   {stats['total_call_sites']}")
+    click.echo(f"\ncall graph built in {t_build * 1000:.0f}ms:")
+    click.echo(f"  symbols: {stats['total_symbols']}")
+    click.echo(f"  edges:   {stats['total_edges']}")
+    click.echo(f"  calls:   {stats['total_call_sites']}")
 
-    if args.verbose and pattern_stats:
-        print(f"\nhyperscan patterns ({pattern_stats.total_patterns} total):")
+    if verbose and pattern_stats:
+        click.echo(
+            f"\nhyperscan patterns ({pattern_stats.total_patterns} total):"
+        )
         for kind, count in sorted(
             pattern_stats.by_kind.items(), key=lambda x: -x[1]
         ):
-            print(f"  {kind}: {count}")
-        print("\nsample patterns:")
-        for name, kind, pattern in pattern_stats.sample_patterns:
-            print(f"  {name} [{kind}]: {pattern}")
+            click.echo(f"  {kind}: {count}")
+        click.echo("\nsample patterns:")
+        for name, kind, pat in pattern_stats.sample_patterns:
+            click.echo(f"  {name} [{kind}]: {pat}")
 
-    # output in requested format
-    if args.format in ("dot", "mermaid"):
-        min_calls = args.min_calls or 0
-        if args.format == "dot":
+    if output_format in ("dot", "mermaid"):
+        if output_format == "dot":
             output_str = graph.to_dot(min_calls=min_calls)
         else:
             output_str = graph.to_mermaid(min_calls=min_calls)
 
-        if args.output:
-            with open(args.output, "w") as f:
+        if output:
+            with open(output, "w") as f:
                 f.write(output_str)
-            print(f"\nwrote {args.format} to {args.output}")
+            click.echo(f"\nwrote {output_format} to {output}")
         else:
-            print(f"\n{output_str}")
-        return 0
+            click.echo(f"\n{output_str}")
+        return
 
-    if args.output:
-        with open(args.output, "w") as f:
+    if output:
+        with open(output, "w") as f:
             json.dump(graph.to_dict(), f, indent=2)
-        print(f"\nwrote call graph JSON to {args.output}")
+        click.echo(f"\nwrote call graph JSON to {output}")
     else:
-        # print top called symbols
-        print("\nmost called symbols:\n")
+        click.echo("\nmost called symbols:\n")
         sorted_nodes = sorted(graph.nodes.values(), key=lambda n: -n.call_count)
         for node in sorted_nodes[:20]:
             if node.call_count > 0:
                 cats = ", ".join(node.categories[:2]) or "-"
-                print(
+                click.echo(
                     f"  {node.name} ({node.kind}): "
                     f"{node.call_count} calls [{cats}]"
                 )
-                print(f"    defined: {node.defined_in}:{node.definition_line}")
-                if args.verbose and node.callers:
+                click.echo(
+                    f"    defined: {node.defined_in}:{node.definition_line}"
+                )
+                if verbose and node.callers:
                     for caller in node.callers[:5]:
-                        print(f"      <- {caller}")
+                        click.echo(f"      <- {caller}")
                     if len(node.callers) > 5:
-                        print(f"      ... and {len(node.callers) - 5} more")
+                        click.echo(
+                            f"      ... and {len(node.callers) - 5} more"
+                        )
 
-    # show specific symbol if requested
-    if args.symbol:
-        node = graph.nodes.get(args.symbol)
+    if symbol:
+        node = graph.nodes.get(symbol)
         if not node:
-            # fuzzy match
-            matches = [
-                n for n in graph.nodes if args.symbol.lower() in n.lower()
-            ]
+            matches = [n for n in graph.nodes if symbol.lower() in n.lower()]
             if matches:
                 node = graph.nodes[matches[0]]
 
         if node:
-            print(f"\n{'=' * 60}")
-            print(f"{node.kind} {node.name}")
-            print(f"  defined: {node.defined_in}:{node.definition_line}")
-            print(f"  categories: {', '.join(node.categories) or '-'}")
-            print(f"  call sites ({node.call_count}):")
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"{node.kind} {node.name}")
+            click.echo(f"  defined: {node.defined_in}:{node.definition_line}")
+            click.echo(f"  categories: {', '.join(node.categories) or '-'}")
+            click.echo(f"  call sites ({node.call_count}):")
             for cs in node.call_sites[:20]:
-                print(f"    {cs.caller_path}:{cs.line}")
-                if args.verbose:
+                click.echo(f"    {cs.caller_path}:{cs.line}")
+                if verbose:
                     ctx = (
                         cs.context[:60] + "..."
                         if len(cs.context) > 60
                         else cs.context
                     )
-                    print(f"      {ctx}")
+                    click.echo(f"      {ctx}")
             if len(node.call_sites) > 20:
-                print(f"    ... and {len(node.call_sites) - 20} more")
+                click.echo(f"    ... and {len(node.call_sites) - 20} more")
         else:
-            print(f"\nsymbol '{args.symbol}' not found in call graph")
-
-    return 0
+            click.echo(f"\nsymbol '{symbol}' not found in call graph")
 
 
-def cmd_refine(args: argparse.Namespace) -> int:
+@cli.command()
+@directory_option()
+@model_option()
+@click.option("-o", "--output", help="Output JSON file for full results")
+@click.option(
+    "-n", "--iterations", type=int, default=5, help="Max refinement iterations"
+)
+@click.option(
+    "--threshold", type=float, default=0.7, help="Classification threshold"
+)
+@click.option(
+    "--split-threshold",
+    type=int,
+    default=20,
+    help="Split categories with > N items",
+)
+@click.option(
+    "--min-cluster", type=int, default=3, help="Min items for new category"
+)
+@click.option("--files-only", is_flag=True, help="Skip symbol classification")
+def refine(
+    directory: Path | None,
+    model: str,
+    output: str | None,
+    iterations: int,
+    threshold: float,
+    split_threshold: int,
+    min_cluster: int,
+    files_only: bool,
+):
     """Iteratively refine taxonomy classification."""
-
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
-    print(f"loading model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    click.echo(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
     entries = manager.export_entries_for_taxonomy(root)
 
     if not entries:
-        print("index is empty (no vectors cached)")
-        return 0
+        click.echo("index is empty (no vectors cached)")
+        return
 
-    print(f"running {args.iterations} refinement iterations...")
+    click.echo(f"running {iterations} refinement iterations...")
     refiner = TaxonomyRefiner(
         embedder,
-        threshold=args.threshold,
-        split_threshold=args.split_threshold,
-        min_cluster_size=args.min_cluster,
+        threshold=threshold,
+        split_threshold=split_threshold,
+        min_cluster_size=min_cluster,
     )
 
     result = refiner.refine(
         entries,
-        n_iterations=args.iterations,
-        include_symbols=not args.files_only,
+        n_iterations=iterations,
+        include_symbols=not files_only,
     )
 
     n_ran = len(result.iterations)
-    converged = n_ran < args.iterations
+    converged = n_ran < iterations
     status = f"converged after {n_ran}" if converged else f"ran {n_ran}"
 
-    print(f"\n{'=' * 70}")
-    print(f"REFINEMENT COMPLETE ({status} iterations)")
-    print(f"{'=' * 70}\n")
+    click.echo(f"\n{'=' * 70}")
+    click.echo(f"REFINEMENT COMPLETE ({status} iterations)")
+    click.echo(f"{'=' * 70}\n")
 
-    # show iteration summaries
     for it in result.iterations:
-        print(f"iteration {it.iteration}:")
+        click.echo(f"iteration {it.iteration}:")
         m = it.metrics
         cov, conf, n = m["coverage"], m["avg_confidence"], m["n_categories"]
-        print(f"  coverage={cov:.0%} confidence={conf:.3f} categories={n}")
+        click.echo(f"  coverage={cov:.0%} confidence={conf:.3f} categories={n}")
         if it.new_categories:
-            print(f"  + new: {', '.join(it.new_categories)}")
+            click.echo(f"  + new: {', '.join(it.new_categories)}")
         if it.split_categories:
             for old, news in it.split_categories:
-                print(f"  ~ split {old} -> {', '.join(news)}")
+                click.echo(f"  ~ split {old} -> {', '.join(news)}")
         if it.merged_categories:
             for olds, new in it.merged_categories:
-                print(f"  ~ merge {', '.join(olds)} -> {new}")
-        print()
+                click.echo(f"  ~ merge {', '.join(olds)} -> {new}")
+        click.echo()
 
-    # final taxonomy
-    print(f"FINAL TAXONOMY ({len(result.final_taxonomy)} categories):\n")
-    for cat, query in sorted(result.final_taxonomy.items()):
-        q = query[:50] + "..." if len(query) > 50 else query
-        print(f"  {cat}: {q}")
+    click.echo(f"FINAL TAXONOMY ({len(result.final_taxonomy)} categories):\n")
+    for cat, query_str in sorted(result.final_taxonomy.items()):
+        q = query_str[:50] + "..." if len(query_str) > 50 else query_str
+        click.echo(f"  {cat}: {q}")
 
-    # category sizes
-    print("\nCATEGORY SIZES:\n")
+    click.echo("\nCATEGORY SIZES:\n")
     sorted_cats = sorted(
         result.final_ir.category_index.items(), key=lambda x: -len(x[1])
     )
     for cat, files in sorted_cats:
         if files:
-            print(f"  {cat}: {len(files)} files")
+            click.echo(f"  {cat}: {len(files)} files")
 
-    # write output if requested
-    if args.output:
-        with open(args.output, "w") as f:
+    if output:
+        with open(output, "w") as f:
             json.dump(result.to_dict(), f, indent=2)
-        print(f"\nwrote full results to {args.output}")
-
-    return 0
+        click.echo(f"\nwrote full results to {output}")
 
 
-def cmd_voyager(args: argparse.Namespace) -> int:
-    """Launch the Voyager TUI explorer."""
-
+@cli.command()
+@directory_option()
+@model_option()
+def voyager(directory: Path | None, model: str):
+    """Interactive TUI explorer (requires galaxybrain[voyager])."""
     try:
         from galaxybrain.voyager import check_textual_available, run_voyager
     except ImportError:
-        print(
-            "error: textual is required for voyager TUI",
-            file=sys.stderr,
-        )
-        print(
-            "install with: pip install galaxybrain[voyager]",
-            file=sys.stderr,
-        )
-        return 1
+        click.echo("error: textual is required for voyager TUI", err=True)
+        click.echo("install with: pip install galaxybrain[voyager]", err=True)
+        sys.exit(1)
 
     try:
         check_textual_available()
     except ImportError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
+        click.echo(f"error: {e}", err=True)
+        sys.exit(1)
 
-    root_path = Path(args.directory) if args.directory else Path.cwd()
+    root_path = directory if directory else Path.cwd()
     if not root_path.is_dir():
-        print(f"error: {root_path} is not a directory", file=sys.stderr)
-        return 1
+        click.echo(f"error: {root_path} is not a directory", err=True)
+        sys.exit(1)
 
     graph = None
     ir = None
 
-    # load index if available for call graph + classification
     data_dir = root_path / DEFAULT_DATA_DIR
     if data_dir.exists():
         EmbeddingProvider = _get_embedder_class()
-        print(f"loading model ({args.model})...")
-        embedder = EmbeddingProvider(model=args.model)
+        click.echo(f"loading model ({model})...")
+        embedder = EmbeddingProvider(model=model)
 
         manager = JITIndexManager(
             data_dir=data_dir, embedding_provider=embedder
@@ -1124,74 +1308,98 @@ def cmd_voyager(args: argparse.Namespace) -> int:
         entries = manager.export_entries_for_taxonomy(root_path)
 
         if entries:
-            print("classifying files...")
+            click.echo("classifying files...")
             classifier = Classifier(embedder, threshold=0.6)
             ir = classifier.classify_entries(entries, include_symbols=True)
             ir.root = str(root_path)
 
-            print("building call graph...")
-            from galaxybrain.call_graph import build_call_graph
-
+            click.echo("building call graph...")
             graph, _ = build_call_graph(ir, root_path)
-            print(
+            click.echo(
                 f"loaded {len(entries)} files, "
                 f"{len(graph.nodes)} symbols in call graph"
             )
 
-    print("launching voyager TUI...")
+    click.echo("launching voyager TUI...")
     run_voyager(root_path=root_path, graph=graph, ir=ir)
-    return 0
 
 
-def cmd_mcp(args: argparse.Namespace) -> int:
-    """Run the MCP server for IDE/agent integration."""
-
+@cli.command()
+@model_option()
+@click.option("-d", "--directory", help="Root directory for file registration")
+@click.option(
+    "-t",
+    "--transport",
+    type=click.Choice(["stdio", "streamable-http"]),
+    default="stdio",
+    help="MCP transport",
+)
+@click.option(
+    "--watch/--no-watch",
+    default=None,
+    help="Enable/disable transcript watching",
+)
+@click.option(
+    "-a",
+    "--agent",
+    type=click.Choice(["claude-code", "auto"]),
+    default="auto",
+    help="Coding agent for transcript parsing",
+)
+@click.option(
+    "--learn/--no-learn", default=True, help="Enable/disable search learning"
+)
+def mcp(
+    model: str,
+    directory: str | None,
+    transport: str,
+    watch: bool | None,
+    agent: str,
+    learn: bool,
+):
+    """Run MCP server for IDE/agent integration."""
     from galaxybrain.mcp_server import run_server
 
-    # logging is now configured by the MCP server via logging_config module
-    # (respects GALAXYBRAIN_DEBUG env var and writes to .galaxybrain/debug.log)
-
-    root = Path(args.directory) if args.directory else None
+    root = Path(directory) if directory else None
     if root and not root.is_dir():
-        print(f"error: {root} is not a directory", file=sys.stderr)
-        return 1
+        click.echo(f"error: {root} is not a directory", err=True)
+        sys.exit(1)
 
-    # handle agent option
-    agent = args.agent if args.agent != "auto" else None
+    agent_val = agent if agent != "auto" else None
 
-    # only print status for non-stdio (stdio uses stdout for JSON-RPC)
-    if args.transport != "stdio":
-        print(
-            f"starting galaxybrain MCP server (transport={args.transport})..."
+    if transport != "stdio":
+        click.echo(
+            f"starting galaxybrain MCP server (transport={transport})..."
         )
         if root:
-            print(f"root directory: {root}")
-        print(f"model: {args.model}")
-        if args.watch:
-            agent_str = agent or "auto-detect"
-            learn_str = "enabled" if args.learn else "disabled"
-            print(f"transcript watching: enabled (agent={agent_str})")
-            print(f"search learning: {learn_str}")
+            click.echo(f"root directory: {root}")
+        click.echo(f"model: {model}")
+        if watch:
+            agent_str = agent_val or "auto-detect"
+            learn_str = "enabled" if learn else "disabled"
+            click.echo(f"transcript watching: enabled (agent={agent_str})")
+            click.echo(f"search learning: {learn_str}")
 
     run_server(
-        model_name=args.model,
+        model_name=model,
         root=root,
-        transport=args.transport,
-        watch_transcripts=args.watch,
-        agent=agent,
-        enable_learning=args.learn,
+        transport=transport,
+        watch_transcripts=watch,
+        agent=agent_val,
+        enable_learning=learn,
     )
-    return 0
 
 
-def cmd_stats(args: argparse.Namespace) -> int:
+@cli.command()
+@directory_option()
+def stats(directory: Path | None):
     """Show index statistics."""
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
         console.error(f"no index found at {data_dir}")
-        return 1
+        sys.exit(1)
 
     tracker_db = data_dir / "tracker.db"
     blob_file = data_dir / "blob.dat"
@@ -1200,7 +1408,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
     if not tracker_db.exists():
         console.error(f"tracker database not found at {tracker_db}")
-        return 1
+        sys.exit(1)
 
     import sqlite3
 
@@ -1216,7 +1424,6 @@ def cmd_stats(args: argparse.Namespace) -> int:
     cur.execute("SELECT COUNT(*) FROM memories")
     memory_count = cur.fetchone()[0]
 
-    # count embedded files/symbols
     cur.execute("SELECT COUNT(*) FROM files WHERE vector_offset IS NOT NULL")
     embedded_files = cur.fetchone()[0]
 
@@ -1229,7 +1436,6 @@ def cmd_stats(args: argparse.Namespace) -> int:
     index_size = index_file.stat().st_size if index_file.exists() else 0
     vector_size = vector_file.stat().st_size if vector_file.exists() else 0
 
-    # AOT index stats
     aot_count = 0
     aot_capacity = 0
     try:
@@ -1244,17 +1450,14 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
     console.header(f"Index Stats ({data_dir})")
 
-    # tracker (sqlite) stats
     console.subheader("Tracker (SQLite)")
     console.key_value("files", file_count, indent=2)
     console.key_value("symbols", symbol_count, indent=2)
     console.key_value("memories", memory_count, indent=2)
 
-    # blob store
     console.subheader("\nBlob Store")
     console.key_value("size", f"{blob_size / 1024 / 1024:.2f} MB", indent=2)
 
-    # AOT index
     console.subheader("\nAOT Index")
     if index_size > 0:
         console.key_value("size", f"{index_size / 1024:.1f} KB", indent=2)
@@ -1265,7 +1468,6 @@ def cmd_stats(args: argparse.Namespace) -> int:
     else:
         console.dim("  not initialized")
 
-    # vector store (persistent embeddings)
     console.subheader("\nVector Store")
     console.key_value("size", f"{vector_size / 1024:.1f} KB", indent=2)
     file_pct = (embedded_files / file_count * 100) if file_count else 0
@@ -1279,7 +1481,6 @@ def cmd_stats(args: argparse.Namespace) -> int:
         indent=2,
     )
 
-    # warnings for incomplete index
     warnings_list = []
     total_expected = file_count + symbol_count
     if index_size == 0:
@@ -1297,11 +1498,11 @@ def cmd_stats(args: argparse.Namespace) -> int:
         )
 
     if warnings_list:
-        print()
+        click.echo()
         console.warning("Warnings:")
         for w in warnings_list:
             console.dim(f"  - {w}")
-        print()
+        click.echo()
         console.info("To fix:")
         console.dim(
             "  galaxybrain index --embed .  # full index with embeddings"
@@ -1310,46 +1511,61 @@ def cmd_stats(args: argparse.Namespace) -> int:
             "  galaxybrain warm             # embed registered files only"
         )
 
-    return 0
 
-
-def cmd_keys(args: argparse.Namespace) -> int:
+@cli.command()
+@directory_option()
+@click.option(
+    "-t",
+    "--type",
+    "key_type",
+    type=click.Choice(["all", "files", "symbols", "memories", "contexts"]),
+    default="all",
+    help="Filter by key type",
+)
+@click.option(
+    "-n", "--limit", type=int, help="Limit number of results per type"
+)
+@click.option("--json", "show_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "-c", "--context", help="Filter files by context (e.g., context:auth)"
+)
+def keys(
+    directory: Path | None,
+    key_type: str,
+    limit: int | None,
+    show_json: bool,
+    context: str | None,
+):
     """Dump all indexed keys (files, symbols, memories)."""
     import sqlite3
 
     from galaxybrain.keys import file_key, mem_key, sym_key
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        sys.exit(1)
 
     tracker_db = data_dir / "tracker.db"
     if not tracker_db.exists():
-        print(f"error: tracker database not found at {tracker_db}")
-        return 1
+        click.echo(f"error: tracker database not found at {tracker_db}")
+        sys.exit(1)
 
     conn = sqlite3.connect(tracker_db)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    key_type = args.type
-    limit = args.limit
-    show_json = args.json
-    context_filter = getattr(args, "context", None)
-
     # if --context is specified, implicitly filter to files only
-    if context_filter and key_type == "all":
+    if context and key_type == "all":
         key_type = "files"
 
     results: list[dict] = []
 
     if key_type in ("all", "files"):
-        if context_filter:
-            # filter by context using LIKE on JSON array
-            like_pattern = f'%"{context_filter}"%'
+        if context:
+            like_pattern = f'%"{context}"%'
             query = """
                 SELECT path, key_hash, vector_offset, detected_contexts
                 FROM files
@@ -1370,16 +1586,12 @@ def cmd_keys(args: argparse.Namespace) -> int:
             rows = cur.execute(query).fetchall()
 
         for row in rows:
-            # convert signed to unsigned for display
             key_hash = row["key_hash"]
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
             key_str = file_key(row["path"])
-            # parse contexts
             contexts = []
             if row["detected_contexts"]:
-                import json
-
                 contexts = json.loads(row["detected_contexts"])
             results.append(
                 {
@@ -1456,10 +1668,7 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 }
             )
 
-    # contexts - aggregate from files with detected_contexts
     if key_type in ("all", "contexts"):
-        import json
-
         query = """
             SELECT detected_contexts, COUNT(*) as cnt
             FROM files
@@ -1487,38 +1696,33 @@ def cmd_keys(args: argparse.Namespace) -> int:
     conn.close()
 
     if show_json:
-        import json
+        click.echo(json.dumps(results, indent=2))
+        return
 
-        print(json.dumps(results, indent=2))
-        return 0
-
-    # pretty print
     if not results:
-        print("no keys found")
-        return 0
+        click.echo("no keys found")
+        return
 
-    # group by type
     files = [r for r in results if r["type"] == "file"]
-    symbols = [r for r in results if r["type"] == "symbol"]
+    symbols_list = [r for r in results if r["type"] == "symbol"]
     memories = [r for r in results if r["type"] == "memory"]
-    contexts = [r for r in results if r["type"] == "context"]
+    contexts_list = [r for r in results if r["type"] == "context"]
 
-    # try rich output
     try:
         from rich.console import Console
         from rich.panel import Panel
         from rich.table import Table
 
-        console = Console()
+        rich_console = Console()
 
-        if contexts:
-            table = Table(title=f"Contexts ({len(contexts)})")
+        if contexts_list:
+            table = Table(title=f"Contexts ({len(contexts_list)})")
             table.add_column("Context", style="cyan")
             table.add_column("Files", justify="right", style="green")
-            for c in contexts:
+            for c in contexts_list:
                 table.add_row(c["key"], str(c["file_count"]))
-            console.print(table)
-            console.print()
+            rich_console.print(table)
+            rich_console.print()
 
         if files:
             table = Table(title=f"Files ({len(files)})", show_lines=True)
@@ -1529,19 +1733,19 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 embed = "[green]✓[/]" if f["embedded"] else "[red]✗[/]"
                 ctx_str = ", ".join(f.get("contexts", [])) or "-"
                 table.add_row(embed, f["key"], ctx_str)
-            console.print(table)
-            console.print()
+            rich_console.print(table)
+            rich_console.print()
 
-        if symbols:
-            table = Table(title=f"Symbols ({len(symbols)})")
+        if symbols_list:
+            table = Table(title=f"Symbols ({len(symbols_list)})")
             table.add_column("", width=1)
             table.add_column("Key", style="blue", no_wrap=True, max_width=60)
             table.add_column("Kind", style="magenta")
-            for s in symbols:
+            for s in symbols_list:
                 embed = "[green]✓[/]" if s["embedded"] else "[red]✗[/]"
                 table.add_row(embed, s["key"], s["kind"])
-            console.print(table)
-            console.print()
+            rich_console.print(table)
+            rich_console.print()
 
         if memories:
             table = Table(title=f"Memories ({len(memories)})")
@@ -1557,126 +1761,139 @@ def cmd_keys(args: argparse.Namespace) -> int:
                     m.get("task") or "-",
                     m["text"][:40] + "…" if len(m["text"]) > 40 else m["text"],
                 )
-            console.print(table)
-            console.print()
+            rich_console.print(table)
+            rich_console.print()
 
-        console.print(
+        rich_console.print(
             Panel(f"[bold]Total: {len(results)} keys[/]", border_style="dim")
         )
 
     except ImportError:
-        # fallback to plain output
-        if contexts:
-            print(f"\n{'=' * 60}")
-            print(f"CONTEXTS ({len(contexts)})")
-            print("=" * 60)
-            for c in contexts:
-                print(f"  {c['key']}: {c['file_count']} files")
+        if contexts_list:
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"CONTEXTS ({len(contexts_list)})")
+            click.echo("=" * 60)
+            for c in contexts_list:
+                click.echo(f"  {c['key']}: {c['file_count']} files")
 
         if files:
-            print(f"\n{'=' * 60}")
-            print(f"FILES ({len(files)})")
-            print("=" * 60)
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"FILES ({len(files)})")
+            click.echo("=" * 60)
             for f in files:
                 embed_mark = "✓" if f["embedded"] else "✗"
-                print(f"[{embed_mark}] {f['key']}")
+                click.echo(f"[{embed_mark}] {f['key']}")
                 if f.get("contexts"):
-                    print(f"      contexts: {', '.join(f['contexts'])}")
+                    click.echo(f"      contexts: {', '.join(f['contexts'])}")
 
-        if symbols:
-            print(f"\n{'=' * 60}")
-            print(f"SYMBOLS ({len(symbols)})")
-            print("=" * 60)
-            for s in symbols:
+        if symbols_list:
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"SYMBOLS ({len(symbols_list)})")
+            click.echo("=" * 60)
+            for s in symbols_list:
                 embed_mark = "✓" if s["embedded"] else "✗"
-                print(f"[{embed_mark}] {s['key']}")
+                click.echo(f"[{embed_mark}] {s['key']}")
 
         if memories:
-            print(f"\n{'=' * 60}")
-            print(f"MEMORIES ({len(memories)})")
-            print("=" * 60)
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"MEMORIES ({len(memories)})")
+            click.echo("=" * 60)
             for m in memories:
                 embed_mark = "✓" if m["embedded"] else "✗"
-                print(f"[{embed_mark}] {m['key']}")
+                click.echo(f"[{embed_mark}] {m['key']}")
                 if m["task"]:
-                    print(f"      task: {m['task']}")
-                print(f"      text: {m['text']}")
+                    click.echo(f"      task: {m['task']}")
+                click.echo(f"      text: {m['text']}")
 
-        print(f"\ntotal: {len(results)} keys")
-
-    return 0
+        click.echo(f"\ntotal: {len(results)} keys")
 
 
-def cmd_warm(args: argparse.Namespace) -> int:
-    """Warm the vector cache by embedding registered files."""
-    import time
-
+@cli.command()
+@directory_option()
+@model_option()
+@click.option("-n", "--max-files", type=int, help="Max files to embed")
+def warm(directory: Path | None, model: str, max_files: int | None):
+    """Embed registered files to warm the vector cache."""
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
 
-    print(f"loading embedding model ({args.model})...")
-    embedder = EmbeddingProvider(model=args.model)
+    click.echo(f"loading embedding model ({model})...")
+    embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
 
-    max_files = args.max_files
-    print(f"warming cache (max_files={max_files or 'all'})...")
+    click.echo(f"warming cache (max_files={max_files or 'all'})...")
 
     t0 = time.perf_counter()
     count = manager.warm_cache(max_files=max_files)
     elapsed = time.perf_counter() - t0
 
-    print(f"embedded {count} files in {elapsed:.1f}s")
-    print(f"vectors cached: {manager.vector_cache.count}")
-
-    return 0
+    click.echo(f"embedded {count} files in {elapsed:.1f}s")
+    click.echo(f"vectors cached: {manager.vector_cache.count}")
 
 
-def cmd_compact(args: argparse.Namespace) -> int:
-    """Compact the vector store to reclaim dead bytes."""
+@cli.command()
+@directory_option()
+@model_option()
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Force compaction even if below thresholds",
+)
+def compact(directory: Path | None, model: str, force: bool):
+    """Compact vector store to reclaim dead bytes."""
     EmbeddingProvider = _get_embedder_class()
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = directory.resolve() if directory else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     if not data_dir.exists():
         console.error(f"no index found at {data_dir}")
-        return 1
+        sys.exit(1)
 
     vector_file = data_dir / "vectors.dat"
     if not vector_file.exists():
         console.error("no vector store found")
-        return 1
+        sys.exit(1)
 
-    embedder = EmbeddingProvider(model=args.model)
+    embedder = EmbeddingProvider(model=model)
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
 
-    stats = manager.get_stats()
+    stats_obj = manager.get_stats()
     console.header("Vector Store Compaction")
-    console.key_value("store size", f"{stats.vector_store_bytes / 1024:.1f} KB")
-    console.key_value("live bytes", f"{stats.vector_live_bytes / 1024:.1f} KB")
-    console.key_value("dead bytes", f"{stats.vector_dead_bytes / 1024:.1f} KB")
-    console.key_value("waste ratio", f"{stats.vector_waste_ratio * 100:.1f}%")
-    console.key_value("needs compaction", stats.vector_needs_compaction)
-    print()
+    console.key_value(
+        "store size", f"{stats_obj.vector_store_bytes / 1024:.1f} KB"
+    )
+    console.key_value(
+        "live bytes", f"{stats_obj.vector_live_bytes / 1024:.1f} KB"
+    )
+    console.key_value(
+        "dead bytes", f"{stats_obj.vector_dead_bytes / 1024:.1f} KB"
+    )
+    console.key_value(
+        "waste ratio", f"{stats_obj.vector_waste_ratio * 100:.1f}%"
+    )
+    console.key_value("needs compaction", stats_obj.vector_needs_compaction)
+    click.echo()
 
-    if not args.force and not stats.vector_needs_compaction:
+    if not force and not stats_obj.vector_needs_compaction:
         console.info("compaction not needed (use --force to override)")
-        return 0
+        return
 
     console.info("compacting...")
-    result = manager.compact_vectors(force=args.force)
+    result = manager.compact_vectors(force=force)
 
     if not result.success:
         console.error(f"compaction failed: {result.error}")
-        return 1
+        sys.exit(1)
 
     console.success("compaction complete")
     console.key_value("bytes before", f"{result.bytes_before / 1024:.1f} KB")
@@ -1684,857 +1901,328 @@ def cmd_compact(args: argparse.Namespace) -> int:
     console.key_value("reclaimed", f"{result.bytes_reclaimed / 1024:.1f} KB")
     console.key_value("vectors copied", result.vectors_copied)
 
-    return 0
+
+@cli.command()
+@directory_option()
+@model_option()
+def repl(directory: Path | None, model: str):
+    """Interactive REPL with preloaded index."""
+
+    EmbeddingProvider = _get_embedder_class()
+
+    root = directory.resolve() if directory else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_path = data_dir / "tracker.db"
+
+    if not tracker_path.exists():
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
+
+    click.echo(f"loading model ({model})...")
+    embedder = EmbeddingProvider(model=model)
+
+    click.echo(f"loading index from {data_dir}...")
+    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
+    entries = manager.export_entries_for_taxonomy(root)
+
+    if not entries:
+        click.echo("index is empty")
+        manager.close()
+        return
+
+    # build REPL context
+    idx = ThreadIndex(embedder.dim)
+    for i, entry in enumerate(entries):
+        vec = entry.get("embedding")
+        if vec:
+            idx.upsert(i, vec)
+
+    click.echo(f"loaded {len(entries)} entries")
+    click.echo("REPL commands: /q <query>, /find <name>, /help, /quit")
+
+    while True:
+        try:
+            line = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            click.echo("\nbye!")
+            break
+
+        if not line:
+            continue
+
+        if line in ("/quit", "/exit", "/q"):
+            click.echo("bye!")
+            break
+
+        if line == "/help":
+            click.echo("Commands:")
+            click.echo("  /q <query>   - semantic search")
+            click.echo("  /find <name> - find symbol by name")
+            click.echo("  /quit        - exit REPL")
+            continue
+
+        if line.startswith("/q "):
+            query_str = line[3:].strip()
+            if not query_str:
+                click.echo("usage: /q <query>")
+                continue
+
+            q_vec = embedder.embed(query_str).tolist()
+            results = idx.search(q_vec, k=10)
+
+            click.echo(f"\ntop results for: {query_str!r}\n")
+            for entry_id, score in results:
+                entry = entries[entry_id]
+                path = entry.get("path", "unknown")
+                try:
+                    rel = Path(path).relative_to(Path.cwd())
+                except ValueError:
+                    rel = Path(path)
+                click.echo(f"  [{score:.3f}] {rel}")
+            continue
+
+        if line.startswith("/find "):
+            name = line[6:].strip()
+            if not name:
+                click.echo("usage: /find <name>")
+                continue
+
+            matches = []
+            for entry in entries:
+                for sym in entry.get("symbol_info", []):
+                    if name.lower() in sym.get("name", "").lower():
+                        matches.append((entry, sym))
+
+            if not matches:
+                click.echo(f"no symbols matching '{name}'")
+                continue
+
+            click.echo(f"\nfound {len(matches)} matches:\n")
+            for entry, sym in matches[:20]:
+                path = entry.get("path", "unknown")
+                try:
+                    rel = Path(path).relative_to(Path.cwd())
+                except ValueError:
+                    rel = Path(path)
+                click.echo(
+                    f"  {sym['kind']} {sym['name']} ({rel}:{sym['line']})"
+                )
+            continue
+
+        click.echo(f"unknown command: {line}")
+        click.echo("try /help")
+
+    manager.close()
 
 
-def cmd_patterns(args: argparse.Namespace) -> int:
-    """PatternSet management commands."""
+# patterns subcommand group
+@cli.group()
+@directory_option()
+@click.pass_context
+def patterns(ctx: click.Context, directory: Path | None):
+    """Manage and scan with PatternSets."""
+    ctx.ensure_object(dict)
+    ctx.obj["directory"] = directory
+
+
+@patterns.command("list")
+@click.pass_context
+def patterns_list(ctx: click.Context):
+    """List available pattern sets."""
     from galaxybrain.patterns import PatternSetManager
 
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
     manager = PatternSetManager(data_dir=data_dir)
+    pattern_sets = manager.list_all()
 
-    subcmd = args.patterns_command
+    if not pattern_sets:
+        click.echo("no pattern sets loaded")
+        return
 
-    if subcmd == "list":
-        patterns = manager.list_all()
-        if not patterns:
-            print("no pattern sets loaded")
-            return 0
+    click.echo(f"{'ID':<25} {'Patterns':>8}  Description")
+    click.echo("-" * 60)
+    for ps in pattern_sets:
+        desc = ps["description"]
+        click.echo(f"{ps['id']:<25} {ps['pattern_count']:>8}  {desc}")
 
-        print(f"{'ID':<25} {'Patterns':>8}  Description")
-        print("-" * 60)
-        for ps in patterns:
-            desc = ps["description"]
-            print(f"{ps['id']:<25} {ps['pattern_count']:>8}  {desc}")
-        return 0
 
-    elif subcmd == "load":
-        patterns_path = Path(args.file)
-        if not patterns_path.exists():
-            print(f"error: file not found: {patterns_path}", file=sys.stderr)
-            return 1
+@patterns.command("show")
+@click.argument("pattern_set")
+@click.pass_context
+def patterns_show(ctx: click.Context, pattern_set: str):
+    """Show patterns in a pattern set."""
+    from galaxybrain.patterns import PatternSetManager
 
-        patterns = [
-            line.strip()
-            for line in patterns_path.read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-        if not patterns:
-            print("error: no patterns found in file", file=sys.stderr)
-            return 1
+    manager = PatternSetManager(data_dir=data_dir)
+    ps = manager.get(pattern_set)
 
-        pattern_id = args.name or f"pat:{patterns_path.stem}"
-        desc = args.description or f"Loaded from {patterns_path.name}"
-        ps = manager.load(
-            {
-                "id": pattern_id,
-                "patterns": patterns,
-                "description": desc,
-                "tags": args.tags.split(",") if args.tags else [],
-            }
-        )
+    if not ps:
+        click.echo(f"error: pattern set not found: {pattern_set}", err=True)
+        sys.exit(1)
 
-        print(f"loaded pattern set: {ps.id}")
-        print(f"  patterns: {len(ps.patterns)}")
-        print(f"  description: {ps.description}")
-        return 0
+    click.echo(f"ID:          {ps.id}")
+    click.echo(f"Description: {ps.description}")
+    click.echo(f"Tags:        {', '.join(ps.tags) if ps.tags else 'none'}")
+    click.echo(f"\nPatterns ({len(ps.patterns)}):")
+    for i, p in enumerate(ps.patterns, 1):
+        click.echo(f"  {i:2}. {p}")
 
-    elif subcmd == "scan":
-        pattern_id = args.pattern_set
 
-        ps = manager.get(pattern_id)
-        if not ps:
-            print(
-                f"error: pattern set not found: {pattern_id}", file=sys.stderr
-            )
-            print("available pattern sets:")
-            for p in manager.list_all():
-                print(f"  - {p['id']}")
-            return 1
+@patterns.command("load")
+@click.argument("file", type=click.Path(exists=True, path_type=Path))
+@click.option("-n", "--name", help="Pattern set name (default: pat:<filename>)")
+@click.option("--description", help="Pattern set description")
+@click.option("--tags", help="Comma-separated tags")
+@click.pass_context
+def patterns_load(
+    ctx: click.Context,
+    file: Path,
+    name: str | None,
+    description: str | None,
+    tags: str | None,
+):
+    """Load patterns from a file."""
+    from galaxybrain.patterns import PatternSetManager
 
-        if not data_dir.exists():
-            print(f"error: no index found at {data_dir}", file=sys.stderr)
-            return 1
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-        tracker_db = data_dir / "tracker.db"
-        blob_file = data_dir / "blob.dat"
+    patterns_list = [
+        line.strip()
+        for line in file.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
-        if not tracker_db.exists() or not blob_file.exists():
-            print("error: index not initialized", file=sys.stderr)
-            return 1
+    if not patterns_list:
+        click.echo("error: no patterns found in file", err=True)
+        sys.exit(1)
 
-        from galaxybrain.jit.blob import BlobAppender
-        from galaxybrain.jit.tracker import FileTracker
+    pattern_id = name or f"pat:{file.stem}"
+    desc = description or f"Loaded from {file.name}"
 
-        tracker = FileTracker(tracker_db)
-        blob = BlobAppender(blob_file)
+    manager = PatternSetManager(data_dir=data_dir)
+    ps = manager.load(
+        {
+            "id": pattern_id,
+            "patterns": patterns_list,
+            "description": desc,
+            "tags": tags.split(",") if tags else [],
+        }
+    )
 
-        total_matches = 0
-        files_with_matches = 0
+    click.echo(f"loaded pattern set: {ps.id}")
+    click.echo(f"  patterns: {len(ps.patterns)}")
+    click.echo(f"  description: {ps.description}")
 
-        for file_record in tracker.iter_files():
-            data = blob.read(file_record.blob_offset, file_record.blob_length)
-            matches = manager.scan(pattern_id, data)
 
-            if matches:
-                files_with_matches += 1
-                total_matches += len(matches)
+@patterns.command("scan")
+@click.argument("pattern_set")
+@click.option("-v", "--verbose", is_flag=True, help="Show match details")
+@click.pass_context
+def patterns_scan(ctx: click.Context, pattern_set: str, verbose: bool):
+    """Scan indexed files with a pattern set."""
+    from galaxybrain.jit.blob import BlobAppender
+    from galaxybrain.patterns import PatternSetManager
 
-                if args.verbose:
-                    print(f"\n{file_record.path}")
-                    for m in matches:
-                        print(f"  [{m.start}:{m.end}] {m.pattern}")
-                else:
-                    print(f"{file_record.path}: {len(matches)} matches")
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
 
-        print(f"\n{total_matches} matches in {files_with_matches} files")
-        return 0
+    if not data_dir.exists():
+        click.echo(f"error: no index found at {data_dir}", err=True)
+        sys.exit(1)
 
-    elif subcmd == "show":
-        pattern_id = args.pattern_set
-        ps = manager.get(pattern_id)
-        if not ps:
-            print(
-                f"error: pattern set not found: {pattern_id}", file=sys.stderr
-            )
-            return 1
+    manager = PatternSetManager(data_dir=data_dir)
+    ps = manager.get(pattern_set)
 
-        print(f"ID:          {ps.id}")
-        print(f"Description: {ps.description}")
-        print(f"Tags:        {', '.join(ps.tags) if ps.tags else 'none'}")
-        print(f"\nPatterns ({len(ps.patterns)}):")
-        for i, p in enumerate(ps.patterns, 1):
-            print(f"  {i:2}. {p}")
-        return 0
+    if not ps:
+        click.echo(f"error: pattern set not found: {pattern_set}", err=True)
+        click.echo("available pattern sets:")
+        for p in manager.list_all():
+            click.echo(f"  - {p['id']}")
+        sys.exit(1)
 
-    print(f"unknown subcommand: {subcmd}", file=sys.stderr)
-    return 1
+    tracker_db = data_dir / "tracker.db"
+    blob_file = data_dir / "blob.dat"
+
+    if not tracker_db.exists() or not blob_file.exists():
+        click.echo("error: index not initialized", err=True)
+        sys.exit(1)
+
+    tracker = FileTracker(tracker_db)
+    blob = BlobAppender(blob_file)
+
+    total_matches = 0
+    files_with_matches = 0
+
+    for file_record in tracker.iter_files():
+        data = blob.read(file_record.blob_offset, file_record.blob_length)
+        matches = manager.scan(pattern_set, data)
+
+        if matches:
+            files_with_matches += 1
+            total_matches += len(matches)
+
+            if verbose:
+                click.echo(f"\n{file_record.path}")
+                for m in matches:
+                    click.echo(f"  [{m.start}:{m.end}] {m.pattern}")
+            else:
+                click.echo(f"{file_record.path}: {len(matches)} matches")
+
+    click.echo(f"\n{total_matches} matches in {files_with_matches} files")
+
+
+# shell completion command
+@cli.command("completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
+def completion(shell: str):
+    """Generate shell completion script.
+
+    To install completions:
+
+    \b
+    Bash:
+        galaxybrain completion bash >> ~/.bashrc
+
+    \b
+    Zsh:
+        galaxybrain completion zsh >> ~/.zshrc
+
+    \b
+    Fish:
+        galaxybrain completion fish > \
+        ~/.config/fish/completions/galaxybrain.fish
+    """
+    from click.shell_completion import get_completion_class
+
+    comp_cls = get_completion_class(shell)
+    if comp_cls is None:
+        raise click.ClickException(f"Shell {shell!r} not supported")
+
+    comp = comp_cls(cli, {}, "galaxybrain", "_GALAXYBRAIN_COMPLETE")
+    click.echo(comp.source())
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        prog="galaxybrain",
-        description="index and query codebases with semantic search",
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # index command
-    index_parser = subparsers.add_parser(
-        "index",
-        help="index a directory (writes to .galaxybrain/)",
-    )
-    index_parser.add_argument(
-        "directory",
-        nargs="?",
-        default=".",
-        help="directory to index (default: current directory)",
-    )
-    index_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    index_parser.add_argument(
-        "-e",
-        "--extensions",
-        help="comma-separated file extensions (e.g., .py,.rs)",
-    )
-    index_parser.add_argument(
-        "--mode",
-        choices=["jit", "aot"],
-        default="jit",
-        help="indexing strategy: jit (incremental, default) or aot (batch)",
-    )
-    index_parser.add_argument(
-        "--no-resume",
-        action="store_true",
-        help="don't resume from checkpoint, start fresh (jit mode only)",
-    )
-    index_parser.add_argument(
-        "--embed",
-        action="store_true",
-        help="compute embeddings upfront (slow, enables immediate search)",
-    )
-
-    # query command
-    query_parser = subparsers.add_parser(
-        "query",
-        help="semantic search across indexed files",
-    )
-    query_parser.add_argument(
-        "query",
-        nargs="?",
-        help="semantic search query",
-    )
-    query_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    query_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    query_parser.add_argument(
-        "-k",
-        type=int,
-        default=10,
-        help="number of results (default: 10)",
-    )
-    query_parser.add_argument(
-        "--key",
-        help="direct key lookup (e.g., 'file:src/foo.py')",
-    )
-    query_parser.add_argument(
-        "-t",
-        "--type",
-        choices=["all", "file", "symbol"],
-        default="all",
-        help="filter results by type (default: all)",
-    )
-    query_parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="enable debug logging",
-    )
-
-    # symbols command
-    symbols_parser = subparsers.add_parser(
-        "symbols",
-        help="list all indexed symbols",
-    )
-    symbols_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    symbols_parser.add_argument(
-        "-f",
-        "--filter",
-        help="filter symbols by substring",
-    )
-
-    # grep command
-    grep_parser = subparsers.add_parser(
-        "grep",
-        help="regex pattern matching with Hyperscan",
-    )
-    grep_parser.add_argument(
-        "pattern",
-        nargs="?",
-        help="regex pattern to search for",
-    )
-    grep_parser.add_argument(
-        "-p",
-        "--patterns-file",
-        help="file containing patterns (one per line)",
-    )
-    grep_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    grep_parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="show pattern name for each match",
-    )
-    grep_parser.add_argument(
-        "-t",
-        "--timing",
-        action="store_true",
-        help="show timing breakdown",
-    )
-
-    # sgrep command (semantic grep)
-    sgrep_parser = subparsers.add_parser(
-        "sgrep",
-        help="regex match then semantic search",
-    )
-    sgrep_parser.add_argument(
-        "query",
-        help="semantic query to search matches",
-    )
-    sgrep_parser.add_argument(
-        "pattern",
-        nargs="?",
-        help="regex pattern to filter lines",
-    )
-    sgrep_parser.add_argument(
-        "-p",
-        "--patterns-file",
-        help="file containing patterns (one per line)",
-    )
-    sgrep_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    sgrep_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    sgrep_parser.add_argument(
-        "-k",
-        type=int,
-        default=10,
-        help="number of results (default: 10)",
-    )
-    sgrep_parser.add_argument(
-        "-t",
-        "--timing",
-        action="store_true",
-        help="show timing breakdown",
-    )
-
-    # patterns command (with subcommands)
-    patterns_parser = subparsers.add_parser(
-        "patterns",
-        help="manage and scan with PatternSets",
-    )
-    patterns_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    patterns_subparsers = patterns_parser.add_subparsers(
-        dest="patterns_command",
-        required=True,
-    )
-
-    # patterns list
-    patterns_subparsers.add_parser(
-        "list",
-        help="list available pattern sets",
-    )
-
-    # patterns show
-    patterns_show_parser = patterns_subparsers.add_parser(
-        "show",
-        help="show patterns in a pattern set",
-    )
-    patterns_show_parser.add_argument(
-        "pattern_set",
-        help="pattern set ID (e.g., pat:security-smells)",
-    )
-
-    # patterns load
-    patterns_load_parser = patterns_subparsers.add_parser(
-        "load",
-        help="load patterns from a file",
-    )
-    patterns_load_parser.add_argument(
-        "file",
-        help="file containing patterns (one per line)",
-    )
-    patterns_load_parser.add_argument(
-        "-n",
-        "--name",
-        help="pattern set name (default: pat:<filename>)",
-    )
-    patterns_load_parser.add_argument(
-        "--description",
-        help="pattern set description",
-    )
-    patterns_load_parser.add_argument(
-        "--tags",
-        help="comma-separated tags",
-    )
-
-    # patterns scan
-    patterns_scan_parser = patterns_subparsers.add_parser(
-        "scan",
-        help="scan indexed files with a pattern set",
-    )
-    patterns_scan_parser.add_argument(
-        "pattern_set",
-        help="pattern set ID (e.g., pat:security-smells)",
-    )
-    patterns_scan_parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="show match details",
-    )
-
-    # show command
-    show_parser = subparsers.add_parser(
-        "show",
-        help="show symbol source code",
-    )
-    show_parser.add_argument(
-        "symbol",
-        help="symbol name to show",
-    )
-    show_parser.add_argument(
-        "-f",
-        "--file",
-        help="filter by file path",
-    )
-    show_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    show_parser.add_argument(
-        "-c",
-        "--context",
-        type=int,
-        default=2,
-        help="lines of context (default: 2)",
-    )
-
-    # get-source command
-    get_source_parser = subparsers.add_parser(
-        "get-source",
-        help="get source content by key hash from blob store",
-    )
-    get_source_parser.add_argument(
-        "key_hash",
-        type=lambda x: int(x, 0),  # accepts decimal, hex (0x...), octal
-        help="key hash (decimal or hex with 0x prefix)",
-    )
-    get_source_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-
-    # delete command
-    delete_parser = subparsers.add_parser(
-        "delete",
-        help="delete items from the index (file, symbol, or memory)",
-    )
-    delete_parser.add_argument(
-        "type",
-        choices=["file", "symbol", "memory"],
-        help="type of item to delete",
-    )
-    delete_parser.add_argument(
-        "--path",
-        help="file path (for type=file)",
-    )
-    delete_parser.add_argument(
-        "--key",
-        help="key hash in decimal or hex (for type=symbol)",
-    )
-    delete_parser.add_argument(
-        "--id",
-        help="memory ID like 'mem:abc123' (for type=memory)",
-    )
-    delete_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    delete_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-
-    # classify command
-    classify_parser = subparsers.add_parser(
-        "classify",
-        help="classify files/symbols into taxonomy categories",
-    )
-    classify_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    classify_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    classify_parser.add_argument(
-        "-o",
-        "--output",
-        help="output JSON file for IR (default: print to stdout)",
-    )
-    classify_parser.add_argument(
-        "-t",
-        "--taxonomy",
-        help="custom taxonomy JSON file",
-    )
-    classify_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.7,
-        help="minimum score for category assignment (default: 0.7)",
-    )
-    classify_parser.add_argument(
-        "--max-categories",
-        type=int,
-        default=3,
-        help="max categories per file (default: 3)",
-    )
-    classify_parser.add_argument(
-        "--files-only",
-        action="store_true",
-        help="skip symbol classification",
-    )
-    classify_parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="show detailed file breakdown",
-    )
-
-    # callgraph command
-    callgraph_parser = subparsers.add_parser(
-        "callgraph",
-        help="build call graph from classification + hyperscan",
-    )
-    callgraph_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    callgraph_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    callgraph_parser.add_argument(
-        "-o",
-        "--output",
-        help="output file (JSON, DOT, or Mermaid based on --format)",
-    )
-    callgraph_parser.add_argument(
-        "-f",
-        "--format",
-        choices=["json", "dot", "mermaid"],
-        default="json",
-        help="output format (default: json)",
-    )
-    callgraph_parser.add_argument(
-        "--min-calls",
-        type=int,
-        default=0,
-        help="only include symbols with >= N calls in diagrams (default: 0)",
-    )
-    callgraph_parser.add_argument(
-        "-s",
-        "--symbol",
-        help="show details for specific symbol",
-    )
-    callgraph_parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="show call site context",
-    )
-
-    # refine command
-    refine_parser = subparsers.add_parser(
-        "refine",
-        help="iteratively refine taxonomy classification",
-    )
-    refine_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain index (default: current directory)",
-    )
-    refine_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    refine_parser.add_argument(
-        "-o",
-        "--output",
-        help="output JSON file for full results",
-    )
-    refine_parser.add_argument(
-        "-n",
-        "--iterations",
-        type=int,
-        default=5,
-        help="max refinement iterations (default: 5)",
-    )
-    refine_parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.7,
-        help="classification threshold (default: 0.7)",
-    )
-    refine_parser.add_argument(
-        "--split-threshold",
-        type=int,
-        default=20,
-        help="split categories with > N items (default: 20)",
-    )
-    refine_parser.add_argument(
-        "--min-cluster",
-        type=int,
-        default=3,
-        help="min items for new category (default: 3)",
-    )
-    refine_parser.add_argument(
-        "--files-only",
-        action="store_true",
-        help="skip symbol classification",
-    )
-
-    # repl command
-    repl_parser = subparsers.add_parser(
-        "repl",
-        help="interactive REPL with preloaded index",
-    )
-    repl_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-    repl_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-
-    # voyager command
-    voyager_parser = subparsers.add_parser(
-        "voyager",
-        help="interactive TUI explorer (requires galaxybrain[voyager])",
-    )
-    voyager_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-    voyager_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-
-    # mcp command
-    mcp_parser = subparsers.add_parser(
-        "mcp",
-        help="run MCP server for IDE/agent integration",
-    )
-    mcp_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    mcp_parser.add_argument(
-        "-d",
-        "--directory",
-        help="root directory for file registration",
-    )
-    mcp_parser.add_argument(
-        "-t",
-        "--transport",
-        choices=["stdio", "streamable-http"],
-        default="stdio",
-        help="MCP transport (default: stdio)",
-    )
-    mcp_parser.add_argument(
-        "-w",
-        "--watch",
-        dest="watch",
-        action="store_true",
-        default=None,
-        help="enable transcript watching (default: enabled)",
-    )
-    mcp_parser.add_argument(
-        "--no-watch",
-        dest="watch",
-        action="store_false",
-        help="disable transcript watching",
-    )
-    mcp_parser.add_argument(
-        "-a",
-        "--agent",
-        choices=["claude-code", "auto"],
-        default="auto",
-        help="coding agent for transcript parsing (default: auto-detect)",
-    )
-    mcp_parser.add_argument(
-        "--learn",
-        dest="learn",
-        action="store_true",
-        default=True,
-        help="enable search learning when watching (default: enabled)",
-    )
-    mcp_parser.add_argument(
-        "--no-learn",
-        dest="learn",
-        action="store_false",
-        help="disable search learning",
-    )
-
-    # stats command
-    stats_parser = subparsers.add_parser(
-        "stats",
-        help="show index statistics",
-    )
-    stats_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-
-    # keys command
-    keys_parser = subparsers.add_parser(
-        "keys",
-        help="dump all indexed keys (files, symbols, memories)",
-    )
-    keys_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-    keys_parser.add_argument(
-        "-t",
-        "--type",
-        choices=["all", "files", "symbols", "memories", "contexts"],
-        default="all",
-        help="filter by key type (default: all)",
-    )
-    keys_parser.add_argument(
-        "-n",
-        "--limit",
-        type=int,
-        help="limit number of results per type",
-    )
-    keys_parser.add_argument(
-        "--json",
-        action="store_true",
-        help="output as JSON",
-    )
-    keys_parser.add_argument(
-        "-c",
-        "--context",
-        help="filter files by context (e.g., context:auth)",
-    )
-
-    # warm command
-    warm_parser = subparsers.add_parser(
-        "warm",
-        help="embed registered files to warm the vector cache",
-    )
-    warm_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-    warm_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    warm_parser.add_argument(
-        "-n",
-        "--max-files",
-        type=int,
-        help="max files to embed (default: all)",
-    )
-
-    # compact command
-    compact_parser = subparsers.add_parser(
-        "compact",
-        help="compact vector store to reclaim dead bytes",
-    )
-    compact_parser.add_argument(
-        "-d",
-        "--directory",
-        help="directory with .galaxybrain data (default: current directory)",
-    )
-    compact_parser.add_argument(
-        "-m",
-        "--model",
-        default=DEFAULT_EMBEDDING_MODEL,
-        help=f"embedding model (default: {DEFAULT_EMBEDDING_MODEL})",
-    )
-    compact_parser.add_argument(
-        "-f",
-        "--force",
-        action="store_true",
-        help="force compaction even if below thresholds",
-    )
-
-    args = parser.parse_args()
-
-    # configure structlog (respects GALAXYBRAIN_DEBUG env var)
-    from galaxybrain.logging_config import configure_logging
-
-    configure_logging()
-
-    if args.command == "index":
-        return cmd_index(args)
-    elif args.command == "query":
-        if not args.query and not args.key:
-            print("error: provide a query or --key", file=sys.stderr)
-            return 1
-        return cmd_query(args)
-    elif args.command == "symbols":
-        return cmd_symbols(args)
-    elif args.command == "grep":
-        if not args.pattern and not args.patterns_file:
-            print(
-                "error: provide a pattern or --patterns-file", file=sys.stderr
-            )
-            return 1
-        return cmd_grep(args)
-    elif args.command == "sgrep":
-        if not args.pattern and not args.patterns_file:
-            print(
-                "error: provide a pattern or --patterns-file", file=sys.stderr
-            )
-            return 1
-        return cmd_semantic_grep(args)
-    elif args.command == "show":
-        return cmd_show(args)
-    elif args.command == "get-source":
-        return cmd_get_source(args)
-    elif args.command == "delete":
-        return cmd_delete(args)
-    elif args.command == "classify":
-        return cmd_classify(args)
-    elif args.command == "callgraph":
-        return cmd_callgraph(args)
-    elif args.command == "refine":
-        return cmd_refine(args)
-    elif args.command == "repl":
-        return cmd_repl(args)
-    elif args.command == "voyager":
-        return cmd_voyager(args)
-    elif args.command == "mcp":
-        return cmd_mcp(args)
-    elif args.command == "stats":
-        return cmd_stats(args)
-    elif args.command == "keys":
-        return cmd_keys(args)
-    elif args.command == "warm":
-        return cmd_warm(args)
-    elif args.command == "patterns":
-        return cmd_patterns(args)
-    elif args.command == "compact":
-        return cmd_compact(args)
-
-    return 1
+    """Entry point for the CLI."""
+    try:
+        cli()
+        return 0
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 1
+    except Exception as e:
+        console.error(str(e))
+        return 1
 
 
 class ReplContext:
@@ -2552,10 +2240,9 @@ class ReplContext:
         self.thread_index = thread_index
         self.root = root
         self.embedding_cache = EmbeddingCache(embedder)
-        self.last_ir: CodebaseIR | None = None  # last classification result
-        self.last_callgraph: CallGraph | None = None  # last call graph
+        self.last_ir: CodebaseIR | None = None
+        self.last_callgraph: CallGraph | None = None
 
-        # build key lookup tables
         self.file_by_hash: dict[int, dict[str, object]] = {}
         self.sym_by_hash: dict[
             int, tuple[dict[str, object], dict[str, object]]
@@ -2568,754 +2255,3 @@ class ReplContext:
             ):
                 if h := sym.get("key_hash"):
                     self.sym_by_hash[int(h)] = (entry, sym)  # pyright: ignore[reportArgumentType]
-
-
-def cmd_repl(args: argparse.Namespace) -> int:
-    """Interactive REPL with preloaded index for fast queries."""
-    import shlex
-
-    EmbeddingProvider = _get_embedder_class()
-
-    root = Path(args.directory).resolve() if args.directory else Path.cwd()
-    data_dir = root / DEFAULT_DATA_DIR
-    tracker_path = data_dir / "tracker.db"
-
-    if not tracker_path.exists():
-        print(f"error: no index found at {data_dir}", file=sys.stderr)
-        print("run 'galaxybrain index <directory>' first", file=sys.stderr)
-        return 1
-
-    model = args.model
-    print(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
-
-    print(f"loading index from {data_dir}...")
-    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
-    entries = manager.export_entries_for_taxonomy(root)
-
-    if not entries:
-        print("index is empty")
-        manager.close()
-        return 1
-
-    print("building search index...")
-    idx = ThreadIndex(embedder.dim)
-    for i, entry in enumerate(entries):
-        idx.upsert(i, entry["vector"])
-
-    ctx = ReplContext(entries, embedder, idx, root)
-
-    print(f"\nloaded {len(entries)} files, {embedder.dim}-dim vectors")
-    print("commands: query, classify, callgraph, drill, inspect, help, quit")
-    print("-" * 60)
-
-    while True:
-        try:
-            line = input("\ngalaxybrain> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nbye!")
-            return 0
-
-        if not line:
-            continue
-
-        try:
-            parts = shlex.split(line)
-        except ValueError as e:
-            print(f"parse error: {e}")
-            continue
-
-        cmd = parts[0].lower()
-        cmd_args = parts[1:]
-
-        try:
-            if cmd in ("q", "quit", "exit"):
-                print("bye!")
-                return 0
-            elif cmd in ("?", "h", "help"):
-                _repl_help()
-            elif cmd in ("query", "s", "search"):
-                _repl_query(ctx, cmd_args)
-            elif cmd in ("key", "k"):
-                _repl_key(ctx, cmd_args)
-            elif cmd in ("sym", "symbols"):
-                _repl_symbols(ctx, cmd_args)
-            elif cmd in ("grep", "g"):
-                _repl_grep(ctx, cmd_args)
-            elif cmd in ("sgrep", "sg"):
-                _repl_sgrep(ctx, cmd_args)
-            elif cmd in ("show", "sh"):
-                _repl_show(ctx, cmd_args)
-            elif cmd in ("classify", "c", "cls"):
-                _repl_classify(ctx, cmd_args)
-            elif cmd in ("refine", "r", "ref"):
-                _repl_refine(ctx, cmd_args)
-            elif cmd in ("drill", "d"):
-                _repl_drill(ctx, cmd_args)
-            elif cmd in ("inspect", "i"):
-                _repl_inspect(ctx, cmd_args)
-            elif cmd in ("callgraph", "cg"):
-                _repl_callgraph(ctx, cmd_args)
-            elif cmd in ("callers", "who"):
-                _repl_callers(ctx, cmd_args)
-            elif cmd in ("stats", "st"):
-                _repl_stats(ctx)
-            else:
-                print(f"unknown command: {cmd}")
-                print("type 'help' for available commands")
-        except Exception as e:
-            print(f"error: {e}")
-
-
-def _repl_help() -> None:
-    """Print REPL help."""
-    print("""
-commands (aliases in parens):
-  s, search, query <text> [-k N]   semantic search (default k=10)
-  k, key <canonical-key>           lookup by key (file:x, sym:x#y)
-  sym, symbols [filter]            list symbols, optional filter
-  g, grep <pattern>                regex search across files
-  sg, sgrep <query> <pattern>      regex + semantic search
-  sh, show <symbol> [-c N]         show symbol source with context
-  c, cls, classify [-v] [-s]       classify files (-s for symbols)
-  r, ref, refine [-n N] [-v]       iterative taxonomy refinement
-  d, drill <category>              list all files in a category
-  i, inspect <file>                show classification for a file
-  cg, callgraph [-v]               build call graph from classification
-  who, callers <symbol>            show what calls a symbol
-  st, stats                        show index statistics
-  h, ?, help                       this message
-  q, quit, exit                    exit repl
-""")
-
-
-def _repl_query(ctx: ReplContext, args: list[str]) -> None:
-    """Semantic query."""
-    if not args:
-        print("usage: query <text> [-k N]")
-        return
-
-    k = 10
-    query_parts = []
-    i = 0
-    while i < len(args):
-        if args[i] == "-k" and i + 1 < len(args):
-            k = int(args[i + 1])
-            i += 2
-        else:
-            query_parts.append(args[i])
-            i += 1
-
-    query = " ".join(query_parts)
-    if not query:
-        print("usage: query <text> [-k N]")
-        return
-
-    t0 = time.perf_counter()
-    query_vec = ctx.embedder.embed(query).tolist()
-    t_embed = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    results = ctx.thread_index.search(query_vec, k=k)
-    t_search = time.perf_counter() - t0
-
-    print(f"\ntop {len(results)} for: {query!r}")
-    print(f"(embed: {t_embed * 1000:.1f}ms, search: {t_search * 1000:.2f}ms)\n")
-
-    for file_id, score in results:
-        entry = ctx.entries[file_id]
-        path = entry.get("path_rel", entry["path"])
-        symbols = cast(list[str], entry.get("symbols", []))[:5]
-        print(f"[{score:.3f}] {path}")
-        if symbols:
-            print(f"         {', '.join(symbols)}")
-
-
-def _repl_key(ctx: ReplContext, args: list[str]) -> None:
-    """Lookup by canonical key."""
-    if not args:
-        print("usage: key <canonical-key>")
-        print("examples: key file:src/foo.py")
-        print("          key sym:src/foo.py#MyClass:class:10:50")
-        return
-
-    key = args[0]
-    t0 = time.perf_counter()
-    target_hash = hash64(key)
-    t_hash = time.perf_counter() - t0
-
-    print(f"key: {key}")
-    print(f"hash: 0x{target_hash:016x} ({t_hash * 1000:.3f}ms)\n")
-
-    if target_hash in ctx.file_by_hash:
-        entry = ctx.file_by_hash[target_hash]
-        _print_entry(entry)
-    elif target_hash in ctx.sym_by_hash:
-        entry, sym = ctx.sym_by_hash[target_hash]
-        _print_symbol(entry, sym)
-    else:
-        print("not found")
-
-
-def _repl_symbols(ctx: ReplContext, args: list[str]) -> None:
-    """List symbols."""
-    filter_str = args[0].lower() if args else None
-
-    all_syms: list[tuple[str, str, int, str, int | None]] = []
-    for entry in ctx.entries:
-        path = str(entry.get("path_rel", entry["path"]))
-        for sym in cast(list[dict[str, object]], entry.get("symbol_info", [])):
-            all_syms.append(
-                (
-                    str(sym["name"]),
-                    path,
-                    int(sym["line"]),  # pyright: ignore[reportArgumentType]
-                    str(sym["kind"]),
-                    int(sym["key_hash"]) if sym.get("key_hash") else None,  # pyright: ignore[reportArgumentType]
-                )
-            )
-
-    all_syms.sort(key=lambda x: x[0].lower())
-
-    if filter_str:
-        all_syms = [s for s in all_syms if filter_str in s[0].lower()]
-
-    for name, path, line, kind, _key_hash in all_syms[:50]:
-        loc = f"{path}:{line}"
-        kind_str = f" [{kind}]" if kind else ""
-        print(f"{name:<40} {loc}{kind_str}")
-
-    if len(all_syms) > 50:
-        print(f"\n... and {len(all_syms) - 50} more (showing first 50)")
-    else:
-        print(f"\n{len(all_syms)} symbols")
-
-
-def _repl_grep(ctx: ReplContext, args: list[str]) -> None:
-    """Regex grep."""
-    if not args:
-        print("usage: grep <pattern>")
-        return
-
-    pattern = args[0].encode()
-
-    t0 = time.perf_counter()
-    try:
-        hs = HyperscanSearch([pattern])
-    except Exception as e:
-        print(f"invalid pattern: {e}")
-        return
-    t_compile = time.perf_counter() - t0
-
-    matches = []
-    bytes_scanned = 0
-
-    t0 = time.perf_counter()
-    for entry in ctx.entries:
-        path = Path(str(entry["path"]))
-        if not path.is_absolute():
-            path = ctx.root / path
-
-        try:
-            content = path.read_bytes()
-        except OSError:
-            continue
-
-        bytes_scanned += len(content)
-        hits = hs.scan(content)
-        if not hits:
-            continue
-
-        lines = content.split(b"\n")
-        line_starts = _build_line_starts(lines)
-        seen: set[int] = set()
-
-        for _, start, _ in hits:
-            line_num = _offset_to_line(start, line_starts, len(lines))
-            if line_num in seen:
-                continue
-            seen.add(line_num)
-            if line_num <= len(lines):
-                line_text = lines[line_num - 1].decode(errors="replace").strip()
-                rel_path = entry.get("path_rel", entry["path"])
-                matches.append((rel_path, line_num, line_text))
-
-    t_scan = time.perf_counter() - t0
-
-    for path, line_num, text in matches[:30]:
-        print(f"{path}:{line_num}: {text[:80]}")
-
-    mb = bytes_scanned / (1024 * 1024)
-    c_ms, s_ms = t_compile * 1000, t_scan * 1000
-    print(f"\n{len(matches)} matches")
-    print(f"(compile: {c_ms:.1f}ms, scan: {s_ms:.1f}ms, {mb:.1f}MB)")
-
-
-def _repl_sgrep(ctx: ReplContext, args: list[str]) -> None:
-    """Semantic grep: regex filter + semantic ranking."""
-    if len(args) < 2:
-        print("usage: sgrep <query> <pattern> [-k N]")
-        return
-
-    query = args[0]
-    pattern = args[1].encode()
-    k = 10
-    if len(args) > 2 and args[2] == "-k" and len(args) > 3:
-        k = int(args[3])
-
-    try:
-        hs = HyperscanSearch([pattern])
-    except Exception as e:
-        print(f"invalid pattern: {e}")
-        return
-
-    # collect matches
-    match_texts: list[str] = []
-    match_locs: list[tuple[str, int, str]] = []
-
-    for entry in ctx.entries:
-        path = Path(str(entry["path"]))
-        if not path.is_absolute():
-            path = ctx.root / path
-
-        try:
-            content = path.read_bytes()
-        except OSError:
-            continue
-
-        hits = hs.scan(content)
-        if not hits:
-            continue
-
-        lines = content.split(b"\n")
-        line_starts = _build_line_starts(lines)
-        seen: set[int] = set()
-
-        for _, start, _ in hits:
-            line_num = _offset_to_line(start, line_starts, len(lines))
-            if line_num in seen:
-                continue
-            seen.add(line_num)
-            if line_num <= len(lines):
-                line_text = lines[line_num - 1].decode(errors="replace").strip()
-                if line_text:
-                    match_texts.append(line_text)
-                    rel_path = str(entry.get("path_rel", entry["path"]))
-                    match_locs.append((rel_path, line_num, line_text))
-
-    if not match_texts:
-        print("no pattern matches")
-        return
-
-    # embed and rank
-    t0 = time.perf_counter()
-    match_vecs = ctx.embedder.embed_batch(match_texts)
-    t_embed = time.perf_counter() - t0
-
-    tmp_idx = ThreadIndex(ctx.embedder.dim)
-    for i, vec in enumerate(match_vecs):
-        tmp_idx.upsert(i, vec.tolist())
-
-    t0 = time.perf_counter()
-    query_vec = ctx.embedder.embed(query).tolist()
-    results = tmp_idx.search(query_vec, k=k)
-    t_search = time.perf_counter() - t0
-    e_ms, s_ms = t_embed * 1000, t_search * 1000
-
-    n_hits = len(match_texts)
-    print(f"\ntop {len(results)} semantic matches for: {query!r}")
-    print(f"({n_hits} hits, embed: {e_ms:.1f}ms, search: {s_ms:.2f}ms)\n")
-
-    for match_id, score in results:
-        path, line_num, text = match_locs[match_id]
-        print(f"[{score:.3f}] {path}:{line_num}")
-        print(f"         {text[:70]}")
-
-
-def _repl_show(ctx: ReplContext, args: list[str]) -> None:
-    """Show symbol source."""
-    if not args:
-        print("usage: show <symbol> [-c N]")
-        return
-
-    symbol = args[0]
-    context_lines = 2
-    if len(args) > 1 and args[1] == "-c" and len(args) > 2:
-        context_lines = int(args[2])
-
-    matches: list[tuple[str, str, dict[str, object]]] = []
-    for entry in ctx.entries:
-        path = str(entry.get("path_rel", entry["path"]))
-        for sym in cast(list[dict[str, object]], entry.get("symbol_info", [])):
-            name = str(sym["name"])
-            if symbol.lower() in name.lower():
-                matches.append((name, path, sym))
-
-    if not matches:
-        print(f"no symbol matching '{symbol}'")
-        return
-
-    for name, path, info in matches[:5]:
-        line = int(info["line"])  # pyright: ignore[reportArgumentType]
-        end_line = int(info.get("end_line") or line)  # pyright: ignore[reportArgumentType]
-        kind = str(info["kind"])
-
-        print(f"\n{kind} {name}")
-        print(f"  {path}:{line}")
-        print("-" * 50)
-
-        try:
-            full_path = ctx.root / path
-            file_lines = full_path.read_text().split("\n")
-            start = max(0, line - 1 - context_lines)
-            end = min(len(file_lines), end_line + context_lines)
-
-            for i in range(start, end):
-                line_num = i + 1
-                marker = ">" if line <= line_num <= end_line else " "
-                print(f"{marker} {line_num:4d} | {file_lines[i]}")
-        except OSError as e:
-            print(f"  (could not read: {e})")
-
-    if len(matches) > 5:
-        print(f"\n... and {len(matches) - 5} more matches")
-
-
-def _repl_classify(ctx: ReplContext, args: list[str]) -> None:
-    """Classify files into taxonomy."""
-
-    verbose = "-v" in args
-    include_symbols = "-s" in args
-
-    classifier = Classifier(
-        ctx.embedder,
-        taxonomy=DEFAULT_TAXONOMY,
-        cache=ctx.embedding_cache,
-    )
-    ir = classifier.classify_entries(
-        ctx.entries, include_symbols=include_symbols
-    )
-    ctx.last_ir = ir  # store for drill/inspect
-
-    print("\nCATEGORIES:\n")
-    file_limit = 10 if verbose else 3
-    for cat, files in sorted(ir.category_index.items()):
-        if files:
-            print(f"  {cat} ({len(files)} files):")
-            for f in files[:file_limit]:
-                print(f"    - {f}")
-            if len(files) > file_limit:
-                print(f"    ... and {len(files) - file_limit} more")
-            print()
-
-    if verbose:
-        print("=" * 50)
-        print("FILE DETAILS:\n")
-        for file_ir in ir.files:
-            cats = ", ".join(file_ir.categories) or "(none)"
-            print(f"{file_ir.path_rel}: {cats}")
-            if include_symbols and file_ir.symbols:
-                for sym in file_ir.symbols[:10]:
-                    sym_cats = ", ".join(sym.top_categories) or "-"
-                    print(f"    {sym.kind} {sym.name}: {sym_cats}")
-                if len(file_ir.symbols) > 10:
-                    print(f"    ... and {len(file_ir.symbols) - 10} more")
-
-
-def _repl_refine(ctx: ReplContext, args: list[str]) -> None:
-    """Iterative taxonomy refinement."""
-
-    # parse args
-    n_iterations = 5
-    verbose = "-v" in args
-    i = 0
-    while i < len(args):
-        if args[i] == "-n" and i + 1 < len(args):
-            n_iterations = int(args[i + 1])
-            i += 2
-        else:
-            i += 1
-
-    print(f"running up to {n_iterations} refinement iterations...")
-
-    refiner = TaxonomyRefiner(
-        ctx.embedder,
-        split_threshold=15,
-        min_cluster_size=2,
-        cache=ctx.embedding_cache,
-    )
-
-    t0 = time.perf_counter()
-    result = refiner.refine(ctx.entries, n_iterations=n_iterations)
-    t_refine = time.perf_counter() - t0
-    ctx.last_ir = result.final_ir  # store for drill/inspect
-
-    n_ran = len(result.iterations)
-    converged = n_ran < n_iterations
-    status = f"converged after {n_ran}" if converged else f"ran {n_ran}"
-
-    print(f"\n{status} iterations ({t_refine * 1000:.0f}ms)\n")
-
-    # show iteration summaries
-    for it in result.iterations:
-        m = it.metrics
-        changes = []
-        if it.new_categories:
-            changes.append(f"+{len(it.new_categories)} new")
-        if it.split_categories:
-            changes.append(f"{len(it.split_categories)} splits")
-        if it.merged_categories:
-            changes.append(f"{len(it.merged_categories)} merges")
-        change_str = f" [{', '.join(changes)}]" if changes else ""
-        print(
-            f"  iter {it.iteration}: {m['n_categories']} cats, "
-            f"{m['avg_confidence']:.3f} conf{change_str}"
-        )
-
-    # final taxonomy
-    print(f"\nFINAL ({len(result.final_taxonomy)} categories):")
-    for cat, query in sorted(result.final_taxonomy.items()):
-        n_files = len(result.final_ir.category_index.get(cat, []))
-        q = query[:40] + "..." if len(query) > 40 else query
-        print(f"  {cat} ({n_files}): {q}")
-
-    if verbose:
-        print("\nCATEGORY DETAILS:")
-        for cat, files in sorted(result.final_ir.category_index.items()):
-            if files:
-                print(f"\n  {cat}:")
-                for f in files[:5]:
-                    print(f"    - {f}")
-                if len(files) > 5:
-                    print(f"    ... and {len(files) - 5} more")
-
-
-def _repl_drill(ctx: ReplContext, args: list[str]) -> None:
-    """Drill into a category from last classification."""
-    if not ctx.last_ir:
-        print("no classification yet - run 'classify' or 'refine' first")
-        return
-
-    if not args:
-        print("usage: drill <category>")
-        print(
-            f"available: {', '.join(sorted(ctx.last_ir.category_index.keys()))}"
-        )
-        return
-
-    category = args[0]
-
-    # fuzzy match category name
-    matches = [
-        c for c in ctx.last_ir.category_index if category.lower() in c.lower()
-    ]
-    if not matches:
-        print(f"no category matching '{category}'")
-        print(
-            f"available: {', '.join(sorted(ctx.last_ir.category_index.keys()))}"
-        )
-        return
-
-    if len(matches) > 1 and category.lower() not in [
-        m.lower() for m in matches
-    ]:
-        print(f"ambiguous - matches: {', '.join(matches)}")
-        return
-
-    # use exact match if available, else first fuzzy match
-    cat = category if category in ctx.last_ir.category_index else matches[0]
-    files = ctx.last_ir.category_index.get(cat, [])
-
-    print(f"\n{cat} ({len(files)} files):\n")
-    for f in files:
-        # find file IR to get scores
-        file_ir = next(
-            (fi for fi in ctx.last_ir.files if fi.path_rel == f), None
-        )
-        if file_ir:
-            score = file_ir.scores.get(cat, 0)
-            print(f"  [{score:.3f}] {f}")
-        else:
-            print(f"  {f}")
-
-
-def _repl_inspect(ctx: ReplContext, args: list[str]) -> None:
-    """Inspect classification details for a file."""
-    if not ctx.last_ir:
-        print("no classification yet - run 'classify' or 'refine' first")
-        return
-
-    if not args:
-        print("usage: inspect <file>")
-        return
-
-    query = args[0]
-
-    # fuzzy match file path
-    matches = [
-        f for f in ctx.last_ir.files if query.lower() in f.path_rel.lower()
-    ]
-    if not matches:
-        print(f"no file matching '{query}'")
-        return
-
-    if len(matches) > 1:
-        # check for exact match
-        exact = [f for f in matches if f.path_rel == query]
-        if exact:
-            matches = exact
-        else:
-            print("multiple matches:")
-            for f in matches[:10]:
-                print(f"  {f.path_rel}")
-            if len(matches) > 10:
-                print(f"  ... and {len(matches) - 10} more")
-            return
-
-    file_ir = matches[0]
-
-    print(f"\n{file_ir.path_rel}")
-    print(f"  key: 0x{file_ir.key_hash:016x}")
-
-    # categories with scores
-    print(f"\n  categories: {', '.join(file_ir.categories) or '(none)'}")
-
-    # all scores sorted
-    print("\n  scores:")
-    sorted_scores = sorted(file_ir.scores.items(), key=lambda x: -x[1])
-    for cat, score in sorted_scores[:10]:
-        marker = "*" if cat in file_ir.categories else " "
-        print(f"    {marker} {cat}: {score:.3f}")
-
-    # symbols if present
-    if file_ir.symbols:
-        print(f"\n  symbols ({len(file_ir.symbols)}):")
-        for sym in file_ir.symbols[:15]:
-            sym_cats = ", ".join(sym.top_categories) or "-"
-            top_score = max(sym.scores.values()) if sym.scores else 0
-            print(f"    {sym.kind} {sym.name} [{top_score:.3f}]: {sym_cats}")
-        if len(file_ir.symbols) > 15:
-            print(f"    ... and {len(file_ir.symbols) - 15} more")
-
-
-def _repl_callgraph(ctx: ReplContext, args: list[str]) -> None:
-    """Build call graph from classification."""
-    verbose = "-v" in args
-
-    # need classification first
-    if not ctx.last_ir:
-        print("classifying first...")
-        classifier = Classifier(
-            ctx.embedder,
-            taxonomy=DEFAULT_TAXONOMY,
-            threshold=0.6,
-            cache=ctx.embedding_cache,
-        )
-        ctx.last_ir = classifier.classify_entries(
-            ctx.entries, include_symbols=True
-        )
-
-    print("building call graph...")
-    t0 = time.perf_counter()
-    graph, _ = build_call_graph(ctx.last_ir, ctx.root)
-    ctx.last_callgraph = graph
-    t_build = time.perf_counter() - t0
-
-    stats = graph.to_dict()["stats"]
-    print(f"\ncall graph built in {t_build * 1000:.0f}ms:")
-    print(f"  symbols: {stats['total_symbols']}")
-    print(f"  edges:   {stats['total_edges']}")
-    print(f"  calls:   {stats['total_call_sites']}")
-
-    # top called symbols
-    print("\nmost called symbols:\n")
-    sorted_nodes = sorted(graph.nodes.values(), key=lambda n: -n.call_count)
-    for node in sorted_nodes[:15]:
-        if node.call_count > 0:
-            cats = ", ".join(node.categories[:2]) or "-"
-            print(f"  {node.name}: {node.call_count} calls [{cats}]")
-            if verbose:
-                print(f"    defined: {node.defined_in}:{node.definition_line}")
-                for caller in node.callers[:3]:
-                    print(f"      <- {caller}")
-                if len(node.callers) > 3:
-                    print(f"      ... and {len(node.callers) - 3} more")
-
-
-def _repl_callers(ctx: ReplContext, args: list[str]) -> None:
-    """Show what calls a symbol."""
-    if not args:
-        print("usage: callers <symbol>")
-        return
-
-    if not ctx.last_callgraph:
-        print("run 'callgraph' first to build the call graph")
-        return
-
-    symbol = args[0]
-    graph = ctx.last_callgraph
-
-    # exact or fuzzy match
-    node = graph.nodes.get(symbol)
-    if not node:
-        matches = [n for n in graph.nodes if symbol.lower() in n.lower()]
-        if not matches:
-            print(f"symbol '{symbol}' not in call graph")
-            return
-        if len(matches) > 1:
-            print(f"ambiguous - matches: {', '.join(matches[:10])}")
-            return
-        node = graph.nodes[matches[0]]
-
-    print(f"\n{node.kind} {node.name}")
-    print(f"  defined: {node.defined_in}:{node.definition_line}")
-    print(f"  categories: {', '.join(node.categories) or '-'}")
-
-    if not node.call_sites:
-        print("\n  no callers found")
-        return
-
-    print(f"\n  call sites ({node.call_count}):\n")
-
-    # group by caller file
-    by_file: dict[str, list[CallSite]] = {}
-    for cs in node.call_sites:
-        by_file.setdefault(cs.caller_path, []).append(cs)
-
-    for caller_path, sites in sorted(by_file.items()):
-        print(f"  {caller_path}:")
-        for cs in sites[:5]:
-            ctx_str = (
-                cs.context[:50] + "..." if len(cs.context) > 50 else cs.context
-            )
-            print(f"    :{cs.line} {ctx_str}")
-        if len(sites) > 5:
-            print(f"    ... and {len(sites) - 5} more in this file")
-
-
-def _repl_stats(ctx: ReplContext) -> None:
-    """Show index stats."""
-    n_files = len(ctx.entries)
-    n_symbols = sum(
-        len(cast(list[object], e.get("symbol_info", []))) for e in ctx.entries
-    )
-    model = ctx.index_data["model"]
-    dim = ctx.embedder.dim
-
-    print("\nindex statistics:")
-    print(f"  files:   {n_files}")
-    print(f"  symbols: {n_symbols}")
-    print(f"  model:   {model}")
-    print(f"  dim:     {dim}")
-    print(f"  root:    {ctx.root}")
-
-    if ctx.last_callgraph:
-        stats = ctx.last_callgraph.to_dict()["stats"]
-        print("\ncall graph:")
-        print(f"  nodes:   {stats['total_symbols']}")
-        print(f"  edges:   {stats['total_edges']}")
-        print(f"  calls:   {stats['total_call_sites']}")
-
-
-if __name__ == "__main__":
-    sys.exit(main())
