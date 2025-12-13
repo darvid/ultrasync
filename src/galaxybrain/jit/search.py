@@ -8,19 +8,20 @@ Search priority:
 4. Opportunistic JIT indexing of discovered files
 """
 
-import logging
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
 from galaxybrain.keys import hash64
 
 if TYPE_CHECKING:
     from galaxybrain.jit.manager import JITIndexManager
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass

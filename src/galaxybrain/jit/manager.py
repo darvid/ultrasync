@@ -1,11 +1,12 @@
 import asyncio
 import hashlib
-import logging
 import subprocess
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import structlog
 
 from galaxybrain.file_scanner import FileScanner
 from galaxybrain.jit.blob import BlobAppender
@@ -21,7 +22,7 @@ try:
 except ImportError:
     MutableGlobalIndex = None  # type: ignore
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
@@ -515,6 +516,10 @@ class JITIndexManager:
             key = hash64_sym_key(file_path, name, symbol_type, start, end)
         else:
             key = hash64(f"snippet:{name}:{source_code[:100]}")
+
+        # insert into AOT index for direct key lookups
+        if self.aot_index is not None:
+            self.aot_index.insert(key, blob_entry.offset, blob_entry.length)
 
         embed_text = f"{symbol_type} {name}: {source_code[:500]}"
 
