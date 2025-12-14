@@ -30,6 +30,20 @@ CONTEXT_PATTERN_IDS = [
     "pat:ctx-billing",
 ]
 
+# Semantic anchor pattern set IDs - entry points for tracing application logic
+ANCHOR_PATTERN_IDS = [
+    "pat:anchor-routes",
+    "pat:anchor-models",
+    "pat:anchor-schemas",
+    "pat:anchor-validators",
+    "pat:anchor-handlers",
+    "pat:anchor-services",
+    "pat:anchor-repositories",
+    "pat:anchor-events",
+    "pat:anchor-jobs",
+    "pat:anchor-middleware",
+]
+
 # Insight detection pattern set IDs - extracted as symbols with line numbers
 INSIGHT_PATTERN_IDS = [
     "pat:ins-todo",
@@ -75,6 +89,24 @@ class InsightMatch:
     text: str  # the actual line content
     match_start: int  # byte offset of pattern match
     match_end: int  # byte offset of pattern match end
+
+
+@dataclass
+class AnchorMatch:
+    """A semantic anchor match in source code.
+
+    Anchors are structural points that define application behavior:
+    routes, models, schemas, handlers, services, etc.
+    """
+
+    anchor_type: str  # e.g., "anchor:routes", "anchor:models"
+    line_number: int
+    line_start: int  # byte offset of line start
+    line_end: int  # byte offset of line end
+    text: str  # the actual line content
+    match_start: int  # byte offset of pattern match
+    match_end: int  # byte offset of pattern match end
+    pattern: str  # the pattern that matched
 
 
 class PatternSetManager:
@@ -399,6 +431,383 @@ class PatternSetManager:
                     r"handleWebhook",
                 ],
                 "tags": ["context", "billing"],
+            }
+        )
+
+        # Load semantic anchor patterns
+        self._load_anchor_patterns()
+
+    def _load_anchor_patterns(self) -> None:
+        """Load semantic anchor patternsets for tracing application logic.
+
+        These patterns identify semantic anchors in codebases - the key
+        structural points that define application behavior:
+        - Routes/endpoints: entry points for user actions
+        - Models: data structures and domain entities
+        - Schemas: validation and serialization definitions
+        - Handlers/Controllers: request processing logic
+        - Services: business logic implementations
+        - Repositories: data access patterns
+        - Events: async/event-driven patterns
+        - Jobs: background task definitions
+        - Middleware: request/response interceptors
+        """
+        # Routes - HTTP endpoint definitions across frameworks
+        self.load(
+            {
+                "id": "pat:anchor-routes",
+                "description": "HTTP route/endpoint definitions",
+                "patterns": [
+                    # Python - Flask/FastAPI/Django
+                    r"@app\.(get|post|put|delete|patch|route)\s*\(",
+                    r"@router\.(get|post|put|delete|patch)\s*\(",
+                    r"@(Get|Post|Put|Delete|Patch)Mapping",
+                    r"path\s*\(\s*['\"]",
+                    r"url\s*\(\s*r?['\"]",
+                    r"@api_view\s*\(",
+                    # JavaScript/TypeScript - Express/Hono/Elysia
+                    r"app\.(get|post|put|delete|patch|all)\s*\(\s*['\"]\/",
+                    r"router\.(get|post|put|delete|patch)\s*\(\s*['\"]",
+                    r"\.route\s*\(\s*['\"]\/",
+                    # Next.js App Router
+                    r"export\s+(async\s+)?function\s+(GET|POST|PUT|DELETE|PATCH)\s*\(",
+                    r"export\s+const\s+(GET|POST|PUT|DELETE|PATCH)\s*=",
+                    # tRPC
+                    r"\.query\s*\(\s*['\"]",
+                    r"\.mutation\s*\(\s*['\"]",
+                    r"publicProcedure\.",
+                    r"protectedProcedure\.",
+                    # GraphQL
+                    r"@(Query|Mutation|Subscription)\s*\(",
+                    r"type\s+Query\s*\{",
+                    r"type\s+Mutation\s*\{",
+                    # OpenAPI/Swagger decorators
+                    r"@openapi\.",
+                    r"@swagger\.",
+                ],
+                "tags": ["anchor", "routes", "api"],
+                "extensions": JS_EXTENSIONS + PY_EXTENSIONS,
+            }
+        )
+
+        # Models - Database/ORM model definitions
+        self.load(
+            {
+                "id": "pat:anchor-models",
+                "description": "Database model/entity definitions",
+                "patterns": [
+                    # Python ORMs
+                    r"class\s+\w+\s*\(\s*(Base|Model|db\.Model)",
+                    r"class\s+\w+\s*\(\s*DeclarativeBase\s*\)",
+                    r"@dataclass",
+                    r"class\s+\w+\s*\(\s*BaseModel\s*\)",  # Pydantic as model
+                    # SQLAlchemy
+                    r"Column\s*\(",
+                    r"relationship\s*\(",
+                    r"ForeignKey\s*\(",
+                    r"__tablename__\s*=",
+                    # Drizzle ORM - table definitions
+                    r"pgTable\s*\(\s*['\"]",
+                    r"mysqlTable\s*\(\s*['\"]",
+                    r"sqliteTable\s*\(\s*['\"]",
+                    # Drizzle column types (follow colon in object)
+                    r":\s*serial\s*\(",
+                    r":\s*varchar\s*\(",
+                    r":\s*integer\s*\(",
+                    r":\s*text\s*\(",
+                    r":\s*boolean\s*\(",
+                    r":\s*timestamp\s*\(",
+                    # Prisma
+                    r"model\s+\w+\s*\{",
+                    r"@@map\s*\(",
+                    r"@relation\s*\(",
+                    r"@id\s*@default",
+                    # TypeORM
+                    r"@Entity\s*\(",
+                    r"@Column\s*\(",
+                    r"@PrimaryGeneratedColumn",
+                    r"@ManyToOne",
+                    r"@OneToMany",
+                    r"@ManyToMany",
+                    # Mongoose
+                    r"new\s+Schema\s*\(",
+                    r"mongoose\.model\s*\(",
+                    r"Schema\.Types\.",
+                    # Django
+                    r"models\.(CharField|TextField|IntegerField|ForeignKey)",
+                    r"class\s+Meta\s*:",
+                ],
+                "tags": ["anchor", "models", "data"],
+            }
+        )
+
+        # Schemas - Validation and serialization schemas
+        self.load(
+            {
+                "id": "pat:anchor-schemas",
+                "description": "Validation/serialization schema definitions",
+                "patterns": [
+                    # Zod (JS/TS)
+                    r"z\.(object|string|number|boolean|array|enum)\s*\(",
+                    r"z\.infer<",
+                    r"createInsertSchema",
+                    r"createSelectSchema",
+                    # Yup
+                    r"yup\.(object|string|number|boolean|array)\s*\(",
+                    r"Yup\.(object|string|number)\s*\(",
+                    # Joi
+                    r"Joi\.(object|string|number|boolean|array)\s*\(",
+                    # Pydantic (Python)
+                    r"class\s+\w+\s*\(\s*BaseModel\s*\)",
+                    r"Field\s*\(",
+                    r"validator\s*\(",
+                    r"@field_validator",
+                    r"@model_validator",
+                    # Marshmallow
+                    r"class\s+\w+Schema\s*\(\s*Schema\s*\)",
+                    r"fields\.(Str|Int|Float|Bool|List|Nested)",
+                    # JSON Schema
+                    r'"type"\s*:\s*"(object|string|number|boolean|array)"',
+                    r"\$schema",
+                    r'"properties"\s*:\s*\{',
+                    # TypeBox
+                    r"Type\.(Object|String|Number|Boolean|Array)\s*\(",
+                    # class-validator (NestJS)
+                    r"@IsString\s*\(",
+                    r"@IsNumber\s*\(",
+                    r"@IsEmail\s*\(",
+                    r"@MinLength\s*\(",
+                    r"@MaxLength\s*\(",
+                ],
+                "tags": ["anchor", "schemas", "validation"],
+            }
+        )
+
+        # Validators - Input validation logic
+        self.load(
+            {
+                "id": "pat:anchor-validators",
+                "description": "Input validation functions and decorators",
+                "patterns": [
+                    # Generic validation patterns
+                    r"validate[A-Z]\w*\s*[=:]\s*",
+                    r"def\s+validate_",
+                    r"function\s+validate",
+                    r"const\s+validate\w*\s*=",
+                    # Decorators
+                    r"@validate",
+                    r"@validates\s*\(",
+                    # Express-validator
+                    r"body\s*\(\s*['\"]",
+                    r"param\s*\(\s*['\"]",
+                    r"query\s*\(\s*['\"]",
+                    r"\.isEmail\s*\(",
+                    r"\.isLength\s*\(",
+                    r"\.notEmpty\s*\(",
+                    # Sanitization
+                    r"sanitize[A-Z]\w*",
+                    r"\.trim\s*\(",
+                    r"\.escape\s*\(",
+                    # Custom validators
+                    r"\.custom\s*\(\s*\(",
+                    r"refine\s*\(",
+                    r"superRefine\s*\(",
+                ],
+                "tags": ["anchor", "validators", "validation"],
+            }
+        )
+
+        # Handlers/Controllers - Request handling logic
+        self.load(
+            {
+                "id": "pat:anchor-handlers",
+                "description": "Request handlers and controllers",
+                "patterns": [
+                    # NestJS
+                    r"@Controller\s*\(",
+                    r"@Injectable\s*\(",
+                    # Generic handler patterns
+                    r"Handler\s*[=:]\s*",
+                    r"def\s+handle_",
+                    r"async\s+def\s+handle",
+                    r"function\s+handle[A-Z]",
+                    r"const\s+handle\w*\s*=",
+                    # Express/Koa style
+                    r"\(\s*req\s*,\s*res\s*\)\s*=>",
+                    r"\(\s*ctx\s*\)\s*=>",
+                    r"async\s*\(\s*req\s*,\s*res",
+                    r"async\s*\(\s*c\s*\)\s*=>",  # Hono
+                    # Action patterns (Next.js/Remix)
+                    r"export\s+async\s+function\s+action",
+                    r"export\s+const\s+action\s*=",
+                    r'"use server"',
+                    # Django views
+                    r"def\s+\w+\s*\(\s*request",
+                    r"class\s+\w+View\s*\(",
+                    r"class\s+\w+ViewSet\s*\(",
+                ],
+                "tags": ["anchor", "handlers", "controllers"],
+            }
+        )
+
+        # Services - Business logic layer
+        self.load(
+            {
+                "id": "pat:anchor-services",
+                "description": "Business logic service classes/functions",
+                "patterns": [
+                    # Class-based services
+                    r"class\s+\w+Service\s*[:\(]",
+                    r"class\s+\w+UseCase\s*[:\(]",
+                    r"class\s+\w+Interactor\s*[:\(]",
+                    # Function-based
+                    r"def\s+\w+_service\s*\(",
+                    r"function\s+\w+Service\s*\(",
+                    r"const\s+\w+Service\s*=",
+                    # NestJS services
+                    r"@Injectable\s*\(\s*\)",
+                    # Service methods
+                    r"async\s+create[A-Z]",
+                    r"async\s+update[A-Z]",
+                    r"async\s+delete[A-Z]",
+                    r"async\s+get[A-Z]",
+                    r"async\s+find[A-Z]",
+                    r"async\s+process[A-Z]",
+                ],
+                "tags": ["anchor", "services", "domain"],
+            }
+        )
+
+        # Repositories - Data access layer
+        self.load(
+            {
+                "id": "pat:anchor-repositories",
+                "description": "Data access repository patterns",
+                "patterns": [
+                    # Repository classes
+                    r"class\s+\w+Repository\s*[:\(]",
+                    r"class\s+\w+Repo\s*[:\(]",
+                    r"class\s+\w+DAO\s*[:\(]",
+                    # Prisma/Drizzle ORM methods (chained from db)
+                    r"\.findOne\s*\(",
+                    r"\.findMany\s*\(",
+                    r"\.findUnique\s*\(",
+                    r"\.findFirst\s*\(",
+                    r"\.createMany\s*\(",
+                    r"\.updateMany\s*\(",
+                    r"\.deleteMany\s*\(",
+                    r"\.upsert\s*\(",
+                    # Query builders (need context)
+                    r"db\.\w+\.where\s*\(",
+                    r"prisma\.\w+\.where\s*\(",
+                    # SQLAlchemy query patterns
+                    r"session\.(query|execute)\s*\(",
+                    r"\.filter\s*\(\s*\w+\.",
+                    r"\.filter_by\s*\(",
+                ],
+                "tags": ["anchor", "repositories", "data-access"],
+            }
+        )
+
+        # Events - Event-driven patterns
+        self.load(
+            {
+                "id": "pat:anchor-events",
+                "description": "Event emitters and handlers",
+                "patterns": [
+                    # Event classes
+                    r"class\s+\w+Event\s*[:\(]",
+                    r"class\s+\w+Message\s*[:\(]",
+                    # Event emitting
+                    r"\.emit\s*\(\s*['\"]",
+                    r"\.publish\s*\(",
+                    r"\.dispatch\s*\(",
+                    r"EventEmitter",
+                    # Event handling
+                    r"\.on\s*\(\s*['\"]",
+                    r"\.subscribe\s*\(",
+                    r"@EventHandler",
+                    r"@OnEvent\s*\(",
+                    r"@Subscribe\s*\(",
+                    # Message queues
+                    r"@MessagePattern\s*\(",
+                    r"@EventPattern\s*\(",
+                    r"\.send\s*\(\s*['\"]",
+                    # Webhooks
+                    r"webhook",
+                    r"handleWebhook",
+                ],
+                "tags": ["anchor", "events", "async"],
+            }
+        )
+
+        # Jobs - Background tasks and scheduled work
+        self.load(
+            {
+                "id": "pat:anchor-jobs",
+                "description": "Background jobs and scheduled tasks",
+                "patterns": [
+                    # Job classes
+                    r"class\s+\w+Job\s*[:\(]",
+                    r"class\s+\w+Task\s*[:\(]",
+                    r"class\s+\w+Worker\s*[:\(]",
+                    # Celery (Python)
+                    r"@celery\.task",
+                    r"@shared_task",
+                    r"@app\.task",
+                    r"\.delay\s*\(",
+                    r"\.apply_async\s*\(",
+                    # Bull/BullMQ (Node)
+                    r"@Process\s*\(",
+                    r"@Processor\s*\(",
+                    r"\.add\s*\(\s*['\"]",
+                    r"Queue\s*\(\s*['\"]",
+                    # Cron/Scheduling
+                    r"@Cron\s*\(",
+                    r"@Interval\s*\(",
+                    r"@Timeout\s*\(",
+                    r"schedule\.",
+                    r"cron\s*[=:]\s*['\"]",
+                    # Generic workers
+                    r"def\s+run_job",
+                    r"async\s+def\s+process_",
+                    r"def\s+execute\s*\(",
+                ],
+                "tags": ["anchor", "jobs", "background"],
+            }
+        )
+
+        # Middleware - Request/response interceptors
+        self.load(
+            {
+                "id": "pat:anchor-middleware",
+                "description": "Middleware and interceptors",
+                "patterns": [
+                    # Express-style
+                    r"app\.use\s*\(",
+                    r"router\.use\s*\(",
+                    r"\(\s*req\s*,\s*res\s*,\s*next\s*\)",
+                    r"next\s*\(\s*\)",
+                    # NestJS
+                    r"@UseGuards\s*\(",
+                    r"@UseInterceptors\s*\(",
+                    r"@UsePipes\s*\(",
+                    r"implements\s+NestMiddleware",
+                    r"implements\s+CanActivate",
+                    r"implements\s+NestInterceptor",
+                    # Django
+                    r"class\s+\w+Middleware\s*[:\(]",
+                    r"def\s+__call__\s*\(\s*self\s*,\s*request",
+                    r"process_request",
+                    r"process_response",
+                    # FastAPI
+                    r"@app\.middleware",
+                    r"Depends\s*\(",
+                    # Generic
+                    r"middleware\s*[=:]\s*\[",
+                    r"Middleware\s*\(",
+                ],
+                "tags": ["anchor", "middleware", "interceptors"],
             }
         )
 
@@ -856,3 +1265,141 @@ class PatternSetManager:
         # Sort by line number
         insights.sort(key=lambda x: x.line_number)
         return insights
+
+    def extract_anchors(
+        self,
+        data: bytes | str,
+        file_path: str | Path | None = None,
+    ) -> list[AnchorMatch]:
+        """Extract semantic anchors from file content with line-level info.
+
+        Scans content against all anchor patternsets and returns matches
+        with line numbers for tracing business logic flows.
+
+        Args:
+            data: File content to scan (bytes or str)
+            file_path: Optional file path for extension-based filtering
+
+        Returns:
+            List of AnchorMatch objects with line-level detail
+        """
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+            data_str = data
+        else:
+            data_bytes = bytes(data)
+            data_str = data_bytes.decode("utf-8", errors="replace")
+
+        # Extract file extension for filtering
+        ext = None
+        if file_path:
+            ext = Path(file_path).suffix.lstrip(".").lower()
+
+        # Build line index: list of (line_start_offset, line_end_offset)
+        line_offsets: list[tuple[int, int]] = []
+        pos = 0
+        for line in data_str.split("\n"):
+            line_bytes = line.encode("utf-8")
+            line_end = pos + len(line_bytes)
+            line_offsets.append((pos, line_end))
+            pos = line_end + 1  # +1 for newline
+
+        def find_line(offset: int) -> tuple[int, int, int]:
+            """Find line number and bounds for byte offset."""
+            for i, (start, end) in enumerate(line_offsets):
+                if start <= offset <= end:
+                    return (i + 1, start, end)  # 1-indexed line numbers
+            return (len(line_offsets), 0, len(data_bytes))
+
+        anchors: list[AnchorMatch] = []
+        seen: set[tuple[str, int]] = set()  # (anchor_type, line_number)
+
+        for pattern_id in ANCHOR_PATTERN_IDS:
+            ps = self.pattern_sets.get(pattern_id)
+            if not ps or not ps.compiled_db:
+                continue
+
+            # Skip if pattern set has extension filter that doesn't match
+            if ps.extensions and ext and ext not in ps.extensions:
+                continue
+
+            try:
+                matches = self.scan(pattern_id, data_bytes)
+                # Convert pat:anchor-routes → anchor:routes
+                anchor_type = pattern_id.replace("pat:anchor-", "anchor:")
+
+                for match in matches:
+                    line_num, line_start, line_end = find_line(match.start)
+
+                    # Dedupe: only one anchor per type per line
+                    key = (anchor_type, line_num)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+
+                    # Extract line text
+                    line_text = data_str.split("\n")[line_num - 1]
+
+                    anchors.append(
+                        AnchorMatch(
+                            anchor_type=anchor_type,
+                            line_number=line_num,
+                            line_start=line_start,
+                            line_end=line_end,
+                            text=line_text.strip(),
+                            match_start=match.start,
+                            match_end=match.end,
+                            pattern=match.pattern,
+                        )
+                    )
+            except Exception:
+                continue
+
+        # Sort by line number
+        anchors.sort(key=lambda x: x.line_number)
+        return anchors
+
+    def detect_anchors(
+        self,
+        data: Buffer,
+        file_path: str | Path | None = None,
+        min_matches: int = 1,
+    ) -> list[str]:
+        """Detect anchor types present in file content.
+
+        Similar to detect_contexts but for semantic anchors.
+
+        Args:
+            data: File content to scan
+            file_path: Optional file path for extension-based filtering
+            min_matches: Minimum pattern matches required to assign an anchor
+
+        Returns:
+            List of detected anchor types (e.g., ["anchor:routes"])
+        """
+        detected: list[str] = []
+
+        # Extract file extension (without dot, lowercased)
+        ext = None
+        if file_path:
+            ext = Path(file_path).suffix.lstrip(".").lower()
+
+        for pattern_id in ANCHOR_PATTERN_IDS:
+            ps = self.pattern_sets.get(pattern_id)
+            if not ps or not ps.compiled_db:
+                continue
+
+            # Skip if pattern set has extension filter that doesn't match
+            if ps.extensions and ext and ext not in ps.extensions:
+                continue
+
+            try:
+                matches = self.scan(pattern_id, data)
+                if len(matches) >= min_matches:
+                    # Convert pat:anchor-routes → anchor:routes
+                    anchor_type = pattern_id.replace("pat:anchor-", "anchor:")
+                    detected.append(anchor_type)
+            except Exception:
+                continue
+
+        return detected

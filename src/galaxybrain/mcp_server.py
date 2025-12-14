@@ -12,7 +12,7 @@ from galaxybrain.events import EventType, SessionEvent
 from galaxybrain.file_registry import FileRegistry
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.logging_config import configure_logging, get_logger
-from galaxybrain.patterns import PatternSetManager
+from galaxybrain.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
 from galaxybrain.threads import ThreadManager
 from galaxybrain.transcript_watcher import (
     ClaudeCodeParser,
@@ -236,6 +236,15 @@ class PatternSetInfo(BaseModel):
     description: str = Field(description="Human-readable description")
     pattern_count: int = Field(description="Number of patterns")
     tags: list[str] = Field(description="Classification tags")
+
+
+class AnchorMatchInfo(BaseModel):
+    """A semantic anchor match in source code."""
+
+    anchor_type: str = Field(description="Anchor type (e.g., anchor:routes)")
+    line_number: int = Field(description="1-indexed line number")
+    text: str = Field(description="The matched line content")
+    pattern: str = Field(description="The pattern that matched")
 
 
 class WatcherStatsInfo(BaseModel):
@@ -1706,6 +1715,189 @@ context:api, context:data, context:infra
             )
             for ps in state.pattern_manager.list_all()
         ]
+
+    # -----------------------------------------------------------------------
+    # Semantic Anchor tools
+    # -----------------------------------------------------------------------
+
+    @mcp.tool()
+    def anchor_list_types() -> dict[str, Any]:
+        """List all available semantic anchor types.
+
+        Anchors are structural points that define application behavior:
+        routes, models, schemas, handlers, services, etc.
+
+        Returns:
+            Dictionary with anchor type IDs and descriptions
+        """
+        anchor_types = []
+        for pattern_id in ANCHOR_PATTERN_IDS:
+            ps = state.pattern_manager.get(pattern_id)
+            if ps:
+                anchor_types.append(
+                    {
+                        "id": pattern_id.replace("pat:anchor-", "anchor:"),
+                        "description": ps.description,
+                        "pattern_count": len(ps.patterns),
+                        "extensions": ps.extensions,
+                    }
+                )
+
+        return {"anchor_types": anchor_types, "count": len(anchor_types)}
+
+    @mcp.tool()
+    def anchor_scan_file(
+        file_path: str,
+        anchor_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Scan a file for semantic anchors.
+
+        Detects routes, models, schemas, handlers, etc. in the file.
+
+        Args:
+            file_path: Path to file to scan (relative to project root)
+            anchor_types: Optional list of specific anchor types to scan for
+                          (e.g., ["anchor:routes", "anchor:models"])
+
+        Returns:
+            Dictionary with file path and list of anchor matches
+        """
+        # resolve path
+        if not Path(file_path).is_absolute():
+            full_path = state.project_root / file_path
+        else:
+            full_path = Path(file_path)
+
+        if not full_path.exists():
+            raise ValueError(f"File not found: {file_path}")
+
+        content = full_path.read_bytes()
+        anchors = state.pattern_manager.extract_anchors(content, file_path)
+
+        # filter by anchor types if specified
+        if anchor_types:
+            anchors = [a for a in anchors if a.anchor_type in anchor_types]
+
+        return {
+            "file_path": file_path,
+            "anchors": [
+                AnchorMatchInfo(
+                    anchor_type=a.anchor_type,
+                    line_number=a.line_number,
+                    text=a.text,
+                    pattern=a.pattern,
+                ).model_dump()
+                for a in anchors
+            ],
+            "count": len(anchors),
+        }
+
+    @mcp.tool()
+    def anchor_scan_indexed(
+        key_hash: str | int,
+        anchor_types: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Scan indexed file content for semantic anchors.
+
+        Uses the JIT index to scan already-indexed files.
+
+        Args:
+            key_hash: Key hash of the indexed file
+            anchor_types: Optional list of specific anchor types to scan for
+
+        Returns:
+            Dictionary with file path and list of anchor matches
+        """
+        key = _hex_to_key(key_hash)
+
+        # get file content from blob
+        file_record = state.jit_manager.tracker.get_file_by_key(key)
+        if not file_record:
+            raise ValueError(f"File not found for key: {key_hash}")
+
+        content = state.jit_manager.blob.read(
+            file_record.blob_offset, file_record.blob_length
+        )
+        anchors = state.pattern_manager.extract_anchors(
+            content, file_record.path
+        )
+
+        # filter by anchor types if specified
+        if anchor_types:
+            anchors = [a for a in anchors if a.anchor_type in anchor_types]
+
+        return {
+            "file_path": file_record.path,
+            "key_hash": _key_to_hex(key),
+            "anchors": [
+                AnchorMatchInfo(
+                    anchor_type=a.anchor_type,
+                    line_number=a.line_number,
+                    text=a.text,
+                    pattern=a.pattern,
+                ).model_dump()
+                for a in anchors
+            ],
+            "count": len(anchors),
+        }
+
+    @mcp.tool()
+    def anchor_find_files(
+        anchor_type: str,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Find indexed files containing a specific anchor type.
+
+        Scans all indexed files for the specified anchor type.
+
+        Args:
+            anchor_type: Anchor type to search for (e.g., "anchor:routes")
+            limit: Maximum number of files to return
+
+        Returns:
+            Dictionary with files and their anchor counts
+        """
+        # convert anchor type to pattern ID
+        pattern_id = anchor_type.replace("anchor:", "pat:anchor-")
+        ps = state.pattern_manager.get(pattern_id)
+        if not ps:
+            raise ValueError(f"Unknown anchor type: {anchor_type}")
+
+        results = []
+        for file_record in state.jit_manager.tracker.iter_files():
+            if len(results) >= limit:
+                break
+
+            try:
+                content = state.jit_manager.blob.read(
+                    file_record.blob_offset, file_record.blob_length
+                )
+
+                # check extension filter
+                ext = Path(file_record.path).suffix.lstrip(".").lower()
+                if ps.extensions and ext not in ps.extensions:
+                    continue
+
+                matches = state.pattern_manager.scan(pattern_id, content)
+                if matches:
+                    results.append(
+                        {
+                            "path": file_record.path,
+                            "key_hash": _key_to_hex(file_record.key_hash),
+                            "match_count": len(matches),
+                        }
+                    )
+            except Exception:
+                continue
+
+        # sort by match count descending
+        results.sort(key=lambda x: x["match_count"], reverse=True)
+
+        return {
+            "anchor_type": anchor_type,
+            "files": results,
+            "count": len(results),
+        }
 
     # -----------------------------------------------------------------------
     # Transcript Watcher tools

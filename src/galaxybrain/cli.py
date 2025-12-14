@@ -2043,6 +2043,295 @@ def patterns_scan(ctx: click.Context, pattern_set: str, verbose: bool):
     click.echo(f"\n{total_matches} matches in {files_with_matches} files")
 
 
+# anchors subcommand group
+@cli.group()
+@directory_option()
+@click.pass_context
+def anchors(ctx: click.Context, directory: Path | None):
+    """Scan for semantic anchors (routes, models, schemas, etc.)."""
+    ctx.ensure_object(dict)
+    ctx.obj["directory"] = directory
+
+
+@anchors.command("list")
+@click.pass_context
+def anchors_list(ctx: click.Context):
+    """List available anchor types."""
+    from galaxybrain.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+
+    click.echo(f"{'Type':<25} {'Patterns':>8}  Description")
+    click.echo("-" * 70)
+
+    for pattern_id in ANCHOR_PATTERN_IDS:
+        ps = manager.get(pattern_id)
+        if ps:
+            anchor_type = pattern_id.replace("pat:anchor-", "anchor:")
+            ext_str = f" [{','.join(ps.extensions)}]" if ps.extensions else ""
+            click.echo(
+                f"{anchor_type:<25} {len(ps.patterns):>8}  "
+                f"{ps.description}{ext_str}"
+            )
+
+
+@anchors.command("show")
+@click.argument("anchor_type")
+@click.pass_context
+def anchors_show(ctx: click.Context, anchor_type: str):
+    """Show patterns for an anchor type."""
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    # convert anchor:routes -> pat:anchor-routes
+    if anchor_type.startswith("anchor:"):
+        pattern_id = anchor_type.replace("anchor:", "pat:anchor-")
+    else:
+        pattern_id = f"pat:anchor-{anchor_type}"
+
+    manager = PatternSetManager(data_dir=data_dir)
+    ps = manager.get(pattern_id)
+
+    if not ps:
+        click.echo(f"error: anchor type not found: {anchor_type}", err=True)
+        click.echo("use 'galaxybrain anchors list' to see available types")
+        sys.exit(1)
+
+    click.echo(f"Type:        {anchor_type}")
+    click.echo(f"Description: {ps.description}")
+    exts = ", ".join(ps.extensions) if ps.extensions else "all"
+    click.echo(f"Extensions:  {exts}")
+    tags = ", ".join(ps.tags) if ps.tags else "none"
+    click.echo(f"Tags:        {tags}")
+    click.echo(f"\nPatterns ({len(ps.patterns)}):")
+    for i, p in enumerate(ps.patterns, 1):
+        click.echo(f"  {i:2}. {p}")
+
+
+@anchors.command("scan")
+@click.argument(
+    "file",
+    type=click.Path(exists=True, path_type=Path),
+    required=False,
+)
+@click.option(
+    "-t", "--type", "anchor_types",
+    multiple=True,
+    help="Filter to specific anchor type(s)",
+)
+@click.option("-v", "--verbose", is_flag=True, help="Show matched patterns")
+@click.pass_context
+def anchors_scan(
+    ctx: click.Context,
+    file: Path | None,
+    anchor_types: tuple[str, ...],
+    verbose: bool,
+):
+    """Scan file(s) for semantic anchors.
+
+    If FILE is provided, scans that file. Otherwise scans all indexed files.
+    """
+    from galaxybrain.jit.blob import BlobAppender
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+
+    # convert anchor types to filter list
+    type_filter = list(anchor_types) if anchor_types else None
+    if type_filter:
+        # normalize: routes -> anchor:routes
+        type_filter = [
+            t if t.startswith("anchor:") else f"anchor:{t}"
+            for t in type_filter
+        ]
+
+    if file:
+        # scan single file
+        content = file.read_bytes()
+        anchors_found = manager.extract_anchors(content, str(file))
+
+        if type_filter:
+            anchors_found = [
+                a for a in anchors_found if a.anchor_type in type_filter
+            ]
+
+        if not anchors_found:
+            click.echo(f"no anchors found in {file}")
+            return
+
+        click.echo(f"\n{file}:")
+        for a in anchors_found:
+            if verbose:
+                click.echo(
+                    f"  L{a.line_number:<4} {a.anchor_type:<20} "
+                    f"{a.text[:50]}..."
+                    if len(a.text) > 50
+                    else f"  L{a.line_number:<4} {a.anchor_type:<20} {a.text}"
+                )
+                click.echo(f"         pattern: {a.pattern}")
+            else:
+                text = a.text[:50] + "..." if len(a.text) > 50 else a.text
+                click.echo(
+                    f"  L{a.line_number:<4} {a.anchor_type:<20} {text}"
+                )
+
+        click.echo(f"\n{len(anchors_found)} anchors found")
+
+    else:
+        # scan all indexed files
+        tracker_db = data_dir / "tracker.db"
+        blob_file = data_dir / "blob.dat"
+
+        if not tracker_db.exists() or not blob_file.exists():
+            click.echo("error: no index found", err=True)
+            click.echo("run 'galaxybrain index <directory>' first", err=True)
+            sys.exit(1)
+
+        tracker = FileTracker(tracker_db)
+        blob = BlobAppender(blob_file)
+
+        total_anchors = 0
+        files_with_anchors = 0
+        by_type: dict[str, int] = {}
+
+        for file_record in tracker.iter_files():
+            content = blob.read(
+                file_record.blob_offset, file_record.blob_length
+            )
+            anchors_found = manager.extract_anchors(content, file_record.path)
+
+            if type_filter:
+                anchors_found = [
+                    a for a in anchors_found if a.anchor_type in type_filter
+                ]
+
+            if anchors_found:
+                files_with_anchors += 1
+                total_anchors += len(anchors_found)
+
+                for a in anchors_found:
+                    by_type[a.anchor_type] = by_type.get(a.anchor_type, 0) + 1
+
+                if verbose:
+                    click.echo(f"\n{file_record.path}:")
+                    for a in anchors_found:
+                        txt = a.text[:50]
+                        if len(a.text) > 50:
+                            txt += "..."
+                        click.echo(
+                            f"  L{a.line_number:<4} {a.anchor_type:<20} {txt}"
+                        )
+                else:
+                    n = len(anchors_found)
+                    click.echo(f"{file_record.path}: {n} anchors")
+
+        click.echo(f"\n{total_anchors} anchors in {files_with_anchors} files")
+        if by_type:
+            click.echo("\nBy type:")
+            for atype, count in sorted(
+                by_type.items(), key=lambda x: -x[1]
+            ):
+                click.echo(f"  {atype:<25} {count}")
+
+
+@anchors.command("find")
+@click.argument("anchor_type")
+@click.option("-n", "--limit", default=50, help="Max files to return")
+@click.option("-v", "--verbose", is_flag=True, help="Show anchor details")
+@click.pass_context
+def anchors_find(
+    ctx: click.Context,
+    anchor_type: str,
+    limit: int,
+    verbose: bool,
+):
+    """Find indexed files containing a specific anchor type."""
+    from galaxybrain.jit.blob import BlobAppender
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    # normalize anchor type
+    if not anchor_type.startswith("anchor:"):
+        anchor_type = f"anchor:{anchor_type}"
+
+    pattern_id = anchor_type.replace("anchor:", "pat:anchor-")
+
+    manager = PatternSetManager(data_dir=data_dir)
+    ps = manager.get(pattern_id)
+
+    if not ps:
+        click.echo(f"error: unknown anchor type: {anchor_type}", err=True)
+        click.echo("use 'galaxybrain anchors list' to see available types")
+        sys.exit(1)
+
+    tracker_db = data_dir / "tracker.db"
+    blob_file = data_dir / "blob.dat"
+
+    if not tracker_db.exists() or not blob_file.exists():
+        click.echo("error: no index found", err=True)
+        click.echo("run 'galaxybrain index <directory>' first", err=True)
+        sys.exit(1)
+
+    tracker = FileTracker(tracker_db)
+    blob = BlobAppender(blob_file)
+
+    results: list[tuple[str, int, list]] = []  # (path, count, anchors)
+
+    for file_record in tracker.iter_files():
+        # extension filter
+        ext = Path(file_record.path).suffix.lstrip(".").lower()
+        if ps.extensions and ext not in ps.extensions:
+            continue
+
+        content = blob.read(file_record.blob_offset, file_record.blob_length)
+        anchors_found = manager.extract_anchors(content, file_record.path)
+        anchors_found = [
+            a for a in anchors_found if a.anchor_type == anchor_type
+        ]
+
+        if anchors_found:
+            results.append(
+                (file_record.path, len(anchors_found), anchors_found)
+            )
+
+        if len(results) >= limit:
+            break
+
+    # sort by count descending
+    results.sort(key=lambda x: -x[1])
+
+    if not results:
+        click.echo(f"no files found with {anchor_type}")
+        return
+
+    click.echo(f"Files with {anchor_type}:\n")
+
+    for path, count, file_anchors in results:
+        click.echo(f"{path}: {count}")
+        if verbose:
+            for a in file_anchors[:5]:  # show first 5
+                text = a.text[:60] + "..." if len(a.text) > 60 else a.text
+                click.echo(f"    L{a.line_number}: {text}")
+            if len(file_anchors) > 5:
+                click.echo(f"    ... and {len(file_anchors) - 5} more")
+
+    click.echo(f"\n{len(results)} files found")
+
+
 # shell completion command
 @cli.command("completion")
 @click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))
