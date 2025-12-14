@@ -1,5 +1,6 @@
 import ast
 import re
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -124,7 +125,11 @@ class FileScanner:
     def _scan_python(self, content: str, metadata: FileMetadata) -> None:
         """Extract symbols from Python code."""
         try:
-            tree = ast.parse(content)
+            # suppress SyntaxWarnings from user code (deprecated escape
+            # sequences, etc.) - only syntax errors matter for parsing
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=SyntaxWarning)
+                tree = ast.parse(content, filename=str(metadata.path))
         except SyntaxError:
             return
 

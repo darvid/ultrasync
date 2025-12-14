@@ -50,6 +50,28 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
 )
 
 
+def compact_path(full_path: str, root: Path) -> str:
+    """Compact a file path for display.
+
+    Makes path relative to root. If > 3 segments, shows
+    last 2 directories + filename with ellipsis prefix.
+
+    Examples:
+        src/foo.py -> src/foo.py
+        src/galaxybrain/jit/tracker.py -> .../jit/tracker.py
+        a/b/c/d/e/f.py -> .../e/f.py
+    """
+    try:
+        rel = Path(full_path).relative_to(root)
+        parts = rel.parts
+    except ValueError:
+        parts = Path(full_path).parts
+
+    if len(parts) <= 3:
+        return "/".join(parts)
+    return ".../" + "/".join(parts[-3:])
+
+
 def _build_line_starts(lines: list[bytes]) -> list[int]:
     """Build line offset table for byte content."""
     line_starts = [0]
@@ -1555,30 +1577,33 @@ def keys(
 
         if files:
             table = Table(title=f"Files ({len(files)})", show_lines=True)
-            table.add_column("", width=1)
-            table.add_column("Key", style="blue", overflow="fold")
+            table.add_column("V", width=1, justify="center")
+            table.add_column("Path", style="blue", overflow="fold")
             table.add_column("Contexts", style="cyan", overflow="fold")
             for f in files:
                 embed = "[green]✓[/]" if f["embedded"] else "[red]✗[/]"
                 ctx_str = ", ".join(f.get("contexts", [])) or "-"
-                table.add_row(embed, f["key"], ctx_str)
+                display_path = compact_path(f["path"], root)
+                table.add_row(embed, display_path, ctx_str)
             rich_console.print(table)
             rich_console.print()
 
         if symbols_list:
             table = Table(title=f"Symbols ({len(symbols_list)})")
-            table.add_column("", width=1)
-            table.add_column("Key", style="blue", no_wrap=True, max_width=60)
+            table.add_column("V", width=1, justify="center")
+            table.add_column("Symbol", style="blue", overflow="fold")
             table.add_column("Kind", style="magenta")
             for s in symbols_list:
                 embed = "[green]✓[/]" if s["embedded"] else "[red]✗[/]"
-                table.add_row(embed, s["key"], s["kind"])
+                display_path = compact_path(s["path"], root)
+                display_sym = f"{display_path}#{s['name']}"
+                table.add_row(embed, display_sym, s["kind"])
             rich_console.print(table)
             rich_console.print()
 
         if memories:
             table = Table(title=f"Memories ({len(memories)})")
-            table.add_column("", width=1)
+            table.add_column("V", width=1, justify="center")
             table.add_column("ID", style="blue")
             table.add_column("Task", style="cyan")
             table.add_column("Text", max_width=40)
@@ -1593,6 +1618,10 @@ def keys(
             rich_console.print(table)
             rich_console.print()
 
+        rich_console.print(
+            "[dim]V = vector embedding "
+            "([green]✓[/] computed, [red]✗[/] pending)[/]"
+        )
         rich_console.print(
             Panel(f"[bold]Total: {len(results)} keys[/]", border_style="dim")
         )
@@ -1611,7 +1640,8 @@ def keys(
             click.echo("=" * 60)
             for f in files:
                 embed_mark = "✓" if f["embedded"] else "✗"
-                click.echo(f"[{embed_mark}] {f['key']}")
+                display_path = compact_path(f["path"], root)
+                click.echo(f"[{embed_mark}] {display_path}")
                 if f.get("contexts"):
                     click.echo(f"      contexts: {', '.join(f['contexts'])}")
 
@@ -1621,7 +1651,9 @@ def keys(
             click.echo("=" * 60)
             for s in symbols_list:
                 embed_mark = "✓" if s["embedded"] else "✗"
-                click.echo(f"[{embed_mark}] {s['key']}")
+                display_path = compact_path(s["path"], root)
+                display_sym = f"{display_path}#{s['name']}"
+                click.echo(f"[{embed_mark}] {display_sym}")
 
         if memories:
             click.echo(f"\n{'=' * 60}")
