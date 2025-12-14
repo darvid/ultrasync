@@ -515,10 +515,10 @@ class PatternSetManager:
                     r"class\s+\w+\s*\(\s*DeclarativeBase\s*\)",
                     r"@dataclass",
                     r"class\s+\w+\s*\(\s*BaseModel\s*\)",  # Pydantic as model
-                    # SQLAlchemy
-                    r"Column\s*\(",
-                    r"relationship\s*\(",
-                    r"ForeignKey\s*\(",
+                    # SQLAlchemy (both Column and db.Column)
+                    r"(?:db\.)?Column\s*\(",
+                    r"(?:db\.)?relationship\s*\(",
+                    r"(?:db\.)?ForeignKey\s*\(",
                     r"__tablename__\s*=",
                     # Drizzle ORM - table definitions
                     r"pgTable\s*\(\s*['\"]",

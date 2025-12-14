@@ -520,41 +520,46 @@ DRIZZLE_FIELD_PATTERNS = [
     ),
 ]
 
-# SQLAlchemy field patterns
+# SQLAlchemy field patterns (supports both Column and db.Column)
 SQLALCHEMY_FIELD_PATTERNS = [
-    # id = Column(Integer, primary_key=True)
+    # id = Column(Integer, primary_key=True) or db.Column(db.Integer, ...)
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*Integer.*primary_key\s*=\s*True",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Integer.*primary_key\s*=\s*True",
         lambda m: FieldDef(name=m.group(1), type="integer", primary=True),
     ),
-    # name = Column(String(100))
+    # name = Column(String(100)) or db.Column(db.String(100))
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*String",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?String",
         lambda m: FieldDef(name=m.group(1), type="string"),
     ),
-    # content = Column(Text)
+    # content = Column(Text) or db.Column(db.Text())
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*Text\s*[,\)]",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Text",
         lambda m: FieldDef(name=m.group(1), type="text"),
     ),
-    # count = Column(Integer)
+    # count = Column(Integer) or db.Column(db.Integer)
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*Integer\s*[,\)]",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Integer\s*[,\)]",
         lambda m: FieldDef(name=m.group(1), type="integer"),
     ),
-    # is_active = Column(Boolean)
+    # is_active = Column(Boolean) or db.Column(db.Boolean)
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*Boolean",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Boolean",
         lambda m: FieldDef(name=m.group(1), type="boolean"),
     ),
-    # created_at = Column(DateTime)
+    # created_at = Column(DateTime) or db.Column(db.DateTime)
     (
-        r"(\w+)\s*=\s*Column\s*\(\s*DateTime",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?DateTime",
         lambda m: FieldDef(name=m.group(1), type="datetime"),
     ),
-    # user_id = Column(Integer, ForeignKey("users.id"))
+    # Enum columns: level = db.Column(db.Enum(NotificationLevel), ...)
     (
-        r"(\w+)\s*=\s*Column\s*\([^)]*ForeignKey\s*\(\s*['\"](\w+)\.(\w+)['\"]",
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Enum\s*\(\s*(\w+)\s*\)",
+        lambda m: FieldDef(name=m.group(1), type=f"enum:{m.group(2)}"),
+    ),
+    # user_id = Column(Integer, ForeignKey("users.id")) or db.Column(..., db.ForeignKey(...))
+    (
+        r"(\w+)\s*=\s*(?:db\.)?Column\s*\([^)]*(?:db\.)?ForeignKey\s*\(\s*['\"](\w+)\.(\w+)['\"]",
         lambda m: FieldDef(
             name=m.group(1),
             type="integer",
