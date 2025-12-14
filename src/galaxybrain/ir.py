@@ -687,6 +687,26 @@ ROUTE_PATTERNS = [
         r"@app\.route\s*\(\s*['\"]([^'\"]+)['\"]",
         lambda m, _: ("GET", m.group(1)),
     ),
+    # Flask blueprint: @bp.route('/path', methods=['GET']) or @blueprint.route
+    (
+        r"@\w+\.route\s*\(\s*['\"]([^'\"]+)['\"].*methods\s*=\s*[\[\(]['\"](\w+)",
+        lambda m, _: (m.group(2).upper(), m.group(1)),
+    ),
+    # Flask blueprint simple: @bp.route('/path')
+    (
+        r"@\w+\.route\s*\(\s*['\"]([^'\"]+)['\"]",
+        lambda m, _: ("GET", m.group(1)),
+    ),
+    # Flask add_url_rule: blueprint.add_url_rule('/path', ..., methods=('GET',))
+    (
+        r"\.add_url_rule\s*\(\s*['\"]([^'\"]+)['\"].*methods\s*=\s*[\[\(]['\"]?(\w+)",
+        lambda m, _: (m.group(2).upper(), m.group(1)),
+    ),
+    # Flask add_url_rule simple (defaults to GET)
+    (
+        r"\.add_url_rule\s*\(\s*['\"]([^'\"]+)['\"]",
+        lambda m, _: ("GET", m.group(1)),
+    ),
 ]
 
 
@@ -978,7 +998,7 @@ class RouteExtractor:
 
     def __init__(self):
         self.compiled_patterns = [
-            (re.compile(p, re.MULTILINE | re.IGNORECASE), fn)
+            (re.compile(p, re.MULTILINE | re.IGNORECASE | re.DOTALL), fn)
             for p, fn in ROUTE_PATTERNS
         ]
 
@@ -992,9 +1012,15 @@ class RouteExtractor:
         # Infer path from file path for Next.js App Router
         inferred_path = self._infer_path_from_file(file_path)
 
-        # Try to extract method and path from anchor text
+        # Get context: anchor line + next few lines (for multiline patterns)
+        lines = file_content.split("\n")
+        start_idx = anchor.line_number - 1
+        end_idx = min(start_idx + 5, len(lines))  # up to 5 lines of context
+        context = "\n".join(lines[start_idx:end_idx])
+
+        # Try to extract method and path from context (handles multiline)
         for pattern, extract_fn in self.compiled_patterns:
-            match = pattern.search(anchor.text)
+            match = pattern.search(context)
             if match:
                 try:
                     method, path = extract_fn(match, inferred_path)

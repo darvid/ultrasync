@@ -1,4 +1,3 @@
-
 from collections.abc import Buffer
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +11,16 @@ if TYPE_CHECKING:
 
 # Common file extension groups for pattern filtering
 JS_EXTENSIONS = [
-    "js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "vue", "svelte",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "mjs",
+    "cjs",
+    "mts",
+    "cts",
+    "vue",
+    "svelte",
 ]
 PY_EXTENSIONS = ["py", "pyi", "pyw"]
 MARKUP_EXTENSIONS = ["html", "htm", "xml", "xhtml"]
@@ -461,6 +469,12 @@ class PatternSetManager:
                     # Python - Flask/FastAPI/Django
                     r"@app\.(get|post|put|delete|patch|route)\s*\(",
                     r"@router\.(get|post|put|delete|patch)\s*\(",
+                    # Flask blueprints - @bp.route, @blueprint.route, etc.
+                    r"@\w+\.route\s*\(\s*['\"]",
+                    # Flask add_url_rule (explicit route registration)
+                    r"\.add_url_rule\s*\(\s*['\"]",
+                    # Flask MethodView class-based views
+                    r"class\s+\w+\s*\(\s*\w*\.?MethodView\s*\)",
                     r"@(Get|Post|Put|Delete|Patch)Mapping",
                     r"path\s*\(\s*['\"]",
                     r"url\s*\(\s*r?['\"]",
