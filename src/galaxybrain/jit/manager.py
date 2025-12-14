@@ -1474,9 +1474,18 @@ class JITIndexManager:
         entries = []
 
         for file_record in self.tracker.iter_files():
+            # try cache first, then load from persistent store
             vec = self.vector_cache.get(file_record.key_hash)
+            if vec is None and file_record.vector_offset is not None:
+                vec = self.vector_store.read(
+                    file_record.vector_offset,
+                    file_record.vector_length or 0,
+                )
+                if vec is not None:
+                    self.vector_cache.put(file_record.key_hash, vec)
+
             if vec is None:
-                continue  # skip files without cached vectors
+                continue  # skip files without vectors
 
             path = Path(file_record.path)
             try:
@@ -1488,7 +1497,16 @@ class JITIndexManager:
             symbols = self.tracker.get_symbols(path)
             symbol_info = []
             for sym in symbols:
+                # try cache first, then load from persistent store
                 sym_vec = self.vector_cache.get(sym.key_hash)
+                if sym_vec is None and sym.vector_offset is not None:
+                    sym_vec = self.vector_store.read(
+                        sym.vector_offset,
+                        sym.vector_length or 0,
+                    )
+                    if sym_vec is not None:
+                        self.vector_cache.put(sym.key_hash, sym_vec)
+
                 symbol_info.append(
                     {
                         "name": sym.name,

@@ -11,18 +11,20 @@ from typing import TYPE_CHECKING, cast
 import click
 
 from galaxybrain import console
-from galaxybrain.call_graph import CallGraph, build_call_graph
+from galaxybrain.call_graph import (
+    CallGraph,
+    build_call_graph,
+    compute_content_hash,
+)
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.jit.manager import JITIndexManager
 from galaxybrain.jit.search import search
 from galaxybrain.jit.tracker import FileTracker, SymbolRecord
 from galaxybrain.keys import hash64
 from galaxybrain.taxonomy import (
-    DEFAULT_TAXONOMY,
     Classifier,
     CodebaseIR,
     EmbeddingCache,
-    TaxonomyRefiner,
 )
 from galaxybrain_index import ThreadIndex
 
@@ -903,121 +905,6 @@ def delete(
 @cli.command()
 @directory_option()
 @model_option()
-@click.option("-o", "--output", help="Output JSON file for IR")
-@click.option(
-    "-t", "--taxonomy", "taxonomy_file", help="Custom taxonomy JSON file"
-)
-@click.option(
-    "--threshold",
-    type=float,
-    default=0.7,
-    help="Minimum score for category assignment",
-)
-@click.option(
-    "--max-categories", type=int, default=3, help="Max categories per file"
-)
-@click.option("--files-only", is_flag=True, help="Skip symbol classification")
-@click.option(
-    "-v", "--verbose", is_flag=True, help="Show detailed file breakdown"
-)
-def classify(
-    directory: Path | None,
-    model: str,
-    output: str | None,
-    taxonomy_file: str | None,
-    threshold: float,
-    max_categories: int,
-    files_only: bool,
-    verbose: bool,
-):
-    """Classify files/symbols into taxonomy categories."""
-    EmbeddingProvider = _get_embedder_class()
-
-    root = directory.resolve() if directory else Path.cwd()
-    data_dir = root / DEFAULT_DATA_DIR
-
-    if not data_dir.exists():
-        click.echo(f"error: no index found at {data_dir}", err=True)
-        click.echo("run 'galaxybrain index <directory>' first", err=True)
-        sys.exit(1)
-
-    click.echo(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
-
-    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
-    entries = manager.export_entries_for_taxonomy(root)
-
-    if not entries:
-        click.echo("index is empty (no vectors cached)")
-        return
-
-    # use custom taxonomy if provided
-    taxonomy = DEFAULT_TAXONOMY
-    if taxonomy_file:
-        taxonomy_path = Path(taxonomy_file)
-        if not taxonomy_path.exists():
-            click.echo(f"error: taxonomy file not found: {taxonomy_path}")
-            sys.exit(1)
-        with open(taxonomy_path) as f:
-            taxonomy = json.load(f)
-
-    click.echo(f"classifying {len(entries)} files...")
-    classifier = Classifier(
-        embedder,
-        taxonomy=taxonomy,
-        threshold=threshold,
-        max_categories=max_categories,
-    )
-
-    ir = classifier.classify_entries(
-        entries,
-        include_symbols=not files_only,
-    )
-    ir.root = str(root)
-
-    if output:
-        with open(output, "w") as f:
-            json.dump(ir.to_dict(), f, indent=2)
-        click.echo(f"wrote IR to {output}")
-    else:
-        click.echo("\nCATEGORIES:\n")
-        for cat, files in sorted(ir.category_index.items()):
-            if files:
-                click.echo(f"  {cat} ({len(files)} files):")
-                for f in files[:5]:
-                    click.echo(f"    - {f}")
-                if len(files) > 5:
-                    click.echo(f"    ... and {len(files) - 5} more")
-                click.echo()
-
-        if verbose:
-            click.echo(f"{'=' * 70}")
-            click.echo("FILE DETAILS:\n")
-            for file_ir in ir.files:
-                cats = ", ".join(file_ir.categories) or "(none)"
-                click.echo(f"{file_ir.path_rel}")
-                click.echo(f"  categories: {cats}")
-                click.echo(f"  key: 0x{file_ir.key_hash:016x}")
-                if file_ir.symbols and not files_only:
-                    click.echo(f"  symbols ({len(file_ir.symbols)}):")
-                    for sym in file_ir.symbols[:10]:
-                        sym_cats = ", ".join(sym.top_categories) or "-"
-                        key_str = (
-                            f" [0x{sym.key_hash:016x}]" if sym.key_hash else ""
-                        )
-                        click.echo(
-                            f"    {sym.kind} {sym.name}: {sym_cats}{key_str}"
-                        )
-                    if len(file_ir.symbols) > 10:
-                        click.echo(
-                            f"    ... and {len(file_ir.symbols) - 10} more"
-                        )
-                click.echo()
-
-
-@cli.command()
-@directory_option()
-@model_option()
 @click.option("-o", "--output", help="Output file (JSON, DOT, or Mermaid)")
 @click.option(
     "-f",
@@ -1035,6 +922,7 @@ def classify(
 )
 @click.option("-s", "--symbol", help="Show details for specific symbol")
 @click.option("-v", "--verbose", is_flag=True, help="Show call site context")
+@click.option("--rebuild", is_flag=True, help="Force rebuild (ignore cache)")
 def callgraph(
     directory: Path | None,
     model: str,
@@ -1043,6 +931,7 @@ def callgraph(
     min_calls: int,
     symbol: str | None,
     verbose: bool,
+    rebuild: bool,
 ):
     """Build call graph from classification + hyperscan."""
     EmbeddingProvider = _get_embedder_class()
@@ -1059,27 +948,47 @@ def callgraph(
     embedder = EmbeddingProvider(model=model)
 
     manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
-    entries = manager.export_entries_for_taxonomy(root)
 
-    if not entries:
-        click.echo("index is empty (no vectors cached)")
-        return
+    # check for cached call graph
+    cache_path = data_dir / "callgraph.json"
+    current_hash = compute_content_hash(manager.tracker)
+    graph: CallGraph | None = None
+    pattern_stats = None
 
-    click.echo(f"classifying {len(entries)} files...")
-    classifier = Classifier(embedder, threshold=0.6)
-    ir = classifier.classify_entries(entries, include_symbols=True)
-    ir.root = str(root)
+    if not rebuild and cache_path.exists():
+        cached = CallGraph.load(cache_path)
+        if cached and cached.content_hash == current_hash:
+            graph = cached
+            click.echo(f"loaded cached call graph ({len(graph.nodes)} symbols)")
 
-    click.echo("building call graph...")
-    t0 = time.perf_counter()
-    graph, pattern_stats = build_call_graph(ir, root)
-    t_build = time.perf_counter() - t0
+    if graph is None:
+        entries = manager.export_entries_for_taxonomy(root)
 
-    stats = graph.to_dict()["stats"]
-    click.echo(f"\ncall graph built in {t_build * 1000:.0f}ms:")
-    click.echo(f"  symbols: {stats['total_symbols']}")
-    click.echo(f"  edges:   {stats['total_edges']}")
-    click.echo(f"  calls:   {stats['total_call_sites']}")
+        if not entries:
+            click.echo("index is empty (no vectors cached)")
+            return
+
+        click.echo(f"classifying {len(entries)} files...")
+        classifier = Classifier(embedder, threshold=0.6)
+        ir = classifier.classify_entries(entries, include_symbols=True)
+        ir.root = str(root)
+
+        click.echo("building call graph...")
+        t0 = time.perf_counter()
+        graph, pattern_stats = build_call_graph(
+            ir, root, content_hash=current_hash
+        )
+        t_build = time.perf_counter() - t0
+
+        # save to cache
+        graph.save(cache_path)
+        click.echo(f"cached call graph to {cache_path.name}")
+
+        stats = graph.to_summary_dict()["stats"]
+        click.echo(f"\ncall graph built in {t_build * 1000:.0f}ms:")
+        click.echo(f"  symbols: {stats['total_symbols']}")
+        click.echo(f"  edges:   {stats['total_edges']}")
+        click.echo(f"  calls:   {stats['total_call_sites']}")
 
     if verbose and pattern_stats:
         click.echo(
@@ -1163,113 +1072,6 @@ def callgraph(
 @cli.command()
 @directory_option()
 @model_option()
-@click.option("-o", "--output", help="Output JSON file for full results")
-@click.option(
-    "-n", "--iterations", type=int, default=5, help="Max refinement iterations"
-)
-@click.option(
-    "--threshold", type=float, default=0.7, help="Classification threshold"
-)
-@click.option(
-    "--split-threshold",
-    type=int,
-    default=20,
-    help="Split categories with > N items",
-)
-@click.option(
-    "--min-cluster", type=int, default=3, help="Min items for new category"
-)
-@click.option("--files-only", is_flag=True, help="Skip symbol classification")
-def refine(
-    directory: Path | None,
-    model: str,
-    output: str | None,
-    iterations: int,
-    threshold: float,
-    split_threshold: int,
-    min_cluster: int,
-    files_only: bool,
-):
-    """Iteratively refine taxonomy classification."""
-    EmbeddingProvider = _get_embedder_class()
-
-    root = directory.resolve() if directory else Path.cwd()
-    data_dir = root / DEFAULT_DATA_DIR
-
-    if not data_dir.exists():
-        click.echo(f"error: no index found at {data_dir}", err=True)
-        click.echo("run 'galaxybrain index <directory>' first", err=True)
-        sys.exit(1)
-
-    click.echo(f"loading model ({model})...")
-    embedder = EmbeddingProvider(model=model)
-
-    manager = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
-    entries = manager.export_entries_for_taxonomy(root)
-
-    if not entries:
-        click.echo("index is empty (no vectors cached)")
-        return
-
-    click.echo(f"running {iterations} refinement iterations...")
-    refiner = TaxonomyRefiner(
-        embedder,
-        threshold=threshold,
-        split_threshold=split_threshold,
-        min_cluster_size=min_cluster,
-    )
-
-    result = refiner.refine(
-        entries,
-        n_iterations=iterations,
-        include_symbols=not files_only,
-    )
-
-    n_ran = len(result.iterations)
-    converged = n_ran < iterations
-    status = f"converged after {n_ran}" if converged else f"ran {n_ran}"
-
-    click.echo(f"\n{'=' * 70}")
-    click.echo(f"REFINEMENT COMPLETE ({status} iterations)")
-    click.echo(f"{'=' * 70}\n")
-
-    for it in result.iterations:
-        click.echo(f"iteration {it.iteration}:")
-        m = it.metrics
-        cov, conf, n = m["coverage"], m["avg_confidence"], m["n_categories"]
-        click.echo(f"  coverage={cov:.0%} confidence={conf:.3f} categories={n}")
-        if it.new_categories:
-            click.echo(f"  + new: {', '.join(it.new_categories)}")
-        if it.split_categories:
-            for old, news in it.split_categories:
-                click.echo(f"  ~ split {old} -> {', '.join(news)}")
-        if it.merged_categories:
-            for olds, new in it.merged_categories:
-                click.echo(f"  ~ merge {', '.join(olds)} -> {new}")
-        click.echo()
-
-    click.echo(f"FINAL TAXONOMY ({len(result.final_taxonomy)} categories):\n")
-    for cat, query_str in sorted(result.final_taxonomy.items()):
-        q = query_str[:50] + "..." if len(query_str) > 50 else query_str
-        click.echo(f"  {cat}: {q}")
-
-    click.echo("\nCATEGORY SIZES:\n")
-    sorted_cats = sorted(
-        result.final_ir.category_index.items(), key=lambda x: -len(x[1])
-    )
-    for cat, files in sorted_cats:
-        if files:
-            click.echo(f"  {cat}: {len(files)} files")
-
-    if output:
-        with open(output, "w") as f:
-            json.dump(result.to_dict(), f, indent=2)
-        click.echo(f"\nwrote full results to {output}")
-
-
-@cli.command()
-@directory_option()
-@model_option()
 @click.option(
     "--no-classify",
     is_flag=True,
@@ -1316,16 +1118,36 @@ def voyager(directory: Path | None, model: str, no_classify: bool):
         )
 
         if not no_classify:
-            entries = manager.export_entries_for_taxonomy(root_path)
-            if entries:
-                click.echo("classifying files...")
-                classifier = Classifier(embedder, threshold=0.6)
-                ir = classifier.classify_entries(entries, include_symbols=True)
-                ir.root = str(root_path)
+            # try to load cached call graph
+            cache_path = data_dir / "callgraph.json"
+            current_hash = compute_content_hash(manager.tracker)
 
-                click.echo("building call graph...")
-                graph, _ = build_call_graph(ir, root_path)
-                click.echo(f"call graph: {len(graph.nodes)} symbols")
+            if cache_path.exists():
+                cached = CallGraph.load(cache_path)
+                if cached and cached.content_hash == current_hash:
+                    graph = cached
+                    click.echo(
+                        f"loaded cached call graph ({len(graph.nodes)} symbols)"
+                    )
+
+            # build if no cache or stale
+            if graph is None:
+                entries = manager.export_entries_for_taxonomy(root_path)
+                if entries:
+                    click.echo("classifying files...")
+                    classifier = Classifier(embedder, threshold=0.6)
+                    ir = classifier.classify_entries(
+                        entries, include_symbols=True
+                    )
+                    ir.root = str(root_path)
+
+                    click.echo("building call graph...")
+                    graph, _ = build_call_graph(
+                        ir, root_path, content_hash=current_hash
+                    )
+                    graph.save(cache_path)
+                    n = len(graph.nodes)
+                    click.echo(f"call graph: {n} symbols (cached)")
 
     click.echo("launching voyager TUI...")
     run_voyager(root_path=root_path, manager=manager, graph=graph, ir=ir)

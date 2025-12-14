@@ -466,9 +466,6 @@ class CallGraphTable(DataTable):
 
         rows: list[tuple[str, str, str, int, int, str]] = []
         for node in graph.nodes.values():
-            callers = graph.get_callers(node.name)
-            callees = graph.get_callees(node.name)
-
             file_display = node.defined_in or "?"
             if len(file_display) > 30:
                 file_display = "..." + file_display[-27:]
@@ -478,8 +475,8 @@ class CallGraphTable(DataTable):
                     node.name,
                     node.kind,
                     file_display,
-                    len(callees),
-                    len(callers),
+                    node.call_count,  # total call sites
+                    len(node.callers),  # unique caller files
                     node.name,
                 )
             )
@@ -1025,9 +1022,7 @@ class VoyagerApp(App[None]):
             self._selected_context = ctx
             self._selected_context_file = None
             files = self._context_files.get(ctx, [])
-            files_table = self.query_one(
-                "#context-files", ContextFilesTable
-            )
+            files_table = self.query_one("#context-files", ContextFilesTable)
             files_table.load_files(files, self.root_path)
             # clear symbols panel and focus files table
             symbols_table = self.query_one(
@@ -1050,9 +1045,7 @@ class VoyagerApp(App[None]):
                             file_path = path
                             break
                 if file_path:
-                    symbols = self._manager.tracker.get_symbols(
-                        Path(file_path)
-                    )
+                    symbols = self._manager.tracker.get_symbols(Path(file_path))
                     symbols_table = self.query_one(
                         "#context-symbols", ContextSymbolsTable
                     )
@@ -1113,9 +1106,7 @@ class VoyagerApp(App[None]):
                             file_path = path
                             break
                 if file_path:
-                    symbols = self._manager.tracker.get_symbols(
-                        Path(file_path)
-                    )
+                    symbols = self._manager.tracker.get_symbols(Path(file_path))
                     symbols_table = self.query_one(
                         "#context-symbols", ContextSymbolsTable
                     )

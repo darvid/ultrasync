@@ -1,13 +1,19 @@
 """Call graph construction using classification IR + hyperscan bulk matching."""
 
+from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.taxonomy import CodebaseIR, FileIR, SymbolClassification
+
+if TYPE_CHECKING:
+    from galaxybrain.jit.tracker import FileTracker
 
 
 @dataclass
@@ -19,6 +25,25 @@ class CallSite:
     callee_kind: str  # function, class, const, etc.
     line: int  # line number in caller
     context: str  # surrounding text snippet
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "caller_path": self.caller_path,
+            "callee_symbol": self.callee_symbol,
+            "callee_kind": self.callee_kind,
+            "line": self.line,
+            "context": self.context,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CallSite:
+        return cls(
+            caller_path=data["caller_path"],
+            callee_symbol=data["callee_symbol"],
+            callee_kind=data["callee_kind"],
+            line=data["line"],
+            context=data["context"],
+        )
 
 
 @dataclass
@@ -42,6 +67,31 @@ class SymbolNode:
     def call_count(self) -> int:
         return len(self.call_sites)
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "defined_in": self.defined_in,
+            "definition_line": self.definition_line,
+            "categories": self.categories,
+            "key_hash": self.key_hash,
+            "call_sites": [cs.to_dict() for cs in self.call_sites],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SymbolNode:
+        return cls(
+            name=data["name"],
+            kind=data["kind"],
+            defined_in=data["defined_in"],
+            definition_line=data["definition_line"],
+            categories=data["categories"],
+            key_hash=data["key_hash"],
+            call_sites=[
+                CallSite.from_dict(cs) for cs in data.get("call_sites", [])
+            ],
+        )
+
 
 @dataclass
 class CallGraph:
@@ -52,6 +102,7 @@ class CallGraph:
     edges: list[tuple[str, str, str]] = field(
         default_factory=list
     )  # (caller_file, callee_sym, callee_file)
+    content_hash: str = ""  # hash of source files for cache invalidation
 
     def add_node(self, node: SymbolNode) -> None:
         self.nodes[node.name] = node
@@ -71,6 +122,18 @@ class CallGraph:
         return [sym for caller, sym, _ in self.edges if caller == file_path]
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize to dict for JSON persistence."""
+        return {
+            "root": self.root,
+            "content_hash": self.content_hash,
+            "nodes": {
+                name: node.to_dict() for name, node in self.nodes.items()
+            },
+            "edges": self.edges,
+        }
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """Serialize to dict with summary stats (no call_sites for display)."""
         return {
             "root": self.root,
             "nodes": {
@@ -95,6 +158,36 @@ class CallGraph:
                 ),
             },
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CallGraph:
+        """Deserialize from dict."""
+        graph = cls(
+            root=data["root"],
+            content_hash=data.get("content_hash", ""),
+        )
+        for name, node_data in data.get("nodes", {}).items():
+            graph.nodes[name] = SymbolNode.from_dict(node_data)
+        graph.edges = [tuple(e) for e in data.get("edges", [])]
+        return graph
+
+    def save(self, path: Path) -> None:
+        """Save call graph to JSON file."""
+        path.write_text(json.dumps(self.to_dict(), indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> CallGraph | None:
+        """Load call graph from JSON file.
+
+        Returns None if file doesn't exist or is invalid.
+        """
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+            return cls.from_dict(data)
+        except (json.JSONDecodeError, KeyError):
+            return None
 
     def to_dot(
         self,
@@ -521,6 +614,7 @@ def build_call_graph(
     ir: CodebaseIR,
     root: Path,
     file_contents: dict[str, bytes] | None = None,
+    content_hash: str = "",
 ) -> tuple[CallGraph, PatternStats | None]:
     """Convenience function to build a call graph from classification IR.
 
@@ -528,10 +622,28 @@ def build_call_graph(
         ir: Classification IR from Classifier.classify_entries()
         root: Root path of the codebase
         file_contents: Optional pre-loaded file contents
+        content_hash: Hash for cache invalidation
 
     Returns:
         Tuple of (CallGraph, PatternStats) - stats may be None if no patterns
     """
     builder = CallGraphBuilder(ir, root, file_contents)
     graph = builder.build()
+    graph.content_hash = content_hash
     return graph, builder.pattern_stats
+
+
+def compute_content_hash(tracker: FileTracker) -> str:
+    """Compute a hash of all file content hashes for cache invalidation.
+
+    Args:
+        tracker: FileTracker with indexed files
+
+    Returns:
+        Hex digest of combined content hashes
+    """
+    h = hashlib.sha256()
+    for file_record in sorted(tracker.iter_files(), key=lambda f: f.path):
+        h.update(file_record.path.encode())
+        h.update(file_record.content_hash.encode())
+    return h.hexdigest()[:16]  # first 16 chars is enough

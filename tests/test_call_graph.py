@@ -127,7 +127,7 @@ class TestCallGraph:
         graph.add_node(node)
         graph.add_edge("src/main.py", "func", "src/mod.py")
 
-        result = graph.to_dict()
+        result = graph.to_summary_dict()
         assert result["root"] == "/project"
         assert "func" in result["nodes"]
         assert result["nodes"]["func"]["name"] == "func"
