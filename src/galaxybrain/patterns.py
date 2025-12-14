@@ -10,6 +10,13 @@ if TYPE_CHECKING:
     from galaxybrain.jit.blob import BlobAppender
     from galaxybrain.jit.tracker import FileTracker
 
+# Common file extension groups for pattern filtering
+JS_EXTENSIONS = [
+    "js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "vue", "svelte",
+]
+PY_EXTENSIONS = ["py", "pyi", "pyw"]
+MARKUP_EXTENSIONS = ["html", "htm", "xml", "xhtml"]
+
 # Context detection pattern set IDs - used for AOT context classification
 CONTEXT_PATTERN_IDS = [
     "pat:ctx-auth",
@@ -48,6 +55,7 @@ class PatternSet:
     patterns: list[str]
     tags: list[str]
     compiled_db: hyperscan.Database | None = None
+    extensions: list[str] | None = None  # e.g., ["js", "ts"] - None = all files
 
 
 @dataclass
@@ -195,6 +203,7 @@ class PatternSetManager:
                     r"Svelte",
                 ],
                 "tags": ["context", "frontend"],
+                "extensions": JS_EXTENSIONS,
             }
         )
 
@@ -222,6 +231,7 @@ class PatternSetManager:
                     r"headlessui",
                 ],
                 "tags": ["context", "ui"],
+                "extensions": JS_EXTENSIONS,
             }
         )
 
@@ -248,6 +258,7 @@ class PatternSetManager:
                     r"tRPC",
                 ],
                 "tags": ["context", "backend"],
+                "extensions": JS_EXTENSIONS + PY_EXTENSIONS,
             }
         )
 
@@ -275,6 +286,7 @@ class PatternSetManager:
                     r"app/api/",
                 ],
                 "tags": ["context", "api"],
+                "extensions": JS_EXTENSIONS + PY_EXTENSIONS,
             }
         )
 
@@ -608,6 +620,7 @@ class PatternSetManager:
             patterns=definition["patterns"],
             tags=definition.get("tags", []),
             compiled_db=None,
+            extensions=definition.get("extensions"),
         )
         ps.compiled_db = self._compile_hyperscan(ps.patterns)
         self.pattern_sets[ps.id] = ps
@@ -634,6 +647,7 @@ class PatternSetManager:
                 "description": ps.description,
                 "pattern_count": len(ps.patterns),
                 "tags": ps.tags,
+                "extensions": ps.extensions,
             }
             for ps in self.pattern_sets.values()
         ]
@@ -717,6 +731,7 @@ class PatternSetManager:
     def detect_contexts(
         self,
         data: Buffer,
+        file_path: str | Path | None = None,
         min_matches: int = 2,
     ) -> list[str]:
         """Detect context types from file content using pattern matching.
@@ -726,6 +741,7 @@ class PatternSetManager:
 
         Args:
             data: File content to scan
+            file_path: Optional file path for extension-based filtering
             min_matches: Minimum pattern matches required to assign a context
 
         Returns:
@@ -734,9 +750,18 @@ class PatternSetManager:
         """
         detected: list[str] = []
 
+        # Extract file extension (without dot, lowercased)
+        ext = None
+        if file_path:
+            ext = Path(file_path).suffix.lstrip(".").lower()
+
         for pattern_id in CONTEXT_PATTERN_IDS:
             ps = self.pattern_sets.get(pattern_id)
             if not ps or not ps.compiled_db:
+                continue
+
+            # Skip if pattern set has extension filter that doesn't match
+            if ps.extensions and ext and ext not in ps.extensions:
                 continue
 
             try:

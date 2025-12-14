@@ -224,7 +224,7 @@ class JITIndexManager:
         t_blob = time.perf_counter()
 
         # Detect contexts using pattern matching (no LLM required)
-        detected_contexts = self.pattern_manager.detect_contexts(content)
+        detected_contexts = self.pattern_manager.detect_contexts(content, path)
         t_ctx = time.perf_counter()
 
         path_rel = str(path)
@@ -460,7 +460,7 @@ class JITIndexManager:
         blob_entry = self.blob.append(content)
 
         # Detect contexts using pattern matching (no LLM required)
-        detected_contexts = self.pattern_manager.detect_contexts(content)
+        detected_contexts = self.pattern_manager.detect_contexts(content, path)
 
         path_rel = str(path)
         file_key = hash64_file_key(path_rel)
@@ -852,7 +852,7 @@ class JITIndexManager:
 
                 # Detect contexts via pattern matching (no LLM)
                 detected_contexts = self.pattern_manager.detect_contexts(
-                    content
+                    content, file_path
                 )
 
                 self.tracker.upsert_file(
