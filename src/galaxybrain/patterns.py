@@ -365,24 +365,26 @@ class PatternSetManager:
             }
         )
 
-        # Billing/Payment
+        # Billing/Payment - tighter patterns to avoid false positives
         self.load(
             {
                 "id": "pat:ctx-billing",
                 "description": "Detect billing/payment code",
                 "patterns": [
-                    r"[Ss]tripe",
-                    r"[Pp]ayment",
-                    r"[Ss]ubscription",
-                    r"[Ii]nvoice",
-                    r"[Cc]heckout",
-                    r"[Bb]illing",
-                    r"price_",
-                    r"customer_",
-                    r"PayPal",
-                    r"Braintree",
+                    r"stripe\.(customers|charges|subscriptions|invoices)",
+                    r"Stripe::",
+                    r"from\s+['\"]stripe['\"]",
+                    r"import\s+stripe",
+                    r"PaymentIntent",
                     r"createCheckoutSession",
                     r"webhookSecret",
+                    r"price_id",
+                    r"subscription_id",
+                    r"customer_id",
+                    r"PayPal",
+                    r"Braintree",
+                    r"BillingPortal",
+                    r"handleWebhook",
                 ],
                 "tags": ["context", "billing"],
             }

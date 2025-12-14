@@ -144,6 +144,11 @@ def cli():
     is_flag=True,
     help="Compute embeddings upfront (slow, enables immediate search)",
 )
+@click.option(
+    "--nuke",
+    is_flag=True,
+    help="Delete existing index and start fresh",
+)
 def index(
     directory: Path,
     model: str,
@@ -151,12 +156,19 @@ def index(
     mode: str,
     no_resume: bool,
     embed: bool,
+    nuke: bool,
 ):
     """Index a directory (writes to .galaxybrain/)."""
     import asyncio
+    import shutil
 
     root = directory.resolve()
     data_dir = root / DEFAULT_DATA_DIR
+
+    if nuke and data_dir.exists():
+        console.warning(f"nuking existing index at {data_dir}...")
+        shutil.rmtree(data_dir)
+        console.success("index destroyed")
 
     # only load embedding model if we're actually embedding
     if embed:
@@ -188,22 +200,7 @@ def index(
             pass
         return manager.get_stats()
 
-    stats = asyncio.run(run_index())
-
-    action = "indexed" if embed else "registered"
-    console.header("indexing complete")
-    console.success(
-        f"{action} {stats.file_count} files, {stats.symbol_count} symbols"
-    )
-    console.key_value("blob", f"{stats.blob_size_bytes / 1024 / 1024:.2f} MB")
-    console.key_value("vectors", f"{stats.vector_cache_count} cached")
-    if stats.aot_index_count > 0:
-        console.key_value(
-            "AOT index",
-            f"{stats.aot_index_count} entries "
-            f"({stats.aot_index_size_bytes / 1024:.1f} KB)",
-        )
-    console.key_value("data", str(data_dir))
+    asyncio.run(run_index())
 
 
 @cli.command()
@@ -1273,7 +1270,12 @@ def refine(
 @cli.command()
 @directory_option()
 @model_option()
-def voyager(directory: Path | None, model: str):
+@click.option(
+    "--no-classify",
+    is_flag=True,
+    help="Skip taxonomy classification (faster startup)",
+)
+def voyager(directory: Path | None, model: str, no_classify: bool):
     """Interactive TUI explorer (requires galaxybrain[voyager])."""
     try:
         from galaxybrain.voyager import check_textual_available, run_voyager
@@ -1293,6 +1295,7 @@ def voyager(directory: Path | None, model: str):
         click.echo(f"error: {root_path} is not a directory", err=True)
         sys.exit(1)
 
+    manager = None
     graph = None
     ir = None
 
@@ -1305,23 +1308,27 @@ def voyager(directory: Path | None, model: str):
         manager = JITIndexManager(
             data_dir=data_dir, embedding_provider=embedder
         )
-        entries = manager.export_entries_for_taxonomy(root_path)
 
-        if entries:
-            click.echo("classifying files...")
-            classifier = Classifier(embedder, threshold=0.6)
-            ir = classifier.classify_entries(entries, include_symbols=True)
-            ir.root = str(root_path)
+        stats = manager.get_stats()
+        click.echo(
+            f"loaded index: {stats.file_count} files, "
+            f"{stats.symbol_count} symbols"
+        )
 
-            click.echo("building call graph...")
-            graph, _ = build_call_graph(ir, root_path)
-            click.echo(
-                f"loaded {len(entries)} files, "
-                f"{len(graph.nodes)} symbols in call graph"
-            )
+        if not no_classify:
+            entries = manager.export_entries_for_taxonomy(root_path)
+            if entries:
+                click.echo("classifying files...")
+                classifier = Classifier(embedder, threshold=0.6)
+                ir = classifier.classify_entries(entries, include_symbols=True)
+                ir.root = str(root_path)
+
+                click.echo("building call graph...")
+                graph, _ = build_call_graph(ir, root_path)
+                click.echo(f"call graph: {len(graph.nodes)} symbols")
 
     click.echo("launching voyager TUI...")
-    run_voyager(root_path=root_path, graph=graph, ir=ir)
+    run_voyager(root_path=root_path, manager=manager, graph=graph, ir=ir)
 
 
 @cli.command()
