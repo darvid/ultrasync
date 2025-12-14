@@ -214,6 +214,10 @@ def index(
 
     resume = mode == "jit" and not no_resume
 
+    import time
+
+    start_time = time.perf_counter()
+
     async def run_index():
         async for _progress in manager.full_index(
             root,
@@ -225,6 +229,9 @@ def index(
         return manager.get_stats()
 
     asyncio.run(run_index())
+
+    elapsed = time.perf_counter() - start_time
+    console.success(f"indexing complete in {elapsed:.2f}s")
 
 
 @cli.command()
@@ -2359,6 +2366,7 @@ def ir_extract(
 ):
     """Extract full App IR from codebase."""
     import json
+    import time
 
     import yaml
 
@@ -2370,6 +2378,7 @@ def ir_extract(
     data_dir = root / DEFAULT_DATA_DIR
 
     console.info(f"Extracting App IR from {root}...")
+    start_time = time.perf_counter()
 
     manager = PatternSetManager(data_dir=data_dir)
     extractor = AppIRExtractor(root, pattern_manager=manager)
@@ -2409,11 +2418,14 @@ def ir_extract(
     else:  # summary
         result = _format_ir_summary(app_ir)
 
+    elapsed = time.perf_counter() - start_time
+
     if output:
         Path(output).write_text(result)
-        click.echo(f"Written to {output}", err=True)
+        console.success(f"written to {output} in {elapsed:.2f}s")
     else:
         click.echo(result)
+        console.success(f"extraction complete in {elapsed:.2f}s")
 
 
 @ir.command("entities")
