@@ -1400,6 +1400,7 @@ class AppIRExtractor:
         self,
         trace_flows: bool = True,
         skip_tests: bool = True,
+        relative_paths: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> AppIR:
         """Extract full App IR from the codebase.
@@ -1407,6 +1408,7 @@ class AppIRExtractor:
         Args:
             trace_flows: If True and call graph available, trace flows
             skip_tests: If True, skip test files from extraction
+            relative_paths: If True, use relative paths in source refs
             progress_callback: Optional callback(current, total, file) for
                                progress updates during file extraction
         """
@@ -1414,6 +1416,7 @@ class AppIRExtractor:
         logger.debug("starting IR extraction", root=str(self.root))
 
         self._skip_tests = skip_tests
+        self._relative_paths = relative_paths
         ir = AppIR()
 
         # Phase 1: Detect metadata
@@ -1502,6 +1505,15 @@ class AppIRExtractor:
             or ".spec." in path_str
             or "/__tests__/" in path_str
         )
+
+    def _format_path(self, path: Path) -> str:
+        """Format a path for source references."""
+        if self._relative_paths:
+            try:
+                return str(path.relative_to(self.root))
+            except ValueError:
+                return str(path)
+        return str(path)
 
     def _collect_source_files(
         self,
@@ -1716,6 +1728,7 @@ class AppIRExtractor:
                 )
 
             # Extract entities from model/schema anchors
+            formatted_path = self._format_path(file_path)
             for anchor in anchors:
                 if anchor.anchor_type in model_schema_types:
                     stats["entity_anchors"] += 1
@@ -1723,7 +1736,7 @@ class AppIRExtractor:
                         anchor, content
                     )
                     if entity:
-                        entity.source = f"{file_path}:{anchor.line_number}"
+                        entity.source = f"{formatted_path}:{anchor.line_number}"
                         if entity.name not in entity_names_seen:
                             entity_names_seen.add(entity.name)
                             entities.append(entity)
@@ -1733,7 +1746,7 @@ class AppIRExtractor:
                 if anchor.anchor_type == "anchor:routes":
                     stats["route_anchors"] += 1
                     endpoint = self.route_extractor.extract_from_anchor(
-                        anchor, str(file_path), content
+                        anchor, formatted_path, content
                     )
                     if endpoint:
                         endpoint.business_rules = self.rule_extractor.extract(

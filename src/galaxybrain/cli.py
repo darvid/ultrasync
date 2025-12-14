@@ -2357,12 +2357,18 @@ def ir(ctx: click.Context, directory: Path | None):
 )
 @click.option("-o", "--output", type=click.Path(), help="Output file")
 @click.option("--include-tests", is_flag=True, help="Include test files")
+@click.option(
+    "--relative-paths/--absolute-paths",
+    default=True,
+    help="Use relative paths in source references (default: relative)",
+)
 @click.pass_context
 def ir_extract(
     ctx: click.Context,
     output_format: str,
     output: str | None,
     include_tests: bool,
+    relative_paths: bool,
 ):
     """Extract full App IR from codebase."""
     import json
@@ -2403,7 +2409,9 @@ def ir_extract(
             progress.set_description(f"Scanning: {display}")
 
         app_ir = extractor.extract(
-            skip_tests=not include_tests, progress_callback=on_progress
+            skip_tests=not include_tests,
+            relative_paths=relative_paths,
+            progress_callback=on_progress,
         )
 
     # Format output
