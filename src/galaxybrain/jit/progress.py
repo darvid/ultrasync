@@ -34,9 +34,9 @@ except ImportError:
     RICH_AVAILABLE = False
 
 # Fixed width for description column to prevent bouncing
-DESC_WIDTH = 40
+DESC_WIDTH = 30
 # Fixed panel width for consistent layout
-PANEL_WIDTH = 70
+PANEL_WIDTH = 80
 
 
 class IndexingProgress:
@@ -87,7 +87,7 @@ class IndexingProgress:
                     "[bold blue]{task.description}",
                     table_column=Column(width=DESC_WIDTH, no_wrap=True),
                 ),
-                BarColumn(bar_width=20),
+                BarColumn(bar_width=25),
                 MofNCompleteColumn(),
                 TextColumn("•"),
                 TimeElapsedColumn(),
@@ -119,7 +119,7 @@ class IndexingProgress:
                 border_style="cyan",
             )
 
-        # Always build stats table (may be empty but keeps layout stable)
+        # Build stats table centered below progress
         stats_table = Table.grid(padding=(0, 2))
         stats_table.add_column(justify="left", width=20)
         stats_table.add_column(justify="right", width=15)
@@ -134,11 +134,20 @@ class IndexingProgress:
                 Text(display_val, style="bold"),
             )
 
-        # Add empty row if no stats to maintain height
-        if not self._stats:
-            stats_table.add_row(Text(" ", style="dim"), Text(" "))
+        # Build content with optional stats
+        if self._stats:
+            from rich.align import Align
+            from rich.rule import Rule
 
-        content = Group(self._progress, stats_table)
+            centered_stats = Align.center(stats_table)
+            content = Group(
+                self._progress,
+                Text(""),  # blank line
+                Rule(style="dim"),
+                centered_stats,
+            )
+        else:
+            content = self._progress
 
         return Panel(
             content,
@@ -329,6 +338,8 @@ class IndexingProgress:
             **stats: Stats to display
         """
         if self._use_rich:
+            from rich.align import Align
+
             console = self._console or Console(stderr=True)
             table = Table.grid(padding=(0, 2))
             table.add_column(justify="left", style="dim")
@@ -341,7 +352,14 @@ class IndexingProgress:
                     display_val = str(value)
                 table.add_row(key, display_val)
 
-            console.print(Panel(table, title=f"[bold green]{title}[/]"))
+            centered_table = Align.center(table)
+            console.print(
+                Panel(
+                    centered_table,
+                    title=f"[bold green]{title}[/]",
+                    width=PANEL_WIDTH,
+                )
+            )
         else:
             print(f"\n{title}", file=sys.stderr)
             for key, value in stats.items():
