@@ -2332,6 +2332,238 @@ def anchors_find(
     click.echo(f"\n{len(results)} files found")
 
 
+# ir subcommand group - App IR extraction
+@cli.group()
+@directory_option()
+@click.pass_context
+def ir(ctx: click.Context, directory: Path | None):
+    """Extract stack-agnostic App IR (intermediate representation)."""
+    ctx.ensure_object(dict)
+    ctx.obj["directory"] = directory
+
+
+@ir.command("extract")
+@click.option(
+    "-f", "--format", "output_format",
+    type=click.Choice(["yaml", "json", "summary"]),
+    default="yaml",
+    help="Output format",
+)
+@click.option("-o", "--output", type=click.Path(), help="Output file")
+@click.pass_context
+def ir_extract(
+    ctx: click.Context,
+    output_format: str,
+    output: str | None,
+):
+    """Extract full App IR from codebase."""
+    import json
+
+    import yaml
+
+    from galaxybrain.ir import AppIRExtractor
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    click.echo(f"Extracting App IR from {root}...", err=True)
+
+    manager = PatternSetManager(data_dir=data_dir)
+    extractor = AppIRExtractor(root, pattern_manager=manager)
+    app_ir = extractor.extract()
+
+    ir_dict = app_ir.to_dict()
+
+    # Format output
+    if output_format == "yaml":
+        result = yaml.dump(ir_dict, default_flow_style=False, sort_keys=False)
+    elif output_format == "json":
+        result = json.dumps(ir_dict, indent=2)
+    else:  # summary
+        result = _format_ir_summary(app_ir)
+
+    if output:
+        Path(output).write_text(result)
+        click.echo(f"Written to {output}", err=True)
+    else:
+        click.echo(result)
+
+
+@ir.command("entities")
+@click.option("-v", "--verbose", is_flag=True, help="Show field details")
+@click.pass_context
+def ir_entities(ctx: click.Context, verbose: bool):
+    """Extract entities (models/schemas) only."""
+    from galaxybrain.ir import AppIRExtractor
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+    extractor = AppIRExtractor(root, pattern_manager=manager)
+    app_ir = extractor.extract()
+
+    if not app_ir.entities:
+        click.echo("No entities found")
+        return
+
+    click.echo(f"Found {len(app_ir.entities)} entities:\n")
+
+    for entity in app_ir.entities:
+        click.echo(f"  {entity.name}")
+        click.echo(f"    source: {entity.source}")
+        click.echo(f"    fields: {len(entity.fields)}")
+
+        if verbose:
+            for field in entity.fields:
+                attrs = []
+                if field.primary:
+                    attrs.append("primary")
+                if field.unique:
+                    attrs.append("unique")
+                if field.nullable:
+                    attrs.append("nullable")
+                if field.references:
+                    attrs.append(f"-> {field.references}")
+                attr_str = f" ({', '.join(attrs)})" if attrs else ""
+                click.echo(f"      - {field.name}: {field.type}{attr_str}")
+        click.echo()
+
+
+@ir.command("endpoints")
+@click.option("-v", "--verbose", is_flag=True, help="Show business rules")
+@click.pass_context
+def ir_endpoints(ctx: click.Context, verbose: bool):
+    """Extract API endpoints only."""
+    from galaxybrain.ir import AppIRExtractor
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+    extractor = AppIRExtractor(root, pattern_manager=manager)
+    app_ir = extractor.extract()
+
+    if not app_ir.endpoints:
+        click.echo("No endpoints found")
+        return
+
+    click.echo(f"Found {len(app_ir.endpoints)} endpoints:\n")
+
+    for ep in app_ir.endpoints:
+        click.echo(f"  {ep.method:6} {ep.path}")
+        click.echo(f"         source: {ep.source}")
+
+        if verbose:
+            if ep.business_rules:
+                click.echo("         rules:")
+                for rule in ep.business_rules:
+                    click.echo(f"           - {rule}")
+            if ep.side_effects:
+                click.echo("         side effects:")
+                for effect in ep.side_effects:
+                    click.echo(f"           - {effect.type}: {effect.service}")
+        click.echo()
+
+
+@ir.command("services")
+@click.pass_context
+def ir_services(ctx: click.Context):
+    """Detect external service integrations."""
+    from galaxybrain.ir import AppIRExtractor
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+    extractor = AppIRExtractor(root, pattern_manager=manager)
+    app_ir = extractor.extract()
+
+    if not app_ir.external_services:
+        click.echo("No external services detected")
+        return
+
+    click.echo(f"Detected {len(app_ir.external_services)} external services:\n")
+
+    for svc in app_ir.external_services:
+        click.echo(f"  {svc.name}")
+        click.echo(f"    usage: {', '.join(svc.usage)}")
+        click.echo(f"    found in: {len(svc.sources)} files")
+        for src in svc.sources[:3]:
+            click.echo(f"      - {src}")
+        if len(svc.sources) > 3:
+            click.echo(f"      ... and {len(svc.sources) - 3} more")
+        click.echo()
+
+
+def _format_ir_summary(app_ir) -> str:
+    """Format App IR as markdown summary."""
+    lines = []
+    lines.append("# Application Specification\n")
+
+    # Meta
+    if app_ir.meta.get("detected_stack"):
+        stack = ", ".join(app_ir.meta["detected_stack"])
+        lines.append(f"**Detected Stack**: {stack}\n")
+
+    # Entities
+    if app_ir.entities:
+        lines.append("## Data Model\n")
+        for entity in app_ir.entities:
+            lines.append(f"### {entity.name}")
+            lines.append(f"Source: `{entity.source}`\n")
+            lines.append("| Field | Type | Attributes |")
+            lines.append("|-------|------|------------|")
+            for field in entity.fields:
+                attrs = []
+                if field.primary:
+                    attrs.append("primary")
+                if field.unique:
+                    attrs.append("unique")
+                if field.nullable:
+                    attrs.append("nullable")
+                if field.references:
+                    attrs.append(f"FK → {field.references}")
+                attr_str = ", ".join(attrs) if attrs else "-"
+                lines.append(f"| {field.name} | {field.type} | {attr_str} |")
+            lines.append("")
+
+    # Endpoints
+    if app_ir.endpoints:
+        lines.append("## API Endpoints\n")
+        for ep in app_ir.endpoints:
+            lines.append(f"### {ep.method} {ep.path}")
+            lines.append(f"Source: `{ep.source}`\n")
+            if ep.business_rules:
+                lines.append("**Business Rules**:")
+                for rule in ep.business_rules:
+                    lines.append(f"- {rule}")
+                lines.append("")
+            if ep.side_effects:
+                lines.append("**Side Effects**:")
+                for effect in ep.side_effects:
+                    lines.append(f"- {effect.type}: {effect.service}")
+                lines.append("")
+
+    # External Services
+    if app_ir.external_services:
+        lines.append("## External Services\n")
+        for svc in app_ir.external_services:
+            usage = ", ".join(svc.usage)
+            lines.append(f"- **{svc.name}**: {usage}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # shell completion command
 @cli.command("completion")
 @click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]))

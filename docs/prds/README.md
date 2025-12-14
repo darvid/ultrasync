@@ -73,3 +73,4 @@ Unresolved decisions or areas needing more research.
 |--------|-------|--------|
 | 001 | Patternsets & Memory Ontology | MVP |
 | 002 | Search Feedback Loop | MVP |
+| 003 | App IR Extraction | Draft |
