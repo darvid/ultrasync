@@ -2345,16 +2345,18 @@ def ir(ctx: click.Context, directory: Path | None):
 @ir.command("extract")
 @click.option(
     "-f", "--format", "output_format",
-    type=click.Choice(["yaml", "json", "summary"]),
+    type=click.Choice(["yaml", "json", "markdown", "summary"]),
     default="yaml",
-    help="Output format",
+    help="Output format (markdown is optimized for LLM consumption)",
 )
 @click.option("-o", "--output", type=click.Path(), help="Output file")
+@click.option("--include-tests", is_flag=True, help="Include test files")
 @click.pass_context
 def ir_extract(
     ctx: click.Context,
     output_format: str,
     output: str | None,
+    include_tests: bool,
 ):
     """Extract full App IR from codebase."""
     import json
@@ -2372,15 +2374,19 @@ def ir_extract(
 
     manager = PatternSetManager(data_dir=data_dir)
     extractor = AppIRExtractor(root, pattern_manager=manager)
-    app_ir = extractor.extract()
-
-    ir_dict = app_ir.to_dict()
+    # Try to load call graph for flow tracing
+    extractor.load_call_graph()
+    app_ir = extractor.extract(skip_tests=not include_tests)
 
     # Format output
     if output_format == "yaml":
+        ir_dict = app_ir.to_dict()
         result = yaml.dump(ir_dict, default_flow_style=False, sort_keys=False)
     elif output_format == "json":
+        ir_dict = app_ir.to_dict()
         result = json.dumps(ir_dict, indent=2)
+    elif output_format == "markdown":
+        result = app_ir.to_markdown()
     else:  # summary
         result = _format_ir_summary(app_ir)
 
@@ -2506,11 +2512,12 @@ def ir_services(ctx: click.Context):
 
 @ir.command("flows")
 @click.option("-v", "--verbose", is_flag=True, help="Show all nodes in flow")
-@click.option(
-    "-n", "--limit", default=20, help="Max flows to show"
-)
+@click.option("-n", "--limit", default=20, help="Max flows to show")
+@click.option("--include-tests", is_flag=True, help="Include test files")
 @click.pass_context
-def ir_flows(ctx: click.Context, verbose: bool, limit: int):
+def ir_flows(
+    ctx: click.Context, verbose: bool, limit: int, include_tests: bool
+):
     """Trace feature flows from routes through call graph."""
     from galaxybrain.ir import AppIRExtractor
     from galaxybrain.patterns import PatternSetManager
@@ -2532,7 +2539,7 @@ def ir_flows(ctx: click.Context, verbose: bool, limit: int):
         sys.exit(1)
 
     click.echo("Extracting flows...", err=True)
-    app_ir = extractor.extract(trace_flows=True)
+    app_ir = extractor.extract(trace_flows=True, skip_tests=not include_tests)
 
     if not app_ir.flows:
         click.echo("No flows traced (no endpoints found or no calls)")

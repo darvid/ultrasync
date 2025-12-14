@@ -245,6 +245,174 @@ class AppIR:
             ],
         }
 
+    def to_markdown(self) -> str:
+        """Generate natural language specification in markdown format.
+
+        This format is optimized for LLM consumption during migration tasks.
+        """
+        lines: list[str] = []
+        app_name = self.meta.get("name", "Application")
+        stack = self.meta.get("detected_stack", [])
+
+        # Header
+        lines.append(f"# {app_name} - Application Specification")
+        lines.append("")
+        if stack:
+            lines.append(f"**Stack**: {', '.join(stack)}")
+            lines.append("")
+
+        # Data Model section
+        if self.entities:
+            lines.append("## Data Model")
+            lines.append("")
+            for entity in self.entities:
+                lines.append(f"### {entity.name}")
+                lines.append("")
+                # Fields
+                if entity.fields:
+                    for fld in entity.fields:
+                        attrs = []
+                        if fld.primary:
+                            attrs.append("primary key")
+                        if fld.unique:
+                            attrs.append("unique")
+                        if fld.nullable:
+                            attrs.append("nullable")
+                        if fld.default:
+                            attrs.append(f"default: {fld.default}")
+                        if fld.references:
+                            attrs.append(f"references {fld.references}")
+                        attr_str = f" ({', '.join(attrs)})" if attrs else ""
+                        lines.append(f"- **{fld.name}** ({fld.type}){attr_str}")
+                # Relationships
+                if entity.relationships:
+                    lines.append("")
+                    lines.append("**Relationships:**")
+                    for rel in entity.relationships:
+                        via_str = f" via `{rel.via}`" if rel.via else ""
+                        through_str = (
+                            f" through `{rel.through}`" if rel.through else ""
+                        )
+                        lines.append(
+                            f"- {rel.type.replace('_', ' ')}: {rel.target}"
+                            f"{via_str}{through_str}"
+                        )
+                lines.append("")
+
+        # API Endpoints section
+        if self.endpoints:
+            lines.append("## API Endpoints")
+            lines.append("")
+            for ep in self.endpoints:
+                lines.append(f"### {ep.method} {ep.path}")
+                lines.append("")
+                lines.append(f"*Source: `{ep.source}`*")
+                lines.append("")
+                if ep.auth:
+                    lines.append(f"**Authentication**: {ep.auth}")
+                    lines.append("")
+                if ep.business_rules:
+                    lines.append("**Business Rules:**")
+                    for rule in ep.business_rules:
+                        lines.append(f"- {rule}")
+                    lines.append("")
+                if ep.side_effects:
+                    lines.append("**Side Effects:**")
+                    for effect in ep.side_effects:
+                        effect_desc = effect.type
+                        if effect.service:
+                            effect_desc += f" ({effect.service})"
+                        if effect.action:
+                            effect_desc += f": {effect.action}"
+                        lines.append(f"- {effect_desc}")
+                    lines.append("")
+                if ep.flow:
+                    lines.append("**Flow:**")
+                    lines.append(f"`{' → '.join(ep.flow)}`")
+                    lines.append("")
+
+        # Feature Flows section
+        if self.flows:
+            lines.append("## Feature Flows")
+            lines.append("")
+            for flow in self.flows:
+                lines.append(f"### {flow.method} {flow.path}")
+                lines.append("")
+                lines.append(f"*Entry: `{flow.entry_file}`*")
+                lines.append("")
+                if flow.nodes:
+                    lines.append("**Call chain:**")
+                    lines.append("")
+                    lines.append("```")
+                    for i, node in enumerate(flow.nodes[:10]):  # limit depth
+                        indent = "  " * min(i, 5)
+                        kind_str = f" [{node.kind}]" if node.kind else ""
+                        anchor_str = (
+                            f" ({node.anchor_type})" if node.anchor_type else ""
+                        )
+                        lines.append(
+                            f"{indent}→ {node.symbol}{kind_str}{anchor_str}"
+                        )
+                    if len(flow.nodes) > 10:
+                        lines.append(f"  ... and {len(flow.nodes) - 10} more")
+                    lines.append("```")
+                    lines.append("")
+                if flow.touched_entities:
+                    lines.append(
+                        f"**Entities touched:** "
+                        f"{', '.join(flow.touched_entities)}"
+                    )
+                    lines.append("")
+
+        # Background Jobs section
+        if self.jobs:
+            lines.append("## Background Jobs")
+            lines.append("")
+            for job in self.jobs:
+                lines.append(f"### {job.name}")
+                lines.append("")
+                lines.append(f"*Source: `{job.source}`*")
+                lines.append("")
+                lines.append(f"**Trigger**: {job.trigger}")
+                if job.schedule:
+                    lines.append(f"**Schedule**: `{job.schedule}`")
+                lines.append("")
+                if job.business_rules:
+                    lines.append("**Business Rules:**")
+                    for rule in job.business_rules:
+                        lines.append(f"- {rule}")
+                    lines.append("")
+
+        # External Services section
+        if self.external_services:
+            lines.append("## External Services")
+            lines.append("")
+            for svc in self.external_services:
+                lines.append(f"### {svc.name}")
+                lines.append("")
+                lines.append(f"**Usage:** {svc.usage}")
+                lines.append("")
+                if svc.sources:
+                    lines.append("**Found in:**")
+                    for src in svc.sources[:5]:
+                        lines.append(f"- `{src}`")
+                    if len(svc.sources) > 5:
+                        lines.append(f"- ... and {len(svc.sources) - 5} more")
+                lines.append("")
+
+        # Summary stats
+        lines.append("---")
+        lines.append("")
+        lines.append("## Summary")
+        lines.append("")
+        lines.append(f"- **Entities**: {len(self.entities)}")
+        lines.append(f"- **Endpoints**: {len(self.endpoints)}")
+        lines.append(f"- **Feature flows**: {len(self.flows)}")
+        lines.append(f"- **Background jobs**: {len(self.jobs)}")
+        lines.append(f"- **External services**: {len(self.external_services)}")
+
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Field Extraction Patterns
@@ -703,11 +871,69 @@ class EntityExtractor:
         if not fields:
             return None
 
+        # Detect relationships from foreign key fields
+        relationships = self._detect_relationships(fields, context)
+
         return EntityDef(
             name=name,
             source=f"{anchor.line_number}",
             fields=fields,
+            relationships=relationships,
         )
+
+    def _detect_relationships(
+        self, fields: list[FieldDef], context: str
+    ) -> list[RelationshipDef]:
+        """Detect relationships from field references and patterns."""
+        relationships = []
+        seen_targets = set()
+
+        # Check fields with references (foreign keys)
+        for fld in fields:
+            if fld.references:
+                # Parse Entity.field format
+                parts = fld.references.split(".")
+                target = parts[0] if parts else None
+                if target and target not in seen_targets:
+                    seen_targets.add(target)
+                    relationships.append(
+                        RelationshipDef(
+                            type="belongs_to",
+                            target=target,
+                            via=fld.name,
+                        )
+                    )
+
+        # Look for Prisma/TypeORM relationship decorators
+        # (pattern, rel_type, group_index) - group_index is which capture group
+        # has the target entity name
+        relation_patterns: list[tuple[str, str, int]] = [
+            # Prisma: posts Post[] - group 2 is the type
+            (r"\w+\s+([A-Z]\w+)\[\]", "has_many", 1),
+            # Prisma: author User @relation - group 2 is the type
+            (r"\w+\s+([A-Z]\w+)\s+@relation", "belongs_to", 1),
+            # TypeORM: @OneToMany(() => Post, ...) - handle arrow function
+            (r"@OneToMany\s*\(\s*\(\)\s*=>\s*(\w+)", "has_many", 1),
+            # TypeORM: @ManyToOne(() => User, ...)
+            (r"@ManyToOne\s*\(\s*\(\)\s*=>\s*(\w+)", "belongs_to", 1),
+            # TypeORM: @ManyToMany(() => Tag, ...)
+            (r"@ManyToMany\s*\(\s*\(\)\s*=>\s*(\w+)", "many_to_many", 1),
+            # SQLAlchemy: relationship("Post", ...)
+            (r'relationship\s*\(\s*["\'](\w+)["\']', "has_many", 1),
+        ]
+
+        for pattern, rel_type, group_idx in relation_patterns:
+            for match in re.finditer(pattern, context):
+                target = match.group(group_idx)
+                # Convert to PascalCase for entity names
+                target = target[0].upper() + target[1:] if target else target
+                if target and target not in seen_targets:
+                    seen_targets.add(target)
+                    relationships.append(
+                        RelationshipDef(type=rel_type, target=target)
+                    )
+
+        return relationships
 
     def _extract_entity_name(self, text: str) -> str | None:
         """Extract entity name from anchor text."""
@@ -988,6 +1214,10 @@ class FlowTracer:
                 return "anchor:handlers"
             if any("repo" in c or "dao" in c for c in cat_lower):
                 return "anchor:repositories"
+            if any("model" in c for c in cat_lower):
+                return "anchor:models"
+            if any("schema" in c for c in cat_lower):
+                return "anchor:schemas"
 
         # Infer from naming conventions
         name_lower = node.name.lower()
@@ -999,6 +1229,35 @@ class FlowTracer:
             return "anchor:repositories"
         if "middleware" in name_lower:
             return "anchor:middleware"
+        if "schema" in name_lower or "validator" in name_lower:
+            return "anchor:schemas"
+        if "model" in name_lower or "entity" in name_lower:
+            return "anchor:models"
+        if "provider" in name_lower:
+            return "anchor:services"
+        if "manager" in name_lower:
+            return "anchor:services"
+        if "client" in name_lower:
+            return "anchor:services"
+        if "api" in name_lower:
+            return "anchor:handlers"
+
+        # Infer from file path
+        file_lower = node.defined_in.lower()
+        if "/services/" in file_lower or "/service/" in file_lower:
+            return "anchor:services"
+        if "/handlers/" in file_lower or "/controllers/" in file_lower:
+            return "anchor:handlers"
+        if "/repositories/" in file_lower or "/repos/" in file_lower:
+            return "anchor:repositories"
+        if "/models/" in file_lower or "/entities/" in file_lower:
+            return "anchor:models"
+        if "/schemas/" in file_lower or "/validators/" in file_lower:
+            return "anchor:schemas"
+        if "/middleware/" in file_lower:
+            return "anchor:middleware"
+        if "/api/" in file_lower or "/routes/" in file_lower:
+            return "anchor:handlers"
 
         return None
 
@@ -1048,13 +1307,20 @@ class AppIRExtractor:
         self.route_extractor = RouteExtractor()
         self.rule_extractor = BusinessRuleExtractor()
         self.effect_extractor = SideEffectExtractor()
+        self._skip_tests = True  # default to skipping test files
 
-    def extract(self, trace_flows: bool = True) -> AppIR:
+    def extract(
+        self,
+        trace_flows: bool = True,
+        skip_tests: bool = True,
+    ) -> AppIR:
         """Extract full App IR from the codebase.
 
         Args:
             trace_flows: If True and call graph available, trace flows
+            skip_tests: If True, skip test files from extraction
         """
+        self._skip_tests = skip_tests
         ir = AppIR()
         ir.meta = self._detect_meta()
 
@@ -1092,6 +1358,20 @@ class AppIRExtractor:
             self.call_graph = CallGraph.load(cg_path)
             return self.call_graph is not None
         return False
+
+    def _is_test_file(self, path: str | Path) -> bool:
+        """Check if a file path is a test file."""
+        path_str = str(path).lower()
+        return (
+            "/test" in path_str
+            or "/tests/" in path_str
+            or "test_" in path_str
+            or "_test." in path_str
+            or ".test." in path_str
+            or "/spec/" in path_str
+            or ".spec." in path_str
+            or "/__tests__/" in path_str
+        )
 
     def _detect_meta(self) -> dict:
         """Detect application metadata."""
@@ -1148,6 +1428,9 @@ class AppIRExtractor:
                 continue
             if ".git" in str(file_path):
                 continue
+            # Skip test files if configured
+            if self._skip_tests and self._is_test_file(file_path):
+                continue
 
             try:
                 content = file_path.read_text(errors="replace")
@@ -1190,6 +1473,9 @@ class AppIRExtractor:
             if ".venv" in str(file_path) or "venv" in str(file_path):
                 continue
             if ".git" in str(file_path):
+                continue
+            # Skip test files if configured
+            if self._skip_tests and self._is_test_file(file_path):
                 continue
 
             try:
