@@ -2122,7 +2122,9 @@ def anchors_show(ctx: click.Context, anchor_type: str):
     required=False,
 )
 @click.option(
-    "-t", "--type", "anchor_types",
+    "-t",
+    "--type",
+    "anchor_types",
     multiple=True,
     help="Filter to specific anchor type(s)",
 )
@@ -2152,8 +2154,7 @@ def anchors_scan(
     if type_filter:
         # normalize: routes -> anchor:routes
         type_filter = [
-            t if t.startswith("anchor:") else f"anchor:{t}"
-            for t in type_filter
+            t if t.startswith("anchor:") else f"anchor:{t}" for t in type_filter
         ]
 
     if file:
@@ -2182,9 +2183,7 @@ def anchors_scan(
                 click.echo(f"         pattern: {a.pattern}")
             else:
                 text = a.text[:50] + "..." if len(a.text) > 50 else a.text
-                click.echo(
-                    f"  L{a.line_number:<4} {a.anchor_type:<20} {text}"
-                )
+                click.echo(f"  L{a.line_number:<4} {a.anchor_type:<20} {text}")
 
         click.echo(f"\n{len(anchors_found)} anchors found")
 
@@ -2239,9 +2238,7 @@ def anchors_scan(
         click.echo(f"\n{total_anchors} anchors in {files_with_anchors} files")
         if by_type:
             click.echo("\nBy type:")
-            for atype, count in sorted(
-                by_type.items(), key=lambda x: -x[1]
-            ):
+            for atype, count in sorted(by_type.items(), key=lambda x: -x[1]):
                 click.echo(f"  {atype:<25} {count}")
 
 
@@ -2344,7 +2341,9 @@ def ir(ctx: click.Context, directory: Path | None):
 
 @ir.command("extract")
 @click.option(
-    "-f", "--format", "output_format",
+    "-f",
+    "--format",
+    "output_format",
     type=click.Choice(["yaml", "json", "markdown", "summary"]),
     default="yaml",
     help="Output format (markdown is optimized for LLM consumption)",
@@ -2370,13 +2369,33 @@ def ir_extract(
     root = root.resolve() if root else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
 
-    click.echo(f"Extracting App IR from {root}...", err=True)
+    console.info(f"Extracting App IR from {root}...")
 
     manager = PatternSetManager(data_dir=data_dir)
     extractor = AppIRExtractor(root, pattern_manager=manager)
     # Try to load call graph for flow tracing
     extractor.load_call_graph()
-    app_ir = extractor.extract(skip_tests=not include_tests)
+
+    # Use rich progress bar for file extraction
+    with console.progress_bar(
+        "Scanning files", total=None, transient=False
+    ) as progress:
+        total_set = False
+
+        def on_progress(current: int, total: int, file: str) -> None:
+            nonlocal total_set
+            # Set total on first callback (we don't know count upfront)
+            if not total_set:
+                progress.set_total(total)
+                total_set = True
+            progress.update(advance=1)
+            # Truncate long paths for display
+            display = file if len(file) < 50 else "..." + file[-47:]
+            progress.set_description(f"Scanning: {display}")
+
+        app_ir = extractor.extract(
+            skip_tests=not include_tests, progress_callback=on_progress
+        )
 
     # Format output
     if output_format == "yaml":

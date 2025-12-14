@@ -6,14 +6,25 @@ into a portable format suitable for migration or LLM consumption.
 
 from __future__ import annotations
 
+import os
 import re
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 if TYPE_CHECKING:
     from galaxybrain.call_graph import CallGraph
     from galaxybrain.patterns import AnchorMatch, PatternSetManager
+
+# Type for progress callback: (current, total, current_file) -> None
+ProgressCallback = Callable[[int, int, str], None]
 
 
 # ---------------------------------------------------------------------------
@@ -1111,7 +1122,6 @@ class FlowTracer:
         entity_names: list[str] | None = None,
         root: Path | None = None,
     ):
-
         self.call_graph: CallGraph = call_graph
         self.pattern_manager = pattern_manager
         self.entity_names = set(entity_names or [])
@@ -1140,6 +1150,8 @@ class FlowTracer:
 
         BFS through the call graph to find all reachable symbols.
         """
+        t0 = time.perf_counter()
+
         # Normalize to relative path for call graph lookup
         norm_path = self._normalize_path(file_path)
 
@@ -1153,13 +1165,21 @@ class FlowTracer:
         # Get all symbols called from this file
         callees = self.call_graph.get_callees(norm_path)
         if not callees:
+            logger.debug(
+                "flow trace empty - no callees",
+                file=norm_path,
+                method=method,
+                path=path,
+            )
             return flow
 
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(sym, 0) for sym in callees]
         max_depth_reached = 0
+        bfs_iterations = 0
 
         while queue:
+            bfs_iterations += 1
             symbol, depth = queue.pop(0)
 
             if symbol in visited or depth > max_depth:
@@ -1201,6 +1221,22 @@ class FlowTracer:
                     queue.append((callee, depth + 1))
 
         flow.depth = max_depth_reached
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+        # Only log if it took a while or found interesting results
+        if elapsed_ms > 10 or len(flow.nodes) > 20:
+            logger.debug(
+                "flow trace complete",
+                file=norm_path,
+                method=method,
+                path=path,
+                elapsed_ms=elapsed_ms,
+                bfs_iterations=bfs_iterations,
+                nodes_found=len(flow.nodes),
+                max_depth=max_depth_reached,
+                entities_touched=len(flow.touched_entities),
+            )
+
         return flow
 
     def _classify_symbol(self, node) -> str | None:
@@ -1267,7 +1303,17 @@ class FlowTracer:
         max_depth: int = 10,
     ) -> list[FeatureFlow]:
         """Trace flows for all endpoints."""
+        t0 = time.perf_counter()
+        logger.debug(
+            "tracing all routes",
+            endpoint_count=len(endpoints),
+            max_depth=max_depth,
+            call_graph_nodes=len(self.call_graph.nodes),
+        )
+
         flows = []
+        empty_count = 0
+
         for ep in endpoints:
             # Extract file path from source
             source_parts = ep.source.split(":")
@@ -1282,6 +1328,21 @@ class FlowTracer:
                 )
                 if flow.nodes:
                     flows.append(flow)
+                else:
+                    empty_count += 1
+
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        total_nodes = sum(len(f.nodes) for f in flows)
+        logger.debug(
+            "route tracing complete",
+            elapsed_ms=elapsed_ms,
+            flows_with_nodes=len(flows),
+            empty_flows=empty_count,
+            total_nodes_traced=total_nodes,
+            avg_nodes_per_flow=(
+                round(total_nodes / len(flows), 1) if flows else 0
+            ),
+        )
 
         return flows
 
@@ -1313,24 +1374,47 @@ class AppIRExtractor:
         self,
         trace_flows: bool = True,
         skip_tests: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> AppIR:
         """Extract full App IR from the codebase.
 
         Args:
             trace_flows: If True and call graph available, trace flows
             skip_tests: If True, skip test files from extraction
+            progress_callback: Optional callback(current, total, file) for
+                               progress updates during file extraction
         """
+        total_start = time.perf_counter()
+        logger.debug("starting IR extraction", root=str(self.root))
+
         self._skip_tests = skip_tests
         ir = AppIR()
+
+        # Phase 1: Detect metadata
+        t0 = time.perf_counter()
         ir.meta = self._detect_meta()
+        logger.debug(
+            "phase 1/5 meta detection",
+            elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            detected_stack=ir.meta.get("detected_stack", []),
+        )
 
-        # Extract entities
-        ir.entities = self._extract_entities()
+        # Phase 2: Single-pass extraction (entities, endpoints, services)
+        # Reads each file only once instead of 3x
+        t0 = time.perf_counter()
+        ir.entities, ir.endpoints, ir.external_services = (
+            self._extract_all_single_pass(progress_callback=progress_callback)
+        )
+        logger.debug(
+            "phase 2/4 single-pass extraction",
+            elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+            entity_count=len(ir.entities),
+            endpoint_count=len(ir.endpoints),
+            service_count=len(ir.external_services),
+        )
 
-        # Extract endpoints
-        ir.endpoints = self._extract_endpoints()
-
-        # Trace flows if call graph is available
+        # Phase 3: Trace flows if call graph is available
+        t0 = time.perf_counter()
         if trace_flows and self.call_graph and ir.endpoints:
             entity_names = [e.name for e in ir.entities]
             tracer = FlowTracer(
@@ -1340,9 +1424,29 @@ class AppIRExtractor:
                 self.root,
             )
             ir.flows = tracer.trace_all_routes(ir.endpoints)
+            logger.debug(
+                "phase 3/4 flow tracing",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+                flow_count=len(ir.flows),
+            )
+        else:
+            logger.debug(
+                "phase 3/4 flow tracing skipped",
+                trace_flows=trace_flows,
+                has_call_graph=self.call_graph is not None,
+                endpoint_count=len(ir.endpoints),
+            )
 
-        # Detect external services
-        ir.external_services = self._detect_external_services()
+        logger.debug(
+            "IR extraction complete",
+            total_elapsed_ms=(
+                round((time.perf_counter() - total_start) * 1000, 1)
+            ),
+            entity_count=len(ir.entities),
+            endpoint_count=len(ir.endpoints),
+            flow_count=len(ir.flows),
+            service_count=len(ir.external_services),
+        )
 
         return ir
 
@@ -1373,6 +1477,79 @@ class AppIRExtractor:
             or "/__tests__/" in path_str
         )
 
+    def _collect_source_files(
+        self,
+        extensions: set[str] | None = None,
+    ) -> list[Path]:
+        """Collect and filter source files once for all extraction phases.
+
+        Uses `git ls-files` to respect .gitignore automatically. Falls back
+        to rglob if not in a git repo.
+        """
+        from galaxybrain.git import get_tracked_files
+
+        if extensions is None:
+            extensions = {".py", ".ts", ".tsx", ".js", ".jsx", ".prisma"}
+
+        t0 = time.perf_counter()
+        stats: dict = {"method": "git", "test_file": 0, "included": 0}
+
+        # Try git ls-files first (respects .gitignore)
+        git_files = get_tracked_files(self.root, extensions)
+        if git_files is not None:
+            source_files = []
+            for file_path in git_files:
+                if self._skip_tests and self._is_test_file(file_path):
+                    stats["test_file"] += 1
+                    continue
+                stats["included"] += 1
+                source_files.append(file_path)
+
+            elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+            logger.debug(
+                "file collection complete",
+                elapsed_ms=elapsed_ms,
+                git_files=len(git_files),
+                source_files=len(source_files),
+                **stats,
+            )
+            return source_files
+
+        # Fallback: rglob with manual filtering
+        stats["method"] = "rglob"
+        source_files = []
+        all_entries = list(self.root.rglob("*"))
+
+        for entry in all_entries:
+            if not entry.is_file():
+                continue
+            if entry.suffix not in extensions:
+                continue
+            path_str = str(entry)
+            # Manual exclusions when git not available
+            if any(
+                x in path_str
+                for x in ["node_modules", ".venv", "/venv/", "/.git/"]
+            ):
+                continue
+            if self._skip_tests and self._is_test_file(entry):
+                stats["test_file"] += 1
+                continue
+
+            stats["included"] += 1
+            source_files.append(entry)
+
+        elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+        logger.debug(
+            "file collection complete (fallback)",
+            elapsed_ms=elapsed_ms,
+            total_entries=len(all_entries),
+            source_files=len(source_files),
+            **stats,
+        )
+
+        return source_files
+
     def _detect_meta(self) -> dict:
         """Detect application metadata."""
         meta = {
@@ -1402,147 +1579,164 @@ class AppIRExtractor:
 
         return meta
 
-    def _extract_entities(self) -> list[EntityDef]:
-        """Extract entities from model/schema files."""
-        entities = []
+    def _extract_all_single_pass(
+        self,
+        progress_callback: ProgressCallback | None = None,
+    ) -> tuple[list[EntityDef], list[EndpointDef], list[ExternalService]]:
+        """Extract entities, endpoints, and services in a single file pass.
 
-        if not self.pattern_manager:
-            return entities
+        This reads each source file exactly once, extracting all IR components
+        together. Uses parallel I/O for file reads, then serial processing
+        for pattern matching (Hyperscan scratch is not thread-safe).
 
-        # Scan for model and schema anchors
-        for file_path in self.root.rglob("*"):
-            if not file_path.is_file():
-                continue
-            if file_path.suffix not in [
-                ".py",
-                ".ts",
-                ".tsx",
-                ".js",
-                ".jsx",
-                ".prisma",
-            ]:
-                continue
-            if "node_modules" in str(file_path):
-                continue
-            if ".venv" in str(file_path) or "venv" in str(file_path):
-                continue
-            if ".git" in str(file_path):
-                continue
-            # Skip test files if configured
-            if self._skip_tests and self._is_test_file(file_path):
-                continue
-
-            try:
-                content = file_path.read_text(errors="replace")
-                anchors = self.pattern_manager.extract_anchors(
-                    content, str(file_path)
-                )
-
-                for anchor in anchors:
-                    if anchor.anchor_type in [
-                        "anchor:models",
-                        "anchor:schemas",
-                    ]:
-                        entity = self.entity_extractor.extract_from_anchor(
-                            anchor, content
-                        )
-                        if entity:
-                            entity.source = f"{file_path}:{anchor.line_number}"
-                            # Dedupe by name
-                            if entity.name not in [e.name for e in entities]:
-                                entities.append(entity)
-            except Exception:
-                continue
-
-        return entities
-
-    def _extract_endpoints(self) -> list[EndpointDef]:
-        """Extract endpoints from route files."""
-        endpoints = []
-
-        if not self.pattern_manager:
-            return endpoints
-
-        for file_path in self.root.rglob("*"):
-            if not file_path.is_file():
-                continue
-            if file_path.suffix not in [".py", ".ts", ".tsx", ".js", ".jsx"]:
-                continue
-            if "node_modules" in str(file_path):
-                continue
-            if ".venv" in str(file_path) or "venv" in str(file_path):
-                continue
-            if ".git" in str(file_path):
-                continue
-            # Skip test files if configured
-            if self._skip_tests and self._is_test_file(file_path):
-                continue
-
-            try:
-                content = file_path.read_text(errors="replace")
-                anchors = self.pattern_manager.extract_anchors(
-                    content, str(file_path)
-                )
-
-                for anchor in anchors:
-                    if anchor.anchor_type == "anchor:routes":
-                        endpoint = self.route_extractor.extract_from_anchor(
-                            anchor, str(file_path), content
-                        )
-                        if endpoint:
-                            # Extract business rules from file
-                            endpoint.business_rules = (
-                                self.rule_extractor.extract(content)
-                            )
-                            # Extract side effects
-                            endpoint.side_effects = (
-                                self.effect_extractor.extract(content)
-                            )
-                            endpoints.append(endpoint)
-            except Exception:
-                continue
-
-        return endpoints
-
-    def _detect_external_services(self) -> list[ExternalService]:
-        """Detect external service integrations."""
-        services: dict[str, ExternalService] = {}
-
+        Args:
+            progress_callback: Optional callback(current, total, file) for
+                               progress updates
+        """
+        # Service detection patterns (compiled for perf)
         service_patterns = {
-            "stripe": (r"stripe\.|PaymentIntent|Subscription", ["payments"]),
-            "resend": (r"resend\.|Resend\(", ["email"]),
-            "sendgrid": (r"sendgrid|@sendgrid", ["email"]),
-            "aws_s3": (r"S3Client|s3\..*Bucket|putObject", ["storage"]),
-            "postgres": (r"pg\.|postgres|PostgreSQL", ["database"]),
-            "redis": (r"redis\.|Redis\(|createClient", ["cache"]),
-            "openai": (r"openai\.|OpenAI\(|ChatCompletion", ["ai"]),
+            "stripe": (
+                re.compile(r"stripe\.|PaymentIntent|Subscription", re.I),
+                ["payments"],
+            ),
+            "resend": (re.compile(r"resend\.|Resend\(", re.I), ["email"]),
+            "sendgrid": (re.compile(r"sendgrid|@sendgrid", re.I), ["email"]),
+            "aws_s3": (
+                re.compile(r"S3Client|s3\..*Bucket|putObject", re.I),
+                ["storage"],
+            ),
+            "postgres": (
+                re.compile(r"pg\.|postgres|PostgreSQL", re.I),
+                ["database"],
+            ),
+            "redis": (
+                re.compile(r"redis\.|Redis\(|createClient", re.I),
+                ["cache"],
+            ),
+            "openai": (
+                re.compile(r"openai\.|OpenAI\(|ChatCompletion", re.I),
+                ["ai"],
+            ),
+        }
+        model_schema_types = {"anchor:models", "anchor:schemas"}
+
+        # Collect files
+        source_files = self._collect_source_files()
+        total_files = len(source_files)
+
+        # Phase 1: Parallel file reads (I/O bound)
+        # Only read file contents - no Hyperscan calls here
+        def read_file(file_path: Path) -> tuple[Path, str | None]:
+            try:
+                return (file_path, file_path.read_text(errors="replace"))
+            except Exception:
+                return (file_path, None)
+
+        max_workers = min(os.cpu_count() or 4, 16)
+        logger.debug(
+            "starting parallel file reads",
+            files=total_files,
+            workers=max_workers,
+        )
+
+        file_contents: list[tuple[Path, str | None]] = []
+        read_start = time.perf_counter()
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            file_contents = list(executor.map(read_file, source_files))
+
+        read_ms = round((time.perf_counter() - read_start) * 1000, 1)
+        logger.debug(
+            "parallel reads complete",
+            read_ms=read_ms,
+            files_read=len(file_contents),
+        )
+
+        # Phase 2: Serial processing (Hyperscan not thread-safe)
+        entities: list[EntityDef] = []
+        endpoints: list[EndpointDef] = []
+        services: dict[str, ExternalService] = {}
+        entity_names_seen: set[str] = set()
+
+        stats = {
+            "files_scanned": total_files,
+            "read_errors": 0,
+            "entity_anchors": 0,
+            "route_anchors": 0,
+            "service_matches": 0,
         }
 
-        for file_path in self.root.rglob("*"):
-            if not file_path.is_file():
-                continue
-            if file_path.suffix not in [".py", ".ts", ".tsx", ".js", ".jsx"]:
-                continue
-            if "node_modules" in str(file_path):
-                continue
-            if ".venv" in str(file_path) or "venv" in str(file_path):
+        logger.debug("starting serial anchor extraction", files=total_files)
+        process_start = time.perf_counter()
+
+        for i, (file_path, content) in enumerate(file_contents):
+            # Report progress
+            if progress_callback:
+                try:
+                    rel = file_path.relative_to(self.root)
+                    progress_callback(i + 1, total_files, str(rel))
+                except ValueError:
+                    progress_callback(i + 1, total_files, str(file_path))
+
+            if content is None:
+                stats["read_errors"] += 1
                 continue
 
-            try:
-                content = file_path.read_text(errors="replace")
+            # Extract anchors (uses Hyperscan - must be serial)
+            anchors = []
+            if self.pattern_manager:
+                anchors = self.pattern_manager.extract_anchors(
+                    content, str(file_path)
+                )
 
-                for svc_name, (pattern, usage) in service_patterns.items():
-                    if re.search(pattern, content, re.IGNORECASE):
-                        if svc_name not in services:
-                            services[svc_name] = ExternalService(
-                                name=svc_name,
-                                usage=usage,
-                                sources=[],
-                            )
-                        rel_path = str(file_path.relative_to(self.root))
-                        if rel_path not in services[svc_name].sources:
-                            services[svc_name].sources.append(rel_path)
-            except Exception:
-                continue
+            # Extract entities from model/schema anchors
+            for anchor in anchors:
+                if anchor.anchor_type in model_schema_types:
+                    stats["entity_anchors"] += 1
+                    entity = self.entity_extractor.extract_from_anchor(
+                        anchor, content
+                    )
+                    if entity:
+                        entity.source = f"{file_path}:{anchor.line_number}"
+                        if entity.name not in entity_names_seen:
+                            entity_names_seen.add(entity.name)
+                            entities.append(entity)
 
-        return list(services.values())
+            # Extract endpoints from route anchors
+            for anchor in anchors:
+                if anchor.anchor_type == "anchor:routes":
+                    stats["route_anchors"] += 1
+                    endpoint = self.route_extractor.extract_from_anchor(
+                        anchor, str(file_path), content
+                    )
+                    if endpoint:
+                        endpoint.business_rules = self.rule_extractor.extract(
+                            content
+                        )
+                        endpoint.side_effects = self.effect_extractor.extract(
+                            content
+                        )
+                        endpoints.append(endpoint)
+
+            # Detect external services (regex - can stay here)
+            rel_path = str(file_path.relative_to(self.root))
+            for svc_name, (pattern, usage) in service_patterns.items():
+                if pattern.search(content):
+                    stats["service_matches"] += 1
+                    if svc_name not in services:
+                        services[svc_name] = ExternalService(
+                            name=svc_name,
+                            usage=usage,
+                            sources=[],
+                        )
+                    if rel_path not in services[svc_name].sources:
+                        services[svc_name].sources.append(rel_path)
+
+        process_ms = round((time.perf_counter() - process_start) * 1000, 1)
+        logger.debug(
+            "extraction complete",
+            read_ms=read_ms,
+            process_ms=process_ms,
+            **stats,
+        )
+        return entities, endpoints, list(services.values())

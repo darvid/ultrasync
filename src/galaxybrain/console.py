@@ -221,6 +221,9 @@ def progress_bar(
                 def set_description(self, desc: str):
                     progress.update(task_id, description=desc)
 
+                def set_total(self, new_total: int):
+                    progress.update(task_id, total=new_total)
+
             yield ProgressWrapper()
     else:
         # fallback: simple counter
@@ -229,6 +232,7 @@ def progress_bar(
                 self.current = 0
                 self.desc = description
                 self._last_pct = -1
+                self._total = total
 
             def update(self, advance: int = 0, completed: int | None = None):
                 if completed is not None:
@@ -236,11 +240,12 @@ def progress_bar(
                 else:
                     self.current += advance
 
-                if total:
-                    pct = int(self.current / total * 100)
+                if self._total:
+                    pct = int(self.current / self._total * 100)
                     if pct != self._last_pct and pct % 10 == 0:
                         print(
-                            f"\r{self.desc}: {self.current}/{total} ({pct}%)",
+                            f"\r{self.desc}: {self.current}/{self._total} "
+                            f"({pct}%)",
                             end="",
                             flush=True,
                         )
@@ -249,9 +254,12 @@ def progress_bar(
             def set_description(self, desc: str):
                 self.desc = desc
 
+            def set_total(self, new_total: int):
+                self._total = new_total
+
         fb = FallbackProgress()
         yield fb
-        if total:
+        if fb._total:
             print()  # newline after progress
 
 
