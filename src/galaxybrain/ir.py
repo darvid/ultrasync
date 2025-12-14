@@ -170,14 +170,14 @@ class AppIR:
     jobs: list[JobDef] = field(default_factory=list)
     external_services: list[ExternalService] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
+    def to_dict(self, include_sources: bool = True) -> dict:
         """Convert to dictionary for serialization."""
         return {
             "meta": self.meta,
             "entities": [
                 {
                     "name": e.name,
-                    "source": e.source,
+                    **({"source": e.source} if include_sources else {}),
                     "fields": [
                         {
                             "name": f.name,
@@ -210,7 +210,7 @@ class AppIR:
                 {
                     "method": ep.method,
                     "path": ep.path,
-                    "source": ep.source,
+                    **({"source": ep.source} if include_sources else {}),
                     **({"auth": ep.auth} if ep.auth else {}),
                     **(
                         {"request_schema": ep.request_schema}
@@ -239,7 +239,7 @@ class AppIR:
             "jobs": [
                 {
                     "name": j.name,
-                    "source": j.source,
+                    **({"source": j.source} if include_sources else {}),
                     "trigger": j.trigger,
                     **({"schedule": j.schedule} if j.schedule else {}),
                     "business_rules": j.business_rules,
@@ -250,13 +250,13 @@ class AppIR:
                 {
                     "name": svc.name,
                     "usage": svc.usage,
-                    "sources": svc.sources,
+                    **({"sources": svc.sources} if include_sources else {}),
                 }
                 for svc in self.external_services
             ],
         }
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, include_sources: bool = True) -> str:
         """Generate natural language specification in markdown format.
 
         This format is optimized for LLM consumption during migration tasks.
@@ -317,8 +317,9 @@ class AppIR:
             for ep in self.endpoints:
                 lines.append(f"### {ep.method} {ep.path}")
                 lines.append("")
-                lines.append(f"*Source: `{ep.source}`*")
-                lines.append("")
+                if include_sources:
+                    lines.append(f"*Source: `{ep.source}`*")
+                    lines.append("")
                 if ep.auth:
                     lines.append(f"**Authentication**: {ep.auth}")
                     lines.append("")
@@ -349,8 +350,9 @@ class AppIR:
             for flow in self.flows:
                 lines.append(f"### {flow.method} {flow.path}")
                 lines.append("")
-                lines.append(f"*Entry: `{flow.entry_file}`*")
-                lines.append("")
+                if include_sources:
+                    lines.append(f"*Entry: `{flow.entry_file}`*")
+                    lines.append("")
                 if flow.nodes:
                     lines.append("**Call chain:**")
                     lines.append("")
@@ -382,8 +384,9 @@ class AppIR:
             for job in self.jobs:
                 lines.append(f"### {job.name}")
                 lines.append("")
-                lines.append(f"*Source: `{job.source}`*")
-                lines.append("")
+                if include_sources:
+                    lines.append(f"*Source: `{job.source}`*")
+                    lines.append("")
                 lines.append(f"**Trigger**: {job.trigger}")
                 if job.schedule:
                     lines.append(f"**Schedule**: `{job.schedule}`")
@@ -403,13 +406,13 @@ class AppIR:
                 lines.append("")
                 lines.append(f"**Usage:** {svc.usage}")
                 lines.append("")
-                if svc.sources:
+                if include_sources and svc.sources:
                     lines.append("**Found in:**")
                     for src in svc.sources[:5]:
                         lines.append(f"- `{src}`")
                     if len(svc.sources) > 5:
                         lines.append(f"- ... and {len(svc.sources) - 5} more")
-                lines.append("")
+                    lines.append("")
 
         # Summary stats
         lines.append("---")

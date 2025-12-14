@@ -2362,6 +2362,11 @@ def ir(ctx: click.Context, directory: Path | None):
     default=True,
     help="Use relative paths in source references (default: relative)",
 )
+@click.option(
+    "--sources/--no-sources",
+    default=True,
+    help="Include source file references in output (default: include)",
+)
 @click.pass_context
 def ir_extract(
     ctx: click.Context,
@@ -2369,6 +2374,7 @@ def ir_extract(
     output: str | None,
     include_tests: bool,
     relative_paths: bool,
+    sources: bool,
 ):
     """Extract full App IR from codebase."""
     import json
@@ -2416,13 +2422,13 @@ def ir_extract(
 
     # Format output
     if output_format == "yaml":
-        ir_dict = app_ir.to_dict()
+        ir_dict = app_ir.to_dict(include_sources=sources)
         result = yaml.dump(ir_dict, default_flow_style=False, sort_keys=False)
     elif output_format == "json":
-        ir_dict = app_ir.to_dict()
+        ir_dict = app_ir.to_dict(include_sources=sources)
         result = json.dumps(ir_dict, indent=2)
     elif output_format == "markdown":
-        result = app_ir.to_markdown()
+        result = app_ir.to_markdown(include_sources=sources)
     else:  # summary
         result = _format_ir_summary(app_ir)
 
