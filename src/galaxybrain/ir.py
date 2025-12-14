@@ -170,8 +170,44 @@ class AppIR:
     jobs: list[JobDef] = field(default_factory=list)
     external_services: list[ExternalService] = field(default_factory=list)
 
-    def to_dict(self, include_sources: bool = True) -> dict:
-        """Convert to dictionary for serialization."""
+    def _sort_items(
+        self,
+        items: list,
+        sort_by: str,
+        name_attr: str,
+        source_attr: str | None,
+    ) -> list:
+        """Sort items by the specified criteria."""
+        if sort_by == "none" or not items:
+            return items
+        elif sort_by == "name":
+            return sorted(items, key=lambda x: getattr(x, name_attr, "").lower())
+        elif sort_by == "source" and source_attr:
+            return sorted(
+                items, key=lambda x: getattr(x, source_attr, "").lower()
+            )
+        return items
+
+    def to_dict(
+        self,
+        include_sources: bool = True,
+        sort_by: str = "none",
+    ) -> dict:
+        """Convert to dictionary for serialization.
+
+        Args:
+            include_sources: Include source file references
+            sort_by: Sort order - "none", "name", or "source"
+        """
+        # Apply sorting
+        entities = self._sort_items(self.entities, sort_by, "name", "source")
+        endpoints = self._sort_items(self.endpoints, sort_by, "path", "source")
+        flows = self._sort_items(self.flows, sort_by, "path", "entry_file")
+        jobs = self._sort_items(self.jobs, sort_by, "name", "source")
+        services = self._sort_items(
+            self.external_services, sort_by, "name", None
+        )
+
         return {
             "meta": self.meta,
             "entities": [
@@ -204,7 +240,7 @@ class AppIR:
                         for r in e.relationships
                     ],
                 }
-                for e in self.entities
+                for e in entities
             ],
             "endpoints": [
                 {
@@ -233,9 +269,9 @@ class AppIR:
                         for se in ep.side_effects
                     ],
                 }
-                for ep in self.endpoints
+                for ep in endpoints
             ],
-            "flows": [f.to_dict() for f in self.flows],
+            "flows": [f.to_dict() for f in flows],
             "jobs": [
                 {
                     "name": j.name,
@@ -244,7 +280,7 @@ class AppIR:
                     **({"schedule": j.schedule} if j.schedule else {}),
                     "business_rules": j.business_rules,
                 }
-                for j in self.jobs
+                for j in jobs
             ],
             "external_services": [
                 {
@@ -252,15 +288,28 @@ class AppIR:
                     "usage": svc.usage,
                     **({"sources": svc.sources} if include_sources else {}),
                 }
-                for svc in self.external_services
+                for svc in services
             ],
         }
 
-    def to_markdown(self, include_sources: bool = True) -> str:
+    def to_markdown(
+        self,
+        include_sources: bool = True,
+        sort_by: str = "none",
+    ) -> str:
         """Generate natural language specification in markdown format.
 
         This format is optimized for LLM consumption during migration tasks.
         """
+        # Apply sorting
+        entities = self._sort_items(self.entities, sort_by, "name", "source")
+        endpoints = self._sort_items(self.endpoints, sort_by, "path", "source")
+        flows = self._sort_items(self.flows, sort_by, "path", "entry_file")
+        jobs = self._sort_items(self.jobs, sort_by, "name", "source")
+        services = self._sort_items(
+            self.external_services, sort_by, "name", None
+        )
+
         lines: list[str] = []
         app_name = self.meta.get("name", "Application")
         stack = self.meta.get("detected_stack", [])
@@ -273,10 +322,10 @@ class AppIR:
             lines.append("")
 
         # Data Model section
-        if self.entities:
+        if entities:
             lines.append("## Data Model")
             lines.append("")
-            for entity in self.entities:
+            for entity in entities:
                 lines.append(f"### {entity.name}")
                 lines.append("")
                 # Fields
@@ -311,10 +360,10 @@ class AppIR:
                 lines.append("")
 
         # API Endpoints section
-        if self.endpoints:
+        if endpoints:
             lines.append("## API Endpoints")
             lines.append("")
-            for ep in self.endpoints:
+            for ep in endpoints:
                 lines.append(f"### {ep.method} {ep.path}")
                 lines.append("")
                 if include_sources:
@@ -344,10 +393,10 @@ class AppIR:
                     lines.append("")
 
         # Feature Flows section
-        if self.flows:
+        if flows:
             lines.append("## Feature Flows")
             lines.append("")
-            for flow in self.flows:
+            for flow in flows:
                 lines.append(f"### {flow.method} {flow.path}")
                 lines.append("")
                 if include_sources:
@@ -378,10 +427,10 @@ class AppIR:
                     lines.append("")
 
         # Background Jobs section
-        if self.jobs:
+        if jobs:
             lines.append("## Background Jobs")
             lines.append("")
-            for job in self.jobs:
+            for job in jobs:
                 lines.append(f"### {job.name}")
                 lines.append("")
                 if include_sources:
@@ -398,10 +447,10 @@ class AppIR:
                     lines.append("")
 
         # External Services section
-        if self.external_services:
+        if services:
             lines.append("## External Services")
             lines.append("")
-            for svc in self.external_services:
+            for svc in services:
                 lines.append(f"### {svc.name}")
                 lines.append("")
                 lines.append(f"**Usage:** {svc.usage}")

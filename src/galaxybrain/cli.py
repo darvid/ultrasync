@@ -2367,6 +2367,13 @@ def ir(ctx: click.Context, directory: Path | None):
     default=True,
     help="Include source file references in output (default: include)",
 )
+@click.option(
+    "--sort",
+    "sort_by",
+    type=click.Choice(["none", "name", "source"]),
+    default="none",
+    help="Sort output by name or source file (default: none)",
+)
 @click.pass_context
 def ir_extract(
     ctx: click.Context,
@@ -2375,6 +2382,7 @@ def ir_extract(
     include_tests: bool,
     relative_paths: bool,
     sources: bool,
+    sort_by: str,
 ):
     """Extract full App IR from codebase."""
     import json
@@ -2422,13 +2430,13 @@ def ir_extract(
 
     # Format output
     if output_format == "yaml":
-        ir_dict = app_ir.to_dict(include_sources=sources)
+        ir_dict = app_ir.to_dict(include_sources=sources, sort_by=sort_by)
         result = yaml.dump(ir_dict, default_flow_style=False, sort_keys=False)
     elif output_format == "json":
-        ir_dict = app_ir.to_dict(include_sources=sources)
+        ir_dict = app_ir.to_dict(include_sources=sources, sort_by=sort_by)
         result = json.dumps(ir_dict, indent=2)
     elif output_format == "markdown":
-        result = app_ir.to_markdown(include_sources=sources)
+        result = app_ir.to_markdown(include_sources=sources, sort_by=sort_by)
     else:  # summary
         result = _format_ir_summary(app_ir)
 
