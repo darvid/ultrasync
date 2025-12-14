@@ -82,6 +82,52 @@ class EndpointDef:
 
 
 @dataclass
+class FlowNode:
+    """A node in a feature flow trace."""
+
+    symbol: str  # symbol name
+    kind: str  # function, class, handler, service, etc.
+    file: str  # file where defined
+    line: int | None = None
+    anchor_type: str | None = None  # anchor:handlers, anchor:services, etc.
+    categories: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FeatureFlow:
+    """A traced flow from route to data layer."""
+
+    entry_point: str  # route handler name
+    entry_file: str  # file containing the route
+    method: str  # HTTP method
+    path: str  # route path
+    nodes: list[FlowNode] = field(default_factory=list)
+    touched_entities: list[str] = field(default_factory=list)
+    depth: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "entry_point": self.entry_point,
+            "entry_file": self.entry_file,
+            "method": self.method,
+            "path": self.path,
+            "nodes": [
+                {
+                    "symbol": n.symbol,
+                    "kind": n.kind,
+                    "file": n.file,
+                    **({"line": n.line} if n.line else {}),
+                    **({"anchor_type": n.anchor_type} if n.anchor_type else {}),
+                    **({"categories": n.categories} if n.categories else {}),
+                }
+                for n in self.nodes
+            ],
+            "touched_entities": self.touched_entities,
+            "depth": self.depth,
+        }
+
+
+@dataclass
 class JobDef:
     """A background job or scheduled task."""
 
@@ -109,6 +155,7 @@ class AppIR:
     meta: dict = field(default_factory=dict)
     entities: list[EntityDef] = field(default_factory=list)
     endpoints: list[EndpointDef] = field(default_factory=list)
+    flows: list[FeatureFlow] = field(default_factory=list)
     jobs: list[JobDef] = field(default_factory=list)
     external_services: list[ExternalService] = field(default_factory=list)
 
@@ -177,6 +224,7 @@ class AppIR:
                 }
                 for ep in self.endpoints
             ],
+            "flows": [f.to_dict() for f in self.flows],
             "jobs": [
                 {
                     "name": j.name,
@@ -823,6 +871,163 @@ class SideEffectExtractor:
 
 
 # ---------------------------------------------------------------------------
+# Flow Tracer
+# ---------------------------------------------------------------------------
+
+
+class FlowTracer:
+    """Traces feature flows from routes through the call graph."""
+
+    def __init__(
+        self,
+        call_graph: CallGraph,
+        pattern_manager: PatternSetManager | None = None,
+        entity_names: list[str] | None = None,
+        root: Path | None = None,
+    ):
+
+        self.call_graph: CallGraph = call_graph
+        self.pattern_manager = pattern_manager
+        self.entity_names = set(entity_names or [])
+        self.root = root or Path.cwd()
+        # Map file paths to their anchors for classification
+        self._anchor_cache: dict[str, dict[int, str]] = {}
+
+    def _normalize_path(self, file_path: str) -> str:
+        """Convert absolute path to relative for call graph lookup."""
+        try:
+            p = Path(file_path)
+            if p.is_absolute():
+                return str(p.relative_to(self.root))
+            return file_path
+        except ValueError:
+            return file_path
+
+    def trace_from_file(
+        self,
+        file_path: str,
+        method: str = "GET",
+        path: str = "/unknown",
+        max_depth: int = 10,
+    ) -> FeatureFlow:
+        """Trace a feature flow starting from a file.
+
+        BFS through the call graph to find all reachable symbols.
+        """
+        # Normalize to relative path for call graph lookup
+        norm_path = self._normalize_path(file_path)
+
+        flow = FeatureFlow(
+            entry_point=Path(file_path).stem,
+            entry_file=norm_path,
+            method=method,
+            path=path,
+        )
+
+        # Get all symbols called from this file
+        callees = self.call_graph.get_callees(norm_path)
+        if not callees:
+            return flow
+
+        visited: set[str] = set()
+        queue: list[tuple[str, int]] = [(sym, 0) for sym in callees]
+        max_depth_reached = 0
+
+        while queue:
+            symbol, depth = queue.pop(0)
+
+            if symbol in visited or depth > max_depth:
+                continue
+            visited.add(symbol)
+            max_depth_reached = max(max_depth_reached, depth)
+
+            # Get node info from call graph
+            node = self.call_graph.nodes.get(symbol)
+            if not node:
+                continue
+
+            # Create flow node
+            flow_node = FlowNode(
+                symbol=symbol,
+                kind=node.kind,
+                file=node.defined_in,
+                line=node.definition_line,
+                categories=node.categories,
+            )
+
+            # Try to determine anchor type from categories or patterns
+            anchor_type = self._classify_symbol(node)
+            if anchor_type:
+                flow_node.anchor_type = anchor_type
+
+            flow.nodes.append(flow_node)
+
+            # Check if this touches an entity
+            for entity_name in self.entity_names:
+                if entity_name.lower() in symbol.lower():
+                    if entity_name not in flow.touched_entities:
+                        flow.touched_entities.append(entity_name)
+
+            # Add callees from this symbol's file
+            file_callees = self.call_graph.get_callees(node.defined_in)
+            for callee in file_callees:
+                if callee not in visited:
+                    queue.append((callee, depth + 1))
+
+        flow.depth = max_depth_reached
+        return flow
+
+    def _classify_symbol(self, node) -> str | None:
+        """Classify a symbol into an anchor type based on its attributes."""
+        # Check categories from call graph
+        if node.categories:
+            cat_lower = [c.lower() for c in node.categories]
+            if any("service" in c for c in cat_lower):
+                return "anchor:services"
+            if any("handler" in c or "controller" in c for c in cat_lower):
+                return "anchor:handlers"
+            if any("repo" in c or "dao" in c for c in cat_lower):
+                return "anchor:repositories"
+
+        # Infer from naming conventions
+        name_lower = node.name.lower()
+        if "service" in name_lower:
+            return "anchor:services"
+        if "handler" in name_lower or "controller" in name_lower:
+            return "anchor:handlers"
+        if "repo" in name_lower or "dao" in name_lower:
+            return "anchor:repositories"
+        if "middleware" in name_lower:
+            return "anchor:middleware"
+
+        return None
+
+    def trace_all_routes(
+        self,
+        endpoints: list[EndpointDef],
+        max_depth: int = 10,
+    ) -> list[FeatureFlow]:
+        """Trace flows for all endpoints."""
+        flows = []
+        for ep in endpoints:
+            # Extract file path from source
+            source_parts = ep.source.split(":")
+            file_path = source_parts[0] if source_parts else ""
+
+            if file_path:
+                flow = self.trace_from_file(
+                    file_path,
+                    method=ep.method,
+                    path=ep.path,
+                    max_depth=max_depth,
+                )
+                if flow.nodes:
+                    flows.append(flow)
+
+        return flows
+
+
+# ---------------------------------------------------------------------------
 # App IR Extractor
 # ---------------------------------------------------------------------------
 
@@ -844,8 +1049,12 @@ class AppIRExtractor:
         self.rule_extractor = BusinessRuleExtractor()
         self.effect_extractor = SideEffectExtractor()
 
-    def extract(self) -> AppIR:
-        """Extract full App IR from the codebase."""
+    def extract(self, trace_flows: bool = True) -> AppIR:
+        """Extract full App IR from the codebase.
+
+        Args:
+            trace_flows: If True and call graph available, trace flows
+        """
         ir = AppIR()
         ir.meta = self._detect_meta()
 
@@ -855,10 +1064,34 @@ class AppIRExtractor:
         # Extract endpoints
         ir.endpoints = self._extract_endpoints()
 
+        # Trace flows if call graph is available
+        if trace_flows and self.call_graph and ir.endpoints:
+            entity_names = [e.name for e in ir.entities]
+            tracer = FlowTracer(
+                self.call_graph,
+                self.pattern_manager,
+                entity_names,
+                self.root,
+            )
+            ir.flows = tracer.trace_all_routes(ir.endpoints)
+
         # Detect external services
         ir.external_services = self._detect_external_services()
 
         return ir
+
+    def load_call_graph(self) -> bool:
+        """Try to load call graph from .galaxybrain/callgraph.json.
+
+        Returns True if successfully loaded.
+        """
+        from galaxybrain.call_graph import CallGraph
+
+        cg_path = self.root / ".galaxybrain" / "callgraph.json"
+        if cg_path.exists():
+            self.call_graph = CallGraph.load(cg_path)
+            return self.call_graph is not None
+        return False
 
     def _detect_meta(self) -> dict:
         """Detect application metadata."""

@@ -2504,6 +2504,65 @@ def ir_services(ctx: click.Context):
         click.echo()
 
 
+@ir.command("flows")
+@click.option("-v", "--verbose", is_flag=True, help="Show all nodes in flow")
+@click.option(
+    "-n", "--limit", default=20, help="Max flows to show"
+)
+@click.pass_context
+def ir_flows(ctx: click.Context, verbose: bool, limit: int):
+    """Trace feature flows from routes through call graph."""
+    from galaxybrain.ir import AppIRExtractor
+    from galaxybrain.patterns import PatternSetManager
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+
+    manager = PatternSetManager(data_dir=data_dir)
+    extractor = AppIRExtractor(root, pattern_manager=manager)
+
+    # Try to load call graph
+    if not extractor.load_call_graph():
+        click.echo("error: no call graph found", err=True)
+        click.echo(
+            "run 'galaxybrain callgraph <directory>' first to build it",
+            err=True,
+        )
+        sys.exit(1)
+
+    click.echo("Extracting flows...", err=True)
+    app_ir = extractor.extract(trace_flows=True)
+
+    if not app_ir.flows:
+        click.echo("No flows traced (no endpoints found or no calls)")
+        return
+
+    click.echo(f"Traced {len(app_ir.flows)} feature flows:\n")
+
+    for flow in app_ir.flows[:limit]:
+        click.echo(f"  {flow.method:6} {flow.path}")
+        click.echo(f"         entry: {flow.entry_file}")
+        click.echo(f"         depth: {flow.depth}, nodes: {len(flow.nodes)}")
+
+        if flow.touched_entities:
+            entities = ", ".join(flow.touched_entities)
+            click.echo(f"         entities: {entities}")
+
+        if verbose and flow.nodes:
+            click.echo("         flow:")
+            for node in flow.nodes[:10]:
+                anchor = f" [{node.anchor_type}]" if node.anchor_type else ""
+                click.echo(f"           -> {node.symbol} ({node.kind}){anchor}")
+            if len(flow.nodes) > 10:
+                click.echo(f"           ... and {len(flow.nodes) - 10} more")
+
+        click.echo()
+
+    if len(app_ir.flows) > limit:
+        click.echo(f"  ... and {len(app_ir.flows) - limit} more flows")
+
+
 def _format_ir_summary(app_ir) -> str:
     """Format App IR as markdown summary."""
     lines = []
@@ -2552,6 +2611,28 @@ def _format_ir_summary(app_ir) -> str:
                 for effect in ep.side_effects:
                     lines.append(f"- {effect.type}: {effect.service}")
                 lines.append("")
+
+    # Feature Flows
+    if app_ir.flows:
+        lines.append("## Feature Flows\n")
+        for flow in app_ir.flows[:10]:
+            lines.append(f"### {flow.method} {flow.path}")
+            lines.append(f"Entry: `{flow.entry_file}`\n")
+            if flow.nodes:
+                lines.append("**Call Chain**:")
+                for node in flow.nodes[:5]:
+                    anchor = ""
+                    if node.anchor_type:
+                        anchor = f" *{node.anchor_type}*"
+                    lines.append(f"- `{node.symbol}` ({node.kind}){anchor}")
+                if len(flow.nodes) > 5:
+                    lines.append(f"- ... and {len(flow.nodes) - 5} more")
+                lines.append("")
+            if flow.touched_entities:
+                entities = ", ".join(flow.touched_entities)
+                lines.append(f"**Touches**: {entities}\n")
+        if len(app_ir.flows) > 10:
+            lines.append(f"*... and {len(app_ir.flows) - 10} more flows*\n")
 
     # External Services
     if app_ir.external_services:
