@@ -38,6 +38,47 @@ def _hex_to_key(key_str: str | int) -> int:
     return int(key_str)
 
 
+def _format_search_results_tsv(
+    results: list,
+    elapsed_ms: float,
+    source: str,
+    hint: str | None = None,
+) -> str:
+    """Format jit_search results as compact TSV for reduced token usage.
+
+    Format:
+        # jit_search <elapsed>ms src=<source>
+        # [hint if present]
+        # type  path  name  kind  lines  score  key_hash
+        F  src/foo.py  -  -  -  0.92  0x1234
+        S  src/foo.py  login  func  10-25  0.89  0x5678
+
+    ~3-4x fewer tokens than JSON format.
+    """
+    lines = [f"# jit_search {elapsed_ms:.1f}ms src={source}"]
+    if hint:
+        lines.append(f"# {hint}")
+    lines.append("# type\tpath\tname\tkind\tlines\tscore\tkey_hash")
+
+    for r in results:
+        typ = "F" if r.type == "file" else "S"
+        name = r.name or "-"
+        kind = r.kind or "-"
+        if r.line_start and r.line_end:
+            line_range = f"{r.line_start}-{r.line_end}"
+        elif r.line_start:
+            line_range = str(r.line_start)
+        else:
+            line_range = "-"
+        score = f"{r.score:.2f}"
+        key_hex = _key_to_hex(r.key_hash) or "-"
+        lines.append(
+            f"{typ}\t{r.path}\t{name}\t{kind}\t{line_range}\t{score}\t{key_hex}"
+        )
+
+    return "\n".join(lines)
+
+
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -1102,13 +1143,15 @@ context:api, context:data, context:infra
         ):
             if i >= limit:
                 break
-            results.append({
-                "path": record.path,
-                "key_hash": hex(record.key_hash),
-                "detected_contexts": json.loads(record.detected_contexts)
-                if record.detected_contexts
-                else [],
-            })
+            results.append(
+                {
+                    "path": record.path,
+                    "key_hash": hex(record.key_hash),
+                    "detected_contexts": json.loads(record.detected_contexts)
+                    if record.detected_contexts
+                    else [],
+                }
+            )
         return results
 
     @mcp.tool()
@@ -1170,13 +1213,15 @@ context:api, context:data, context:infra
         ):
             if i >= limit:
                 break
-            results.append({
-                "file_path": record.file_path,
-                "line": record.line_start,
-                "text": record.name,  # name stores the insight text
-                "insight_type": record.kind,
-                "key_hash": hex(record.key_hash),
-            })
+            results.append(
+                {
+                    "file_path": record.file_path,
+                    "line": record.line_start,
+                    "text": record.name,  # name stores the insight text
+                    "insight_type": record.kind,
+                    "key_hash": hex(record.key_hash),
+                }
+            )
         return results
 
     @mcp.tool()
@@ -1240,7 +1285,8 @@ context:api, context:data, context:infra
         top_k: int = 10,
         result_type: Literal["all", "file", "symbol"] = "all",
         fallback_glob: str | None = None,
-    ) -> dict[str, Any]:
+        format: Literal["json", "tsv"] = "tsv",
+    ) -> dict[str, Any] | str:
         """PREFERRED: Semantic code search - use BEFORE grep/glob/read.
 
         USE THIS FIRST for natural language queries like:
@@ -1259,9 +1305,12 @@ context:api, context:data, context:infra
                 functions/classes)
             fallback_glob: Glob pattern for fallback (default: common
                 code extensions)
+            format: Output format - "tsv" (compact, ~3x fewer tokens) or
+                "json" (verbose). Default: "tsv"
 
         Returns:
-            Results with timing, paths, symbol names, and scores
+            TSV: Compact tab-separated format with header comments
+            JSON: Full results with timing, paths, symbol names, and scores
         """
         import time
 
@@ -1293,6 +1342,13 @@ context:api, context:data, context:infra
                 "call jit_index_file(path) so future searches find it."
             )
 
+        # return compact TSV format by default (3-4x fewer tokens)
+        if format == "tsv":
+            return _format_search_results_tsv(
+                results, elapsed_ms, primary_source, hint
+            )
+
+        # verbose JSON format
         response: dict[str, Any] = {
             "elapsed_ms": round(elapsed_ms, 2),
             "source": primary_source,

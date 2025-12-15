@@ -248,6 +248,14 @@ def index(
     default="all",
     help="Filter results by type",
 )
+@click.option(
+    "-f",
+    "--format",
+    "output_format",
+    type=click.Choice(["none", "json", "tsv"]),
+    default="none",
+    help="Output format (none=rich, json, tsv)",
+)
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def query(
     query_text: str | None,
@@ -256,6 +264,7 @@ def query(
     k: int,
     key: str | None,
     result_type: str,
+    output_format: str,
     debug: bool,
 ):
     """Semantic search across indexed files."""
@@ -338,6 +347,53 @@ def query(
 
     strategy_str = " -> ".join(strategy_info) if strategy_info else "none"
 
+    # JSON output
+    if output_format == "json":
+        output = {
+            "query": query_text,
+            "elapsed_ms": round(t_search * 1000, 2),
+            "strategy": strategy_str,
+            "results": [
+                {
+                    "type": r.type,
+                    "path": r.path,
+                    "name": r.name,
+                    "kind": r.kind,
+                    "line_start": r.line_start,
+                    "line_end": r.line_end,
+                    "score": r.score,
+                    "source": r.source,
+                    "key_hash": f"0x{r.key_hash:016x}" if r.key_hash else None,
+                }
+                for r in results
+            ],
+        }
+        click.echo(json.dumps(output, indent=2))
+        return
+
+    # TSV output (compact, pipeable)
+    if output_format == "tsv":
+        click.echo(f"# query: {query_text}")
+        click.echo(f"# {t_search * 1000:.1f}ms strategy={strategy_str}")
+        click.echo("# type\tpath\tname\tkind\tlines\tscore\tkey_hash")
+        for r in results:
+            typ = "F" if r.type == "file" else "S"
+            name = r.name or "-"
+            kind = r.kind or "-"
+            if r.line_start and r.line_end:
+                lines = f"{r.line_start}-{r.line_end}"
+            elif r.line_start:
+                lines = str(r.line_start)
+            else:
+                lines = "-"
+            score = f"{r.score:.2f}"
+            key_hex = f"0x{r.key_hash:016x}" if r.key_hash else "-"
+            click.echo(
+                f"{typ}\t{r.path}\t{name}\t{kind}\t{lines}\t{score}\t{key_hex}"
+            )
+        return
+
+    # Rich output (default)
     console.header(f"top {len(results)} for: {query_text!r}")
     console.dim(f"search: {t_search * 1000:.1f}ms, strategy: {strategy_str}")
     if result_type != "all":
