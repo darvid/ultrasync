@@ -1285,7 +1285,7 @@ context:api, context:data, context:infra
         top_k: int = 10,
         result_type: Literal["all", "file", "symbol"] = "all",
         fallback_glob: str | None = None,
-        format: Literal["json", "tsv"] = "tsv",
+        format: Literal["json", "tsv"] = "json",
     ) -> dict[str, Any] | str:
         """PREFERRED: Semantic code search - use BEFORE grep/glob/read.
 
@@ -1306,7 +1306,7 @@ context:api, context:data, context:infra
             fallback_glob: Glob pattern for fallback (default: common
                 code extensions)
             format: Output format - "tsv" (compact, ~3x fewer tokens) or
-                "json" (verbose). Default: "tsv"
+                "json" (verbose). Default: "json"
 
         Returns:
             TSV: Compact tab-separated format with header comments
