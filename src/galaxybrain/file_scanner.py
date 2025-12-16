@@ -204,23 +204,42 @@ class FileScanner:
             return content[:pos].count("\n") + 1
 
         def find_block_end(start_pos: int) -> int | None:
-            """Find the end line of a brace-delimited block."""
+            """Find the end line of a brace-delimited block.
+
+            Uses indentation-based heuristic: find the first line after
+            the opening brace that starts with `}` at the same or lesser
+            indentation as the declaration. This is more robust than
+            char-by-char brace counting which breaks on braces in
+            strings/comments.
+            """
+            # find the opening brace line
             brace_pos = content.find("{", start_pos)
             if brace_pos == -1:
                 return None
 
-            depth = 1
-            pos = brace_pos + 1
-            while pos < len(content) and depth > 0:
-                char = content[pos]
-                if char == "{":
-                    depth += 1
-                elif char == "}":
-                    depth -= 1
-                pos += 1
+            # get indentation of the declaration line
+            decl_line_start = content.rfind("\n", 0, start_pos) + 1
+            decl_indent = 0
+            for ch in content[decl_line_start:]:
+                if ch == " ":
+                    decl_indent += 1
+                elif ch == "\t":
+                    decl_indent += 4  # treat tab as 4 spaces
+                else:
+                    break
 
-            if depth == 0:
-                return get_line_number(pos - 1)
+            # scan lines after the brace for closing `}`
+            lines_after = content[brace_pos:].split("\n")
+            brace_line = get_line_number(brace_pos)
+
+            for i, line in enumerate(lines_after[1:], start=1):
+                stripped = line.lstrip()
+                if stripped.startswith("}"):
+                    # check indentation
+                    line_indent = len(line) - len(stripped)
+                    if line_indent <= decl_indent:
+                        return brace_line + i
+
             return None
 
         # exported functions and classes - safe pattern, no timeout needed
