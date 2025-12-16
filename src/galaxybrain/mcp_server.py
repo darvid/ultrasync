@@ -1089,7 +1089,9 @@ context:api, context:data, context:infra
     @mcp.tool()
     def recently_indexed(
         limit: int = 10,
-        item_type: Literal["all", "files", "symbols", "memories"] = "all",
+        item_type: Literal[
+            "all", "files", "symbols", "memories", "patterns"
+        ] = "all",
     ) -> dict[str, Any]:
         """Show most recently indexed items.
 
@@ -1098,12 +1100,12 @@ context:api, context:data, context:infra
 
         Args:
             limit: Maximum items per category (default: 10)
-            item_type: Filter by type - "all", "files", "symbols", or
-                "memories"
+            item_type: Filter by type - "all", "files", "symbols",
+                "memories", or "patterns"
 
         Returns:
-            Dictionary with recent files, symbols, and/or memories
-            sorted by indexed/created time (newest first)
+            Dictionary with recent files, symbols, memories, and/or
+            patterns sorted by indexed/created time (newest first)
         """
         from datetime import datetime, timezone
 
@@ -1156,6 +1158,21 @@ context:api, context:data, context:infra
                     "key_hash": _key_to_hex(m.key_hash),
                 }
                 for m in memories
+            ]
+
+        if item_type in ("all", "patterns"):
+            patterns = state.jit_manager.tracker.get_recent_patterns(limit)
+            result["patterns"] = [
+                {
+                    "pattern": p.pattern,
+                    "tool_type": p.tool_type,
+                    "matched_files": len(p.matched_files),
+                    "created_at": datetime.fromtimestamp(
+                        p.created_at, tz=timezone.utc
+                    ).isoformat(),
+                    "key_hash": _key_to_hex(p.key_hash),
+                }
+                for p in patterns
             ]
 
         return result

@@ -436,6 +436,43 @@ class FileTracker:
             for row in rows
         ]
 
+    def get_recent_patterns(self, limit: int = 10) -> list[PatternCacheRecord]:
+        """Get most recently cached patterns (grep/glob results)."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM pattern_caches
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        results = []
+        for row in rows:
+            # get associated files
+            file_rows = self.conn.execute(
+                "SELECT file_path FROM pattern_cache_files "
+                "WHERE pattern_key_hash = ?",
+                (row["key_hash"],),
+            ).fetchall()
+            matched_files = [r["file_path"] for r in file_rows]
+
+            results.append(
+                PatternCacheRecord(
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                    pattern=row["pattern"],
+                    tool_type=row["tool_type"],
+                    matched_files=matched_files,
+                    created_at=row["created_at"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
+                )
+            )
+
+        return results
+
     def get_symbol_keys(self, path: Path) -> list[int]:
         rows = self.conn.execute(
             "SELECT key_hash FROM symbols WHERE file_path = ?",
