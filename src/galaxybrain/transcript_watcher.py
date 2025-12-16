@@ -34,6 +34,10 @@ logger = structlog.get_logger(__name__)
 # env var for enabling search learning
 ENV_LEARN_ENABLED = "GALAXYBRAIN_LEARN_FROM_SEARCH"
 
+# max files to full-index from a single grep/glob result
+# prevents slowdown on broad patterns like **/*.tsx
+MAX_PATTERN_FILES_TO_INDEX = 20
+
 
 @dataclass
 class FileAccessEvent:
@@ -887,6 +891,43 @@ class TranscriptWatcher:
             if tc.tool_name in ClaudeCodeParser.PATTERN_CACHE_TOOLS:
                 await self._cache_pattern_result(tc)
 
+    async def _index_file_full(self, path: Path) -> bool:
+        """Full index with embeddings (for grep/glob results).
+
+        Use this for files discovered via grep/glob where we want
+        immediate semantic searchability.
+
+        Args:
+            path: File to index
+
+        Returns:
+            True if file was indexed, False if skipped/error
+        """
+        if not path.exists() or not path.is_file():
+            return False
+
+        try:
+            result = await self.jit_manager.index_file(path)
+            if result.status == "indexed":
+                self.stats.files_indexed += 1
+                logger.info(
+                    "full indexed %s: %d symbols, %d bytes",
+                    path.name,
+                    result.symbols,
+                    result.bytes,
+                )
+                return True
+            elif result.status == "skipped":
+                self.stats.files_skipped += 1
+                logger.debug("skipped %s: %s", path.name, result.reason)
+                return False
+            else:
+                logger.warning("index failed for %s: %s", path, result.reason)
+                return False
+        except Exception as e:
+            logger.debug("failed to index %s: %s", path.name, e)
+            return False
+
     async def _index_file(self, path: Path, reindex: bool = False) -> None:
         """Register a file (warm path - no immediate embedding).
 
@@ -953,10 +994,15 @@ class TranscriptWatcher:
             self.stats.errors.append(error_msg)
 
     async def _cache_pattern_result(self, tc: ToolCallEvent) -> None:
-        """Cache a grep/glob pattern result for semantic search.
+        """Cache a grep/glob pattern result AND index matched files.
 
         Extracts the pattern and matched files from the tool call,
-        then caches them so future semantic searches can find them.
+        then:
+        1. Caches the pattern → files mapping for pattern-based search
+        2. Full-indexes matched files with embeddings for semantic search
+
+        This ensures files found via grep/glob are immediately searchable
+        both by pattern and semantically.
         """
         pattern = tc.tool_input.get("pattern", "")
         if not pattern:
@@ -991,6 +1037,7 @@ class TranscriptWatcher:
         # determine tool type
         tool_type = "grep" if tc.tool_name == "Grep" else "glob"
 
+        # 1. Cache the pattern → files mapping
         try:
             result = await self.jit_manager.cache_pattern_result(
                 pattern=pattern,
@@ -1011,6 +1058,23 @@ class TranscriptWatcher:
             self.stats.errors.append(error_msg)
             if len(self.stats.errors) > 100:
                 self.stats.errors = self.stats.errors[-50:]
+
+        # 2. Full-index matched files with embeddings
+        indexed_count = 0
+
+        for file_path in project_files[:MAX_PATTERN_FILES_TO_INDEX]:
+            path = Path(file_path)
+            if await self._index_file_full(path):
+                indexed_count += 1
+
+        if indexed_count:
+            logger.info(
+                "indexed %d/%d files from %s pattern %r",
+                indexed_count,
+                len(project_files),
+                tool_type,
+                pattern[:30],
+            )
 
     def _extract_matched_files(
         self, tool_result: dict[str, Any] | list | None
