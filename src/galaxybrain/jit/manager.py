@@ -1550,21 +1550,28 @@ class JITIndexManager:
         pattern: str,
         tool_type: str,
         matched_files: list[str],
+        ttl_seconds: float = 604800.0,  # 7 days
     ) -> IndexResult:
         """Cache a grep/glob pattern result for semantic search.
 
         The pattern and its matched files are embedded and stored so future
         semantic searches can find them. Automatically evicted when any
-        matched file is modified.
+        matched file is modified, or when older than TTL.
 
         Args:
             pattern: The search pattern (regex for grep, glob for glob)
             tool_type: "grep" or "glob"
             matched_files: List of file paths that matched
+            ttl_seconds: Max age before eviction (default: 7 days)
 
         Returns:
             IndexResult with the cache key hash
         """
+        # evict stale patterns before adding new ones
+        evicted = self.tracker.evict_patterns_by_ttl(ttl_seconds)
+        if evicted > 0:
+            logger.info("evicted %d stale pattern cache(s) by TTL", evicted)
+
         # build content that captures the pattern and matches
         content_lines = [
             f"# Pattern Cache ({tool_type})",

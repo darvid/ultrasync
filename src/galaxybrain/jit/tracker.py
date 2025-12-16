@@ -1715,6 +1715,30 @@ class FileTracker:
         self._maybe_commit()
         return count
 
+    def evict_patterns_by_ttl(self, max_age_seconds: float = 604800.0) -> int:
+        """Evict pattern caches older than the specified TTL.
+
+        Default TTL is 7 days (604800 seconds). Patterns are evicted based
+        on their created_at timestamp.
+
+        Args:
+            max_age_seconds: Maximum age in seconds (default: 7 days)
+
+        Returns:
+            Number of patterns evicted
+        """
+        import time
+
+        cutoff = time.time() - max_age_seconds
+        cursor = self.conn.execute(
+            "DELETE FROM pattern_caches WHERE created_at < ?",
+            (cutoff,),
+        )
+        count = cursor.rowcount
+        if count > 0:
+            self._maybe_commit()
+        return count
+
     def update_pattern_vector(
         self, key_hash: int, vector_offset: int, vector_length: int
     ) -> bool:
