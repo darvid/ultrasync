@@ -203,6 +203,26 @@ class FileScanner:
         def get_line_number(pos: int) -> int:
             return content[:pos].count("\n") + 1
 
+        def find_block_end(start_pos: int) -> int | None:
+            """Find the end line of a brace-delimited block."""
+            brace_pos = content.find("{", start_pos)
+            if brace_pos == -1:
+                return None
+
+            depth = 1
+            pos = brace_pos + 1
+            while pos < len(content) and depth > 0:
+                char = content[pos]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                pos += 1
+
+            if depth == 0:
+                return get_line_number(pos - 1)
+            return None
+
         # exported functions and classes - safe pattern, no timeout needed
         export_pattern = re.compile(
             r"export\s+(?:default\s+)?(?:async\s+)?"
@@ -213,12 +233,19 @@ class FileScanner:
         for match in export_pattern.finditer(content):
             kind = match.group(1)
             name = match.group(2)
+
+            # find end of block for braced items
+            end_line = None
+            if kind in ("function", "class", "interface", "type", "enum"):
+                end_line = find_block_end(match.end())
+
             metadata.exported_symbols.append(name)
             metadata.symbol_info.append(
                 SymbolInfo(
                     name=name,
                     line=get_line_number(match.start()),
                     kind=kind,
+                    end_line=end_line,
                 )
             )
 
