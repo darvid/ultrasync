@@ -1090,7 +1090,7 @@ context:api, context:data, context:infra
     def recently_indexed(
         limit: int = 10,
         item_type: Literal[
-            "all", "files", "symbols", "memories", "patterns"
+            "all", "files", "symbols", "memories", "grep-cache"
         ] = "all",
     ) -> dict[str, Any]:
         """Show most recently indexed items.
@@ -1101,7 +1101,7 @@ context:api, context:data, context:infra
         Args:
             limit: Maximum items per category (default: 10)
             item_type: Filter by type - "all", "files", "symbols",
-                "memories", or "patterns"
+                "memories", or "grep-cache"
 
         Returns:
             Dictionary with recent files, symbols, memories, and/or
@@ -1160,9 +1160,9 @@ context:api, context:data, context:infra
                 for m in memories
             ]
 
-        if item_type in ("all", "patterns"):
+        if item_type in ("all", "grep-cache"):
             patterns = state.jit_manager.tracker.get_recent_patterns(limit)
-            result["patterns"] = [
+            result["grep_cache"] = [
                 {
                     "pattern": p.pattern,
                     "tool_type": p.tool_type,
@@ -1178,28 +1178,28 @@ context:api, context:data, context:infra
         return result
 
     @mcp.tool()
-    def search_patterns(
+    def search_grep_cache(
         query: str,
         top_k: int = 10,
     ) -> dict[str, Any]:
-        """Search cached grep/glob patterns semantically.
+        """Search cached grep/glob results semantically.
 
         Use this to find previously cached grep/glob results without
-        re-running the search. Patterns are embedded when cached, so
+        re-running the search. Results are embedded when cached, so
         you can search with natural language.
 
         Examples:
-            - "authentication" finds grep patterns like "handleAuth"
-            - "react components" finds glob patterns like "**/*.tsx"
-            - "database queries" finds patterns related to SQL/ORM
+            - "authentication" finds grep results like "handleAuth"
+            - "react components" finds glob results like "**/*.tsx"
+            - "database queries" finds results related to SQL/ORM
 
         Args:
-            query: Natural language query to find relevant patterns
+            query: Natural language query to find relevant cached searches
             top_k: Maximum results to return (default: 10)
 
         Returns:
-            Dictionary with matching patterns, their tool type (grep/glob),
-            and the files they matched
+            Dictionary with matching cached grep/glob searches,
+            their tool type (grep/glob), and the files they matched
         """
         if state.jit_manager.provider is None:
             return {"error": "embedding provider not available"}
@@ -1428,7 +1428,7 @@ context:api, context:data, context:infra
     async def search(
         query: str,
         top_k: int = 10,
-        result_type: Literal["all", "file", "symbol", "pattern"] = "all",
+        result_type: Literal["all", "file", "symbol", "grep-cache"] = "all",
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
@@ -1456,8 +1456,8 @@ context:api, context:data, context:infra
         Args:
             query: Natural language search query (not regex!)
             top_k: Maximum results to return
-            result_type: "all", "file", "symbol", or "pattern" (use
-                "symbol" for functions/classes, "pattern" for cached
+            result_type: "all", "file", "symbol", or "grep-cache" (use
+                "symbol" for functions/classes, "grep-cache" for cached
                 grep/glob results)
             fallback_glob: Glob pattern for fallback (default: common
                 code extensions)
@@ -1484,7 +1484,10 @@ context:api, context:data, context:infra
             root=root,
             top_k=top_k,
             fallback_glob=fallback_glob,
-            result_type=result_type,
+            # map grep-cache to internal pattern type
+            result_type="pattern"
+            if result_type == "grep-cache"
+            else result_type,
             include_source=include_source,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000

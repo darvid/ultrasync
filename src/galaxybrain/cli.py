@@ -244,9 +244,9 @@ def index(
     "-t",
     "--type",
     "result_type",
-    type=click.Choice(["all", "file", "symbol", "pattern"]),
+    type=click.Choice(["all", "file", "symbol", "grep-cache"]),
     default="all",
-    help="Filter results by type (file, symbol, pattern, or all)",
+    help="Filter results by type (file, symbol, grep-cache, or all)",
 )
 @click.option(
     "-f",
@@ -325,12 +325,14 @@ def query(
     )
 
     t0 = time.perf_counter()
+    # map grep-cache to internal pattern type
+    internal_type = "pattern" if result_type == "grep-cache" else result_type
     results, stats = search(
         query=query_text,
         manager=manager,
         root=root,
         top_k=k,
-        result_type=result_type,
+        result_type=internal_type,
     )
     t_search = time.perf_counter() - t0
 
@@ -380,7 +382,7 @@ def query(
             if r.type == "file":
                 typ = "F"
             elif r.type == "pattern":
-                typ = "P"
+                typ = "G"  # grep-cache
             else:
                 typ = "S"
             name = r.name or "-"
@@ -415,10 +417,10 @@ def query(
             if r.key_hash:
                 console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
         elif r.type == "pattern":
-            # pattern results: name=pattern, kind=tool_type (grep/glob)
-            tool_type = (r.kind or "pattern").upper()
+            # grep-cache results: name=pattern, kind=tool_type (grep/glob)
+            tool_type = (r.kind or "grep").upper()
             pattern = r.name or "unknown"
-            console.score(r.score, f"{tool_type} PATTERN: {pattern}")
+            console.score(r.score, f"{tool_type} CACHE: {pattern}")
             if r.key_hash:
                 console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
             # show matched files from content if available
