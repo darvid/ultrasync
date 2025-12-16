@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 from contextlib import asynccontextmanager
@@ -182,10 +184,6 @@ if TYPE_CHECKING:
     # Rust GlobalIndex type for AOT lookups
     from galaxybrain_index import GlobalIndex
 
-# ---------------------------------------------------------------------------
-# Pydantic models for structured output
-# ---------------------------------------------------------------------------
-
 
 class ThreadInfo(BaseModel):
     """Information about a thread."""
@@ -196,6 +194,53 @@ class ThreadInfo(BaseModel):
     touches: int = Field(description="Access frequency counter")
     last_touch: float = Field(description="Last activity timestamp")
     score: float = Field(description="Relevance score (recency + frequency)")
+
+
+class SessionThreadInfo(BaseModel):
+    """Information about a persistent session thread."""
+
+    id: int
+    session_id: str = Field(description="Claude Code session/transcript ID")
+    title: str
+    created_at: float
+    last_touch: float
+    touches: int
+    is_active: bool
+
+
+class ThreadFileInfo(BaseModel):
+    """File access record for a thread."""
+
+    file_path: str
+    operation: str = Field(description="read, write, or edit")
+    first_access: float
+    last_access: float
+    access_count: int
+
+
+class ThreadQueryInfo(BaseModel):
+    """User query record for a thread."""
+
+    id: int
+    query_text: str
+    timestamp: float
+
+
+class ThreadToolInfo(BaseModel):
+    """Tool usage record for a thread."""
+
+    tool_name: str
+    tool_count: int
+    last_used: float
+
+
+class SessionThreadContext(BaseModel):
+    """Full context for a session thread."""
+
+    thread: SessionThreadInfo
+    files: list[ThreadFileInfo]
+    queries: list[ThreadQueryInfo]
+    tools: list[ThreadToolInfo]
 
 
 class SearchResult(BaseModel):
@@ -310,11 +355,6 @@ class WatcherStatsInfo(BaseModel):
     patterns_cached: int = Field(description="Grep/glob patterns cached")
 
 
-# ---------------------------------------------------------------------------
-# Server state management
-# ---------------------------------------------------------------------------
-
-
 class ServerState:
     def __init__(
         self,
@@ -346,6 +386,7 @@ class ServerState:
         self._enable_learning = enable_learning
         self._watcher: TranscriptWatcher | None = None
         self._watcher_started = False
+        self._persistent_thread_manager: "PersistentThreadManager | None" = None  # noqa: F821, UP037
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -464,18 +505,29 @@ class ServerState:
 
         self._ensure_jit_initialized()
         assert self._jit_manager is not None
+        assert self._embedder is not None
+
+        # create persistent thread manager for session tracking
+        from galaxybrain.jit.session_threads import PersistentThreadManager
+
+        self._persistent_thread_manager = PersistentThreadManager(
+            tracker=self._jit_manager.tracker,
+            embedder=self._embedder,
+            vector_cache=self._jit_manager.vector_cache,
+        )
 
         self._watcher = TranscriptWatcher(
             project_root=project_root,
             jit_manager=self._jit_manager,
             parser=parser,
             enable_learning=self._enable_learning,
+            thread_manager=self._persistent_thread_manager,
         )
         await self._watcher.start()
         self._watcher_started = True
 
         logger.info(
-            "transcript watcher started: agent=%s project=%s",
+            "transcript watcher started: agent=%s project=%s threads=enabled",
             parser.agent_name,
             project_root,
         )
@@ -492,16 +544,18 @@ class ServerState:
         """Get the transcript watcher instance."""
         return self._watcher
 
+    @property
+    def persistent_thread_manager(  # noqa: F821
+        self,
+    ) -> "PersistentThreadManager | None":  # noqa: F821, UP037
+        """Get the persistent thread manager instance."""
+        return self._persistent_thread_manager
+
     def get_watcher_stats(self) -> WatcherStats | None:
         """Get transcript watcher statistics."""
         if self._watcher:
             return self._watcher.get_stats()
         return None
-
-
-# ---------------------------------------------------------------------------
-# MCP Server setup
-# ---------------------------------------------------------------------------
 
 
 def create_server(
@@ -643,10 +697,6 @@ context:api, context:data, context:infra
 - Compare with current file to detect staleness
 """,
     )
-
-    # -----------------------------------------------------------------------
-    # Memory/Thread tools
-    # -----------------------------------------------------------------------
 
     @mcp.tool()
     def memory_write(
@@ -794,14 +844,6 @@ context:api, context:data, context:infra
             score=thr.score(now),
         )
 
-    # -----------------------------------------------------------------------
-    # Code/Symbol search tools
-    # -----------------------------------------------------------------------
-
-    # -----------------------------------------------------------------------
-    # Utility tools
-    # -----------------------------------------------------------------------
-
     @mcp.tool()
     def compute_hash(
         key: str,
@@ -886,10 +928,6 @@ context:api, context:data, context:infra
             "embedding_dim": state.embedder.dim,
             "thread_count": len(state.thread_manager.threads),
         }
-
-    # -----------------------------------------------------------------------
-    # JIT Indexing tools
-    # -----------------------------------------------------------------------
 
     @mcp.tool()
     async def index_file(
@@ -1597,10 +1635,6 @@ context:api, context:data, context:infra
 
         return {"error": f"key_hash {key_hash} not found"}
 
-    # -----------------------------------------------------------------------
-    # Structured Memory tools (ontology-based)
-    # -----------------------------------------------------------------------
-
     @mcp.tool()
     def memory_write_structured(
         text: str,
@@ -1775,9 +1809,194 @@ context:api, context:data, context:infra
             for e in entries
         ]
 
-    # -----------------------------------------------------------------------
-    # PatternSet tools
-    # -----------------------------------------------------------------------
+    @mcp.tool()
+    def session_thread_list(
+        session_id: str | None = None,
+        limit: int = 20,
+    ) -> list[SessionThreadInfo]:
+        """List session threads.
+
+        Returns threads from the current or specified session, ordered by
+        last activity. These threads are automatically created from user
+        queries in the transcript.
+
+        Args:
+            session_id: Filter by session ID (uses current if not provided)
+            limit: Maximum threads to return
+
+        Returns:
+            List of session thread info
+        """
+        ptm = state.persistent_thread_manager
+        if ptm is None:
+            return []
+
+        if session_id:
+            threads = ptm.list_session_threads(session_id)
+        else:
+            threads = ptm.get_recent_threads(limit)
+
+        return [
+            SessionThreadInfo(
+                id=t.id,
+                session_id=t.session_id,
+                title=t.title,
+                created_at=t.created_at,
+                last_touch=t.last_touch,
+                touches=t.touches,
+                is_active=t.is_active,
+            )
+            for t in threads[:limit]
+        ]
+
+    @mcp.tool()
+    def session_thread_get(
+        thread_id: int | None = None,
+    ) -> SessionThreadContext | None:
+        """Get full context for a session thread.
+
+        Returns the thread record plus all files, queries, and tools
+        associated with it.
+
+        Args:
+            thread_id: Thread ID (uses current active thread if not provided)
+
+        Returns:
+            Full thread context or None if not found
+        """
+        ptm = state.persistent_thread_manager
+        if ptm is None:
+            return None
+
+        ctx = ptm.get_thread_context(thread_id)
+        if ctx is None:
+            return None
+
+        return SessionThreadContext(
+            thread=SessionThreadInfo(
+                id=ctx.record.id,
+                session_id=ctx.record.session_id,
+                title=ctx.record.title,
+                created_at=ctx.record.created_at,
+                last_touch=ctx.record.last_touch,
+                touches=ctx.record.touches,
+                is_active=ctx.record.is_active,
+            ),
+            files=[
+                ThreadFileInfo(
+                    file_path=f.file_path,
+                    operation=f.operation,
+                    first_access=f.first_access,
+                    last_access=f.last_access,
+                    access_count=f.access_count,
+                )
+                for f in ctx.files
+            ],
+            queries=[
+                ThreadQueryInfo(
+                    id=q.id,
+                    query_text=q.query_text,
+                    timestamp=q.timestamp,
+                )
+                for q in ctx.queries
+            ],
+            tools=[
+                ThreadToolInfo(
+                    tool_name=t.tool_name,
+                    tool_count=t.tool_count,
+                    last_used=t.last_used,
+                )
+                for t in ctx.tools
+            ],
+        )
+
+    @mcp.tool()
+    def session_thread_search_queries(
+        search_text: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Search user queries across all session threads.
+
+        Finds queries containing the search text and returns them
+        with their associated thread info.
+
+        Args:
+            search_text: Text to search for in queries
+            limit: Maximum results to return
+
+        Returns:
+            List of {query, thread} dicts
+        """
+        ptm = state.persistent_thread_manager
+        if ptm is None:
+            return []
+
+        results = ptm.search_queries(search_text, limit)
+        return [
+            {
+                "query": {
+                    "id": q.id,
+                    "query_text": q.query_text,
+                    "timestamp": q.timestamp,
+                },
+                "thread": {
+                    "id": t.id,
+                    "session_id": t.session_id,
+                    "title": t.title,
+                },
+            }
+            for q, t in results
+        ]
+
+    @mcp.tool()
+    def session_thread_for_file(
+        file_path: str,
+    ) -> list[SessionThreadInfo]:
+        """Get all threads that have accessed a specific file.
+
+        Useful for understanding the context in which a file was modified.
+
+        Args:
+            file_path: Path to the file
+
+        Returns:
+            List of threads that accessed this file
+        """
+        ptm = state.persistent_thread_manager
+        if ptm is None:
+            return []
+
+        threads = ptm.get_threads_for_file(file_path)
+        return [
+            SessionThreadInfo(
+                id=t.id,
+                session_id=t.session_id,
+                title=t.title,
+                created_at=t.created_at,
+                last_touch=t.last_touch,
+                touches=t.touches,
+                is_active=t.is_active,
+            )
+            for t in threads
+        ]
+
+    @mcp.tool()
+    def session_thread_stats() -> dict[str, Any]:
+        """Get statistics about session threads.
+
+        Returns:
+            Dict with thread count and current session info
+        """
+        ptm = state.persistent_thread_manager
+        if ptm is None:
+            return {"enabled": False}
+
+        return {
+            "enabled": True,
+            "total_threads": ptm.thread_count(),
+            "current_thread_id": ptm.current_thread_id,
+            "current_session_id": ptm.current_session_id,
+        }
 
     @mcp.tool()
     def pattern_load(
@@ -1937,10 +2156,6 @@ context:api, context:data, context:infra
             for ps in state.pattern_manager.list_all()
         ]
 
-    # -----------------------------------------------------------------------
-    # Semantic Anchor tools
-    # -----------------------------------------------------------------------
-
     @mcp.tool()
     def anchor_list_types() -> dict[str, Any]:
         """List all available semantic anchor types.
@@ -1985,7 +2200,11 @@ context:api, context:data, context:infra
         """
         # resolve path
         if not Path(file_path).is_absolute():
-            full_path = state.project_root / file_path
+            if state.root is None:
+                raise ValueError(
+                    "Cannot resolve relative path without project root"
+                )
+            full_path = state.root / file_path
         else:
             full_path = Path(file_path)
 
@@ -2120,10 +2339,6 @@ context:api, context:data, context:infra
             "count": len(results),
         }
 
-    # -----------------------------------------------------------------------
-    # Transcript Watcher tools
-    # -----------------------------------------------------------------------
-
     @mcp.tool()
     def watcher_stats() -> WatcherStatsInfo | None:
         """Get transcript watcher statistics.
@@ -2191,6 +2406,42 @@ context:api, context:data, context:infra
         """
         await state.stop_watcher()
         return {"status": "stopped"}
+
+    @mcp.tool()
+    async def watcher_reprocess() -> dict[str, Any]:
+        """Clear transcript positions and reprocess from beginning.
+
+        Use this when the MCP server was restarted mid-session and you
+        want to catch up on grep/glob patterns that were missed.
+
+        This clears all stored transcript positions and restarts the
+        watcher, which will reprocess all transcript content from the
+        beginning.
+
+        Returns:
+            Status with number of positions cleared
+        """
+        if not state.manager:
+            return {"status": "error", "reason": "no manager initialized"}
+
+        # clear stored positions
+        cleared = state.manager.tracker.clear_transcript_positions()
+
+        # stop and restart watcher to pick up cleared positions
+        await state.stop_watcher()
+
+        # clear in-memory positions too
+        if state.watcher:
+            state.watcher._file_positions.clear()
+
+        # restart
+        await state.start_watcher()
+
+        return {
+            "status": "reprocessing",
+            "positions_cleared": cleared,
+            "message": f"Cleared {cleared} position(s), watcher restarted",
+        }
 
     return mcp
 

@@ -6,7 +6,6 @@ Provides canonical 64-bit hashing and key string constructors for:
 - query keys: q:{mode}:{corpus}:{normalized_query}
 """
 
-
 import hashlib
 import struct
 
@@ -98,11 +97,6 @@ def hash64_sym_key(
 def hash64_query_key(mode: str, corpus: str, normalized_query: str) -> int:
     """Hash a query key to 64-bit integer."""
     return hash64(query_key(mode, corpus, normalized_query))
-
-
-# ---------------------------------------------------------------------------
-# Memory ontology key constructors
-# ---------------------------------------------------------------------------
 
 
 def mem_key(uuid8: str) -> str:

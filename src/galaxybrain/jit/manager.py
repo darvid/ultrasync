@@ -1518,10 +1518,6 @@ class JITIndexManager:
 
         return entries
 
-    # -----------------------------------------------------------------------
-    # Pattern caching
-    # -----------------------------------------------------------------------
-
     def _evict_patterns_for_file(self, path: Path) -> int:
         """Evict pattern caches that reference a modified file.
 

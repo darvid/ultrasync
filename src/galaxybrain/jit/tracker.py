@@ -80,6 +80,56 @@ class PatternCacheRecord:
     vector_length: int | None = None
 
 
+@dataclass
+class SessionThreadRecord:
+    """A persistent session thread capturing related work."""
+
+    id: int
+    session_id: str  # claude code conversation/jsonl file id
+    title: str
+    created_at: float
+    last_touch: float
+    touches: int
+    is_active: bool
+    centroid_offset: int | None = None
+    centroid_length: int | None = None
+
+
+@dataclass
+class ThreadFileRecord:
+    """Association between a thread and a file it accessed."""
+
+    thread_id: int
+    file_path: str
+    operation: str  # "read", "write", "edit"
+    first_access: float
+    last_access: float
+    access_count: int
+
+
+@dataclass
+class ThreadQueryRecord:
+    """A user query/message within a thread."""
+
+    id: int
+    thread_id: int
+    query_text: str
+    timestamp: float
+    embedding_offset: int | None = None
+    embedding_length: int | None = None
+
+
+@dataclass
+class ThreadToolRecord:
+    """Tool usage stats within a thread."""
+
+    id: int
+    thread_id: int
+    tool_name: str
+    tool_count: int
+    last_used: float
+
+
 class FileTracker:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -217,6 +267,65 @@ class FileTracker:
             );
             CREATE INDEX IF NOT EXISTS idx_pattern_cache_files_path
                 ON pattern_cache_files(file_path);
+
+            -- Session threads for persistent context
+            CREATE TABLE IF NOT EXISTS session_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                last_touch REAL NOT NULL,
+                touches INTEGER DEFAULT 1,
+                is_active INTEGER DEFAULT 1,
+                centroid_offset INTEGER,
+                centroid_length INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_threads_session
+                ON session_threads(session_id);
+            CREATE INDEX IF NOT EXISTS idx_threads_active
+                ON session_threads(is_active, last_touch DESC);
+
+            -- Thread-file associations
+            CREATE TABLE IF NOT EXISTS thread_files (
+                thread_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                first_access REAL NOT NULL,
+                last_access REAL NOT NULL,
+                access_count INTEGER DEFAULT 1,
+                PRIMARY KEY (thread_id, file_path),
+                FOREIGN KEY (thread_id)
+                    REFERENCES session_threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_files_path
+                ON thread_files(file_path);
+
+            -- Thread queries (user messages)
+            CREATE TABLE IF NOT EXISTS thread_queries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                query_text TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                embedding_offset INTEGER,
+                embedding_length INTEGER,
+                FOREIGN KEY (thread_id)
+                    REFERENCES session_threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_queries_thread
+                ON thread_queries(thread_id);
+
+            -- Thread tool usage
+            CREATE TABLE IF NOT EXISTS thread_tools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_count INTEGER DEFAULT 1,
+                last_used REAL NOT NULL,
+                FOREIGN KEY (thread_id)
+                    REFERENCES session_threads(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_tools_unique
+                ON thread_tools(thread_id, tool_name);
         """
         )
         self._maybe_commit()
@@ -1046,10 +1155,6 @@ class FileTracker:
         """
         return sorted(self.get_context_stats().keys())
 
-    # -------------------------------------------------------------------------
-    # Insight queries - symbols with kind starting with "insight:"
-    # -------------------------------------------------------------------------
-
     def get_insight_stats(self) -> dict[str, int]:
         """Get count of symbols for each insight type.
 
@@ -1228,10 +1333,6 @@ class FileTracker:
             (key, value),
         )
         self._maybe_commit()
-
-    # -----------------------------------------------------------------------
-    # Memory methods
-    # -----------------------------------------------------------------------
 
     def upsert_memory(
         self,
@@ -1445,10 +1546,6 @@ class FileTracker:
 
             offset += batch_size
 
-    # -----------------------------------------------------------------------
-    # Transcript position tracking
-    # -----------------------------------------------------------------------
-
     def get_transcript_position(self, path: Path) -> int:
         """Get the last read position for a transcript file.
 
@@ -1489,10 +1586,6 @@ class FileTracker:
         cursor = self.conn.execute("DELETE FROM transcript_positions")
         self._maybe_commit()
         return cursor.rowcount
-
-    # -----------------------------------------------------------------------
-    # Pattern cache tracking
-    # -----------------------------------------------------------------------
 
     def cache_pattern(
         self,
@@ -1650,10 +1743,6 @@ class FileTracker:
         self._maybe_commit()
         return cursor.rowcount
 
-    # -----------------------------------------------------------------------
-    # Recent items queries (for debugging/inspection)
-    # -----------------------------------------------------------------------
-
     def get_recent_files(self, limit: int = 10) -> list[FileRecord]:
         """Get most recently indexed files."""
         rows = self.conn.execute(
@@ -1748,6 +1837,368 @@ class FileTracker:
                 updated_at=row["updated_at"],
                 vector_offset=row["vector_offset"],
                 vector_length=row["vector_length"],
+            )
+            for row in rows
+        ]
+
+    # =========================================================================
+    # Session Thread Methods
+    # =========================================================================
+
+    def create_thread(
+        self,
+        session_id: str,
+        title: str,
+        centroid_offset: int | None = None,
+        centroid_length: int | None = None,
+    ) -> SessionThreadRecord:
+        """Create a new session thread."""
+        now = time.time()
+        cursor = self.conn.execute(
+            """
+            INSERT INTO session_threads
+                (session_id, title, created_at, last_touch, touches,
+                 is_active, centroid_offset, centroid_length)
+            VALUES (?, ?, ?, ?, 1, 1, ?, ?)
+            """,
+            (session_id, title, now, now, centroid_offset, centroid_length),
+        )
+        self._maybe_commit()
+
+        return SessionThreadRecord(
+            id=cursor.lastrowid,
+            session_id=session_id,
+            title=title,
+            created_at=now,
+            last_touch=now,
+            touches=1,
+            is_active=True,
+            centroid_offset=centroid_offset,
+            centroid_length=centroid_length,
+        )
+
+    def get_thread(self, thread_id: int) -> SessionThreadRecord | None:
+        """Get a thread by ID."""
+        row = self.conn.execute(
+            "SELECT * FROM session_threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        return SessionThreadRecord(
+            id=row["id"],
+            session_id=row["session_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            last_touch=row["last_touch"],
+            touches=row["touches"],
+            is_active=bool(row["is_active"]),
+            centroid_offset=row["centroid_offset"],
+            centroid_length=row["centroid_length"],
+        )
+
+    def get_threads_for_session(
+        self, session_id: str
+    ) -> list[SessionThreadRecord]:
+        """Get all threads for a session."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM session_threads
+            WHERE session_id = ? AND is_active = 1
+            ORDER BY last_touch DESC
+            """,
+            (session_id,),
+        ).fetchall()
+
+        return [
+            SessionThreadRecord(
+                id=row["id"],
+                session_id=row["session_id"],
+                title=row["title"],
+                created_at=row["created_at"],
+                last_touch=row["last_touch"],
+                touches=row["touches"],
+                is_active=bool(row["is_active"]),
+                centroid_offset=row["centroid_offset"],
+                centroid_length=row["centroid_length"],
+            )
+            for row in rows
+        ]
+
+    def get_recent_threads(
+        self, limit: int = 20, active_only: bool = True
+    ) -> list[SessionThreadRecord]:
+        """Get most recently touched threads."""
+        where = "WHERE is_active = 1" if active_only else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM session_threads
+            {where}
+            ORDER BY last_touch DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        return [
+            SessionThreadRecord(
+                id=row["id"],
+                session_id=row["session_id"],
+                title=row["title"],
+                created_at=row["created_at"],
+                last_touch=row["last_touch"],
+                touches=row["touches"],
+                is_active=bool(row["is_active"]),
+                centroid_offset=row["centroid_offset"],
+                centroid_length=row["centroid_length"],
+            )
+            for row in rows
+        ]
+
+    def touch_thread(self, thread_id: int) -> None:
+        """Update last_touch and increment touches for a thread."""
+        self.conn.execute(
+            """
+            UPDATE session_threads
+            SET last_touch = ?, touches = touches + 1
+            WHERE id = ?
+            """,
+            (time.time(), thread_id),
+        )
+        self._maybe_commit()
+
+    def update_thread_centroid(
+        self,
+        thread_id: int,
+        centroid_offset: int,
+        centroid_length: int,
+    ) -> None:
+        """Update the centroid vector location for a thread."""
+        self.conn.execute(
+            """
+            UPDATE session_threads
+            SET centroid_offset = ?, centroid_length = ?
+            WHERE id = ?
+            """,
+            (centroid_offset, centroid_length, thread_id),
+        )
+        self._maybe_commit()
+
+    def deactivate_thread(self, thread_id: int) -> None:
+        """Soft-delete a thread by marking it inactive."""
+        self.conn.execute(
+            "UPDATE session_threads SET is_active = 0 WHERE id = ?",
+            (thread_id,),
+        )
+        self._maybe_commit()
+
+    def thread_count(self, active_only: bool = True) -> int:
+        """Count threads."""
+        where = "WHERE is_active = 1" if active_only else ""
+        row = self.conn.execute(
+            f"SELECT COUNT(*) as cnt FROM session_threads {where}"
+        ).fetchone()
+        return row["cnt"]
+
+    # =========================================================================
+    # Thread File Association Methods
+    # =========================================================================
+
+    def add_thread_file(
+        self,
+        thread_id: int,
+        file_path: str,
+        operation: str,
+    ) -> None:
+        """Add or update a file association for a thread."""
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO thread_files
+                (thread_id, file_path, operation, first_access,
+                 last_access, access_count)
+            VALUES (?, ?, ?, ?, ?, 1)
+            ON CONFLICT(thread_id, file_path) DO UPDATE SET
+                operation = CASE
+                    WHEN excluded.operation IN ('write', 'edit')
+                    THEN excluded.operation
+                    ELSE thread_files.operation
+                END,
+                last_access = excluded.last_access,
+                access_count = thread_files.access_count + 1
+            """,
+            (thread_id, file_path, operation, now, now),
+        )
+        self._maybe_commit()
+
+    def get_thread_files(self, thread_id: int) -> list[ThreadFileRecord]:
+        """Get all files associated with a thread."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM thread_files
+            WHERE thread_id = ?
+            ORDER BY last_access DESC
+            """,
+            (thread_id,),
+        ).fetchall()
+
+        return [
+            ThreadFileRecord(
+                thread_id=row["thread_id"],
+                file_path=row["file_path"],
+                operation=row["operation"],
+                first_access=row["first_access"],
+                last_access=row["last_access"],
+                access_count=row["access_count"],
+            )
+            for row in rows
+        ]
+
+    def get_threads_for_file(self, file_path: str) -> list[int]:
+        """Get all thread IDs that have accessed a file."""
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT thread_id FROM thread_files
+            WHERE file_path = ?
+            """,
+            (file_path,),
+        ).fetchall()
+        return [row["thread_id"] for row in rows]
+
+    # =========================================================================
+    # Thread Query Methods
+    # =========================================================================
+
+    def add_thread_query(
+        self,
+        thread_id: int,
+        query_text: str,
+        embedding_offset: int | None = None,
+        embedding_length: int | None = None,
+    ) -> int:
+        """Add a user query to a thread."""
+        now = time.time()
+        cursor = self.conn.execute(
+            """
+            INSERT INTO thread_queries
+                (thread_id, query_text, timestamp,
+                 embedding_offset, embedding_length)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (thread_id, query_text, now, embedding_offset, embedding_length),
+        )
+        self._maybe_commit()
+        return cursor.lastrowid
+
+    def get_thread_queries(
+        self, thread_id: int, limit: int = 50
+    ) -> list[ThreadQueryRecord]:
+        """Get queries for a thread, most recent first."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM thread_queries
+            WHERE thread_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (thread_id, limit),
+        ).fetchall()
+
+        return [
+            ThreadQueryRecord(
+                id=row["id"],
+                thread_id=row["thread_id"],
+                query_text=row["query_text"],
+                timestamp=row["timestamp"],
+                embedding_offset=row["embedding_offset"],
+                embedding_length=row["embedding_length"],
+            )
+            for row in rows
+        ]
+
+    def search_thread_queries(
+        self, search_text: str, limit: int = 20
+    ) -> list[ThreadQueryRecord]:
+        """Search queries across all threads by text (simple LIKE search)."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM thread_queries
+            WHERE query_text LIKE ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (f"%{search_text}%", limit),
+        ).fetchall()
+
+        return [
+            ThreadQueryRecord(
+                id=row["id"],
+                thread_id=row["thread_id"],
+                query_text=row["query_text"],
+                timestamp=row["timestamp"],
+                embedding_offset=row["embedding_offset"],
+                embedding_length=row["embedding_length"],
+            )
+            for row in rows
+        ]
+
+    def update_query_embedding(
+        self,
+        query_id: int,
+        embedding_offset: int,
+        embedding_length: int,
+    ) -> None:
+        """Update embedding location for a query."""
+        self.conn.execute(
+            """
+            UPDATE thread_queries
+            SET embedding_offset = ?, embedding_length = ?
+            WHERE id = ?
+            """,
+            (embedding_offset, embedding_length, query_id),
+        )
+        self._maybe_commit()
+
+    # =========================================================================
+    # Thread Tool Usage Methods
+    # =========================================================================
+
+    def record_thread_tool(self, thread_id: int, tool_name: str) -> None:
+        """Record or increment tool usage for a thread."""
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO thread_tools
+                (thread_id, tool_name, tool_count, last_used)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(thread_id, tool_name) DO UPDATE SET
+                tool_count = thread_tools.tool_count + 1,
+                last_used = excluded.last_used
+            """,
+            (thread_id, tool_name, now),
+        )
+        self._maybe_commit()
+
+    def get_thread_tools(self, thread_id: int) -> list[ThreadToolRecord]:
+        """Get tool usage stats for a thread."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM thread_tools
+            WHERE thread_id = ?
+            ORDER BY tool_count DESC
+            """,
+            (thread_id,),
+        ).fetchall()
+
+        return [
+            ThreadToolRecord(
+                id=row["id"],
+                thread_id=row["thread_id"],
+                tool_name=row["tool_name"],
+                tool_count=row["tool_count"],
+                last_used=row["last_used"],
             )
             for row in rows
         ]

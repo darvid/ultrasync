@@ -27,6 +27,7 @@ import structlog
 
 if TYPE_CHECKING:
     from galaxybrain.jit.manager import JITIndexManager
+    from galaxybrain.jit.session_threads import PersistentThreadManager
     from galaxybrain.search_learner import SearchLearner
 
 logger = structlog.get_logger(__name__)
@@ -90,6 +91,12 @@ class WatcherStats:
     associations_created: int = 0
     # pattern cache stats
     patterns_cached: int = 0
+    # thread tracking stats
+    threads_enabled: bool = False
+    threads_created: int = 0
+    queries_captured: int = 0
+    current_thread_id: int | None = None
+    current_session_id: str | None = None
 
 
 class TranscriptParser(ABC):
@@ -182,6 +189,19 @@ class TranscriptParser(ABC):
         """
         return False  # default: no turn detection
 
+    def extract_user_query(self, line: str) -> str | None:
+        """Extract user query text from a user message line.
+
+        Override this to enable query extraction for thread tracking.
+
+        Args:
+            line: A single line from the transcript file
+
+        Returns:
+            The user's query text, or None if not a user message
+        """
+        return None  # default: no query extraction
+
     def parse_pattern_results(
         self, line: str, project_root: Path
     ) -> list[PatternResultEvent]:
@@ -215,17 +235,28 @@ class ClaudeCodeParser(TranscriptParser):
     """
 
     PROJECTS_DIR = Path.home() / ".claude" / "projects"
-    FILE_ACCESS_TOOLS = {"Read", "Write", "Edit", "NotebookEdit"}
+    FILE_ACCESS_TOOLS = {
+        "Read",
+        "Write",
+        "Edit",
+        "NotebookEdit",
+        # mcp__acp__ variants (Claude Code with ACP MCP server)
+        "mcp__acp__Read",
+        "mcp__acp__Write",
+        "mcp__acp__Edit",
+    }
 
     # tools where we track results (search learning + pattern caching)
     RESULT_TRACKED_TOOLS = {
         "mcp__galaxybrain__jit_search",
         "Grep",
         "Glob",
+        "mcp__acp__Grep",
+        "mcp__acp__Glob",
     }
 
     # tools where we cache the pattern → files result
-    PATTERN_CACHE_TOOLS = {"Grep", "Glob"}
+    PATTERN_CACHE_TOOLS = {"Grep", "Glob", "mcp__acp__Grep", "mcp__acp__Glob"}
 
     def __init__(self) -> None:
         """Initialize parser with pending tool call tracking."""
@@ -318,9 +349,9 @@ class ClaudeCodeParser(TranscriptParser):
                 continue
 
             # determine operation type
-            if tool_name == "Read":
+            if tool_name in ("Read", "mcp__acp__Read"):
                 operation = "read"
-            elif tool_name in ("Write", "NotebookEdit"):
+            elif tool_name in ("Write", "NotebookEdit", "mcp__acp__Write"):
                 operation = "write"
             else:
                 operation = "edit"
@@ -525,6 +556,36 @@ class ClaudeCodeParser(TranscriptParser):
         except json.JSONDecodeError:
             return False
 
+    def extract_user_query(self, line: str) -> str | None:
+        """Extract user query text from a user message line."""
+        try:
+            entry = json.loads(line)
+            if entry.get("type") != "user":
+                return None
+
+            message = entry.get("message", {})
+            content = message.get("content", [])
+
+            # content can be a string or list of content blocks
+            if isinstance(content, str):
+                return content.strip() if content.strip() else None
+
+            # extract text from content blocks
+            text_parts = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text:
+                        text_parts.append(text)
+
+            combined = " ".join(text_parts).strip()
+            return combined if combined else None
+
+        except json.JSONDecodeError:
+            return None
+
 
 class TranscriptWatcher:
     """Watch coding agent transcripts and auto-index accessed files.
@@ -543,6 +604,7 @@ class TranscriptWatcher:
         parser: TranscriptParser | None = None,
         debounce_seconds: float = 2.0,
         enable_learning: bool | None = None,
+        thread_manager: PersistentThreadManager | None = None,
     ):
         """Initialize the transcript watcher.
 
@@ -553,6 +615,8 @@ class TranscriptWatcher:
             debounce_seconds: Time to wait before processing a file
                 (to avoid indexing during rapid edits)
             enable_learning: Enable search learning (default: from env var)
+            thread_manager: Optional PersistentThreadManager for session
+                thread tracking
         """
         self.project_root = project_root.resolve()
         self.parser = parser or ClaudeCodeParser()
@@ -570,6 +634,7 @@ class TranscriptWatcher:
             project_slug=self.parser.get_project_slug(self.project_root),
             watch_dir=str(self.watch_dir),
             learning_enabled=enable_learning,
+            threads_enabled=thread_manager is not None,
         )
 
         # track file positions for tailing (loaded from DB on start)
@@ -588,13 +653,18 @@ class TranscriptWatcher:
         if enable_learning:
             self._init_learner()
 
+        # session thread manager (optional)
+        self._thread_manager: PersistentThreadManager | None = thread_manager
+        self._current_transcript: Path | None = None
+
         logger.info(
             "transcript watcher initialized: agent=%s project=%s "
-            "watch_dir=%s learning=%s",
+            "watch_dir=%s learning=%s threads=%s",
             self.parser.agent_name,
             self.project_root,
             self.watch_dir,
             enable_learning,
+            thread_manager is not None,
         )
 
     def _init_learner(self) -> None:
@@ -606,6 +676,14 @@ class TranscriptWatcher:
             project_root=self.project_root,
         )
         logger.info("search learning enabled")
+
+    def _session_id_from_transcript(self, transcript_path: Path) -> str:
+        """Extract session ID from transcript path.
+
+        Uses the transcript filename (without extension) as session ID.
+        e.g., /home/user/.claude/projects/-foo/abc123.jsonl -> abc123
+        """
+        return transcript_path.stem
 
     def _load_positions_from_db(self) -> None:
         """Load transcript positions from the database."""
@@ -621,6 +699,11 @@ class TranscriptWatcher:
     def learner(self) -> SearchLearner | None:
         """Get the search learner instance."""
         return self._learner
+
+    @property
+    def thread_manager(self) -> PersistentThreadManager | None:
+        """Get the persistent thread manager instance."""
+        return self._thread_manager
 
     async def start(self) -> None:
         """Start watching transcripts in the background."""
@@ -782,6 +865,19 @@ class TranscriptWatcher:
                 current_size,
             )
 
+            # track current transcript and update session for thread manager
+            if self._current_transcript != path:
+                self._current_transcript = path
+                if self._thread_manager:
+                    session_id = self._session_id_from_transcript(path)
+                    self._thread_manager.set_session(session_id)
+                    self.stats.current_session_id = session_id
+                    logger.info(
+                        "switched to session %s from transcript %s",
+                        session_id,
+                        path.name,
+                    )
+
             with path.open("r", encoding="utf-8") as f:
                 f.seek(last_position)
                 new_content = f.read()
@@ -864,6 +960,38 @@ class TranscriptWatcher:
                 len(self._pending_files),
             )
 
+            # record file access in current thread
+            if self._thread_manager:
+                self._thread_manager.record_file_access(
+                    event.path, event.operation
+                )
+
+        # handle user queries for thread tracking
+        if self._thread_manager:
+            query_text = self.parser.extract_user_query(line)
+            if query_text:
+                try:
+                    thread, is_new = self._thread_manager.handle_query(
+                        query_text
+                    )
+                    self.stats.queries_captured += 1
+                    self.stats.current_thread_id = thread.id
+                    if is_new:
+                        self.stats.threads_created += 1
+                        logger.info(
+                            "created new thread %d: %s",
+                            thread.id,
+                            thread.title[:50],
+                        )
+                    else:
+                        logger.debug(
+                            "routed query to thread %d: %s",
+                            thread.id,
+                            thread.title[:30],
+                        )
+                except Exception as e:
+                    logger.warning("failed to handle query for thread: %s", e)
+
         # handle tool calls for search learning and pattern caching
         tool_calls = self.parser.parse_tool_calls(line)
 
@@ -890,6 +1018,11 @@ class TranscriptWatcher:
         for tc in tool_calls:
             if tc.tool_name in ClaudeCodeParser.PATTERN_CACHE_TOOLS:
                 await self._cache_pattern_result(tc)
+
+        # record tool usage in current thread
+        if self._thread_manager and tool_calls:
+            for tc in tool_calls:
+                self._thread_manager.record_tool_use(tc.tool_name)
 
     async def _index_file_full(self, path: Path) -> bool:
         """Full index with embeddings (for grep/glob results).
@@ -1018,24 +1151,34 @@ class TranscriptWatcher:
             )
             return
 
-        # filter to project files only
+        # filter and normalize to absolute project files
         project_files = []
+        project_root_str = str(self.project_root)
         for f in matched_files:
             try:
-                if f.startswith(str(self.project_root)):
+                # handle both absolute and relative paths
+                if f.startswith(project_root_str):
+                    # already absolute
                     project_files.append(f)
+                elif not f.startswith("/"):
+                    # relative path - make absolute
+                    abs_path = str(self.project_root / f)
+                    project_files.append(abs_path)
+                # else: absolute path outside project, skip
             except (ValueError, TypeError):
                 continue
 
         if not project_files:
             logger.debug(
-                "_cache_pattern_result: no project files for pattern %r",
+                "_cache_pattern_result: no project files for pattern %r "
+                "(matched_files=%r)",
                 pattern[:30],
+                matched_files[:3] if matched_files else [],
             )
             return
 
         # determine tool type
-        tool_type = "grep" if tc.tool_name == "Grep" else "glob"
+        tool_type = "grep" if "Grep" in tc.tool_name else "glob"
 
         # 1. Cache the pattern → files mapping
         try:
@@ -1101,7 +1244,11 @@ class TranscriptWatcher:
 
         # format 2: dict with file info
         if isinstance(tool_result, dict):
-            # check for "files" key
+            # check for "filenames" key (Claude Code toolUseResult format)
+            if "filenames" in tool_result:
+                return self._extract_matched_files(tool_result["filenames"])
+
+            # check for "files" key (alternative format)
             if "files" in tool_result:
                 return self._extract_matched_files(tool_result["files"])
 

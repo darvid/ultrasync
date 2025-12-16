@@ -967,10 +967,6 @@ class VoyagerApp(App[None]):
             if tables:
                 tables.first(ClassificationTable).load_ir(self._ir)
 
-    # -------------------------------------------------------------------------
-    # Event handlers
-    # -------------------------------------------------------------------------
-
     def on_tree_node_selected(self, event: Tree.NodeSelected[Path]) -> None:
         """Handle file selection in tree."""
         node = event.node
@@ -1111,10 +1107,6 @@ class VoyagerApp(App[None]):
                         "#context-symbols", ContextSymbolsTable
                     )
                     symbols_table.load_symbols(symbols)
-
-    # -------------------------------------------------------------------------
-    # Actions
-    # -------------------------------------------------------------------------
 
     def action_tab_files(self) -> None:
         tabs = self.query_one(TabbedContent)
