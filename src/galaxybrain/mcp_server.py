@@ -18,6 +18,7 @@ from galaxybrain.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
 from galaxybrain.threads import ThreadManager
 from galaxybrain.transcript_watcher import (
     ClaudeCodeParser,
+    CodexParser,
     TranscriptParser,
     TranscriptWatcher,
     WatcherStats,
@@ -170,9 +171,8 @@ def get_transcript_parser(agent: str | None) -> TranscriptParser | None:
     if agent == "claude-code":
         return ClaudeCodeParser()
 
-    # Add more parsers here as they're implemented
-    # elif agent == "codex":
-    #     return CodexParser()
+    if agent == "codex":
+        return CodexParser()
 
     return None
 

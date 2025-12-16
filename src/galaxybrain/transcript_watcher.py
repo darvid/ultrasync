@@ -587,6 +587,418 @@ class ClaudeCodeParser(TranscriptParser):
             return None
 
 
+class CodexParser(TranscriptParser):
+    """Parser for OpenAI Codex transcripts.
+
+    Codex stores transcripts in:
+        ~/.codex/sessions/YYYY/MM/DD/rollout-TIMESTAMP-UUID.jsonl
+
+    Unlike Claude Code, Codex sessions are global (not project-specific).
+    We filter events by checking the `workdir` field in shell commands.
+
+    Tool result correlation:
+        Codex emits function_call and function_call_output separately.
+        We track pending calls by call_id and match with outputs.
+    """
+
+    SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+
+    # shell command patterns for file access detection
+    # read patterns: sed -n '...' file, cat file, head file, tail file
+    # write patterns: apply_patch, heredoc (cat <<EOF > file)
+    READ_COMMANDS = {"sed", "cat", "head", "tail", "less", "more"}
+
+    def __init__(self) -> None:
+        """Initialize parser with pending function call tracking."""
+        # call_id → (func_name, args, workdir)
+        self._pending_calls: dict[
+            str, tuple[str, dict[str, Any], str | None]
+        ] = {}
+        logger.debug(
+            "CodexParser initialized: sessions_dir=%s",
+            self.SESSIONS_DIR,
+        )
+
+    @property
+    def agent_name(self) -> str:
+        return "Codex"
+
+    def get_watch_dir(self, project_root: Path) -> Path:
+        """Return the global sessions directory.
+
+        Codex uses a single sessions directory for all projects.
+        Filtering by project happens in parse_line via workdir.
+        """
+        return self.SESSIONS_DIR
+
+    def get_project_slug(self, project_root: Path) -> str:
+        """Return project path as slug for identification."""
+        return str(project_root.resolve())
+
+    def should_process_file(self, path: Path) -> bool:
+        """Check if file is a Codex transcript (rollout-*.jsonl)."""
+        return path.suffix == ".jsonl" and path.name.startswith("rollout-")
+
+    def parse_line(
+        self, line: str, project_root: Path
+    ) -> list[FileAccessEvent]:
+        """Parse a Codex transcript line for file access events.
+
+        Extracts file paths from shell commands (sed, cat, apply_patch).
+        Only returns events where workdir is within project_root.
+        """
+        events: list[FileAccessEvent] = []
+
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return events
+
+        # handle both old format and new wrapped format
+        payload = entry.get("payload", entry)
+        entry_type = payload.get("type", entry.get("type"))
+
+        if entry_type not in ("function_call", "response_item"):
+            return events
+
+        # for response_item, unwrap to get the actual function_call
+        if entry_type == "response_item":
+            payload = payload.get("payload", {})
+            if payload.get("type") != "function_call":
+                return events
+
+        func_name = payload.get("name", "")
+        args_str = payload.get("arguments", "{}")
+
+        try:
+            args = json.loads(args_str)
+        except json.JSONDecodeError:
+            return events
+
+        # check workdir is within project
+        workdir = args.get("workdir", "")
+        project_str = str(project_root)
+        if workdir and not workdir.startswith(project_str):
+            logger.debug(
+                "skipping function_call with workdir outside project: %s",
+                workdir,
+            )
+            return events
+
+        # handle shell commands
+        if func_name == "shell":
+            events.extend(
+                self._parse_shell_command(args, project_root, workdir)
+            )
+
+        # handle apply_patch (file write)
+        elif func_name == "apply_patch":
+            # apply_patch writes to files - extract paths from patch content
+            patch_content = args.get("patch", "")
+            file_events = self._parse_apply_patch(patch_content, project_root)
+            events.extend(file_events)
+
+        if events:
+            logger.debug(
+                "parse_line found %d file access event(s) in Codex transcript",
+                len(events),
+            )
+
+        return events
+
+    def _parse_shell_command(
+        self,
+        args: dict[str, Any],
+        project_root: Path,
+        workdir: str,
+    ) -> list[FileAccessEvent]:
+        """Extract file access from shell command arguments."""
+        import re
+        import shlex
+
+        events: list[FileAccessEvent] = []
+        command = args.get("command", [])
+
+        if not isinstance(command, list) or len(command) < 3:
+            return events
+
+        # command is typically ["bash", "-lc", "actual command"]
+        if command[0] != "bash" or command[1] != "-lc":
+            return events
+
+        shell_cmd = command[2] if len(command) > 2 else ""
+        if not shell_cmd:
+            return events
+
+        # parse the shell command
+        try:
+            tokens = shlex.split(shell_cmd)
+        except ValueError:
+            # fallback to simple split for malformed commands
+            tokens = shell_cmd.split()
+
+        if not tokens:
+            return events
+
+        base_cmd = tokens[0]
+        base_dir = Path(workdir) if workdir else project_root
+
+        # detect heredoc writes FIRST: cat <<'EOF' > filename
+        # (must check before read detection to avoid false positive on cat)
+        if ">" in shell_cmd and ("<<" in shell_cmd or base_cmd == "cat"):
+            # simple heredoc detection
+            match = re.search(r">\s*(\S+)", shell_cmd)
+            if match:
+                file_str = match.group(1)
+                file_path = self._resolve_path(file_str, base_dir, project_root)
+                if file_path:
+                    events.append(
+                        FileAccessEvent(
+                            path=file_path,
+                            tool_name="shell:heredoc",
+                            operation="write",
+                        )
+                    )
+
+        # detect reads: sed, cat, head, tail (but not cat with redirect)
+        elif base_cmd in self.READ_COMMANDS:
+            # extract file path (usually last argument that's not a flag)
+            file_path = self._extract_file_from_read_cmd(
+                tokens, base_dir, project_root
+            )
+            if file_path:
+                events.append(
+                    FileAccessEvent(
+                        path=file_path,
+                        tool_name=f"shell:{base_cmd}",
+                        operation="read",
+                    )
+                )
+
+        # detect apply_patch embedded in shell command
+        elif base_cmd == "apply_patch" or "apply_patch" in shell_cmd:
+            # apply_patch within shell - treat as write
+            # this is a fallback; main apply_patch handling is separate
+            logger.debug("detected apply_patch in shell command")
+
+        return events
+
+    def _extract_file_from_read_cmd(
+        self,
+        tokens: list[str],
+        base_dir: Path,
+        project_root: Path,
+    ) -> Path | None:
+        """Extract file path from read command tokens.
+
+        Handles patterns like:
+        - sed -n '1,200p' filename
+        - cat filename
+        - head -n 100 filename
+        """
+        # find the last token that looks like a file path
+        for token in reversed(tokens):
+            # skip flags and numbers
+            if token.startswith("-") or token.isdigit():
+                continue
+            # skip sed/awk patterns (quoted strings)
+            if token.startswith("'") or token.startswith('"'):
+                continue
+            # check if it looks like a file path
+            if "/" in token or "." in token:
+                return self._resolve_path(token, base_dir, project_root)
+
+        return None
+
+    def _resolve_path(
+        self,
+        path_str: str,
+        base_dir: Path,
+        project_root: Path,
+    ) -> Path | None:
+        """Resolve a path string to absolute Path within project."""
+        try:
+            if path_str.startswith("/"):
+                resolved = Path(path_str)
+            else:
+                resolved = (base_dir / path_str).resolve()
+
+            # verify within project
+            if str(resolved).startswith(str(project_root)):
+                return resolved
+        except (ValueError, OSError):
+            pass
+
+        return None
+
+    def _parse_apply_patch(
+        self,
+        patch_content: str,
+        project_root: Path,
+    ) -> list[FileAccessEvent]:
+        """Extract file paths from apply_patch content."""
+        import re
+
+        events: list[FileAccessEvent] = []
+
+        # apply_patch format includes file markers like:
+        # *** Add File: path/to/file
+        # *** Update File: path/to/file
+        patterns = [
+            r"\*\*\* Add File:\s*(\S+)",
+            r"\*\*\* Update File:\s*(\S+)",
+            r"\+\+\+ b/(\S+)",  # git diff format
+        ]
+
+        for pattern in patterns:
+            for match in re.finditer(pattern, patch_content):
+                file_str = match.group(1)
+                file_path = self._resolve_path(
+                    file_str, project_root, project_root
+                )
+                if file_path:
+                    events.append(
+                        FileAccessEvent(
+                            path=file_path,
+                            tool_name="apply_patch",
+                            operation="write",
+                        )
+                    )
+
+        return events
+
+    def parse_tool_calls(self, line: str) -> list[ToolCallEvent]:
+        """Parse tool calls from Codex transcript line.
+
+        Correlates function_call with function_call_output.
+        """
+        import time
+
+        events: list[ToolCallEvent] = []
+
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            return events
+
+        # handle both formats
+        payload = entry.get("payload", entry)
+        entry_type = payload.get("type", entry.get("type"))
+
+        if entry_type == "response_item":
+            payload = payload.get("payload", {})
+            entry_type = payload.get("type")
+
+        if entry_type == "function_call":
+            func_name = payload.get("name", "")
+            call_id = payload.get("call_id", "")
+            args_str = payload.get("arguments", "{}")
+
+            try:
+                args = json.loads(args_str)
+            except json.JSONDecodeError:
+                args = {}
+
+            workdir = args.get("workdir")
+
+            # store pending call
+            if call_id:
+                self._pending_calls[call_id] = (func_name, args, workdir)
+                logger.debug(
+                    "tracking pending Codex call: %s id=%s",
+                    func_name,
+                    call_id[:8] if call_id else "none",
+                )
+
+        elif entry_type == "function_call_output":
+            call_id = payload.get("call_id", "")
+            output = payload.get("output", "")
+
+            if call_id and call_id in self._pending_calls:
+                func_name, args, workdir = self._pending_calls.pop(call_id)
+
+                # parse output if JSON
+                try:
+                    result = json.loads(output)
+                except (json.JSONDecodeError, TypeError):
+                    result = {"raw_output": output}
+
+                events.append(
+                    ToolCallEvent(
+                        tool_name=func_name,
+                        tool_input=args,
+                        tool_result=result,
+                        timestamp=time.time(),
+                    )
+                )
+                logger.debug(
+                    "matched Codex function output: %s id=%s",
+                    func_name,
+                    call_id[:8],
+                )
+
+        # cleanup old pending calls
+        self._cleanup_pending_calls()
+
+        return events
+
+    def _cleanup_pending_calls(self, max_pending: int = 100) -> None:
+        """Remove oldest pending calls to prevent memory leaks."""
+        if len(self._pending_calls) > max_pending:
+            to_remove = list(self._pending_calls.keys())[: max_pending // 2]
+            for key in to_remove:
+                del self._pending_calls[key]
+            logger.warning(
+                "cleaned up %d stale pending Codex calls",
+                len(to_remove),
+            )
+
+    def is_user_message(self, line: str) -> bool:
+        """Check if line is a user message (turn boundary)."""
+        try:
+            entry = json.loads(line)
+            # Codex uses type: "message" with role: "user"
+            if entry.get("type") == "message":
+                return entry.get("role") == "user"
+            return False
+        except json.JSONDecodeError:
+            return False
+
+    def extract_user_query(self, line: str) -> str | None:
+        """Extract user query text from a user message line."""
+        try:
+            entry = json.loads(line)
+            if entry.get("type") != "message" or entry.get("role") != "user":
+                return None
+
+            content = entry.get("content", [])
+
+            # content can be a list of content blocks
+            if isinstance(content, str):
+                return content.strip() if content.strip() else None
+
+            text_parts = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict):
+                    # handle input_text type
+                    if item.get("type") == "input_text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    elif item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+
+            combined = " ".join(text_parts).strip()
+            return combined if combined else None
+
+        except json.JSONDecodeError:
+            return None
+
+
 class TranscriptWatcher:
     """Watch coding agent transcripts and auto-index accessed files.
 
@@ -838,8 +1250,14 @@ class TranscriptWatcher:
             await asyncio.sleep(0.5)
 
     async def _scan_transcripts(self) -> None:
-        """Scan transcript files for new content."""
-        for transcript_path in self.watch_dir.iterdir():
+        """Scan transcript files for new content.
+
+        Uses recursive glob to handle nested directory structures
+        (e.g., Codex's YYYY/MM/DD/ date-based organization).
+        """
+        # use rglob for recursive scanning - handles both flat (Claude Code)
+        # and nested (Codex) directory structures
+        for transcript_path in self.watch_dir.rglob("*.jsonl"):
             if not transcript_path.is_file():
                 continue
 

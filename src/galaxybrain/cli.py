@@ -1282,7 +1282,7 @@ def voyager(directory: Path | None, model: str, no_classify: bool):
 @click.option(
     "-a",
     "--agent",
-    type=click.Choice(["claude-code", "auto"]),
+    type=click.Choice(["claude-code", "codex", "auto"]),
     default="auto",
     help="Coding agent for transcript parsing",
 )
