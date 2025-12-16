@@ -244,9 +244,9 @@ def index(
     "-t",
     "--type",
     "result_type",
-    type=click.Choice(["all", "file", "symbol"]),
+    type=click.Choice(["all", "file", "symbol", "pattern"]),
     default="all",
-    help="Filter results by type",
+    help="Filter results by type (file, symbol, pattern, or all)",
 )
 @click.option(
     "-f",
@@ -377,7 +377,12 @@ def query(
         click.echo(f"# {t_search * 1000:.1f}ms strategy={strategy_str}")
         click.echo("# type\tpath\tname\tkind\tlines\tscore\tkey_hash")
         for r in results:
-            typ = "F" if r.type == "file" else "S"
+            if r.type == "file":
+                typ = "F"
+            elif r.type == "pattern":
+                typ = "P"
+            else:
+                typ = "S"
             name = r.name or "-"
             kind = r.kind or "-"
             if r.line_start and r.line_end:
@@ -409,6 +414,25 @@ def query(
             console.score(r.score, f"FILE {rel_path}")
             if r.key_hash:
                 console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
+        elif r.type == "pattern":
+            # pattern results: name=pattern, kind=tool_type (grep/glob)
+            tool_type = (r.kind or "pattern").upper()
+            pattern = r.name or "unknown"
+            console.score(r.score, f"{tool_type} PATTERN: {pattern}")
+            if r.key_hash:
+                console.dim(f"        key: 0x{r.key_hash:016x} ({r.source})")
+            # show matched files from content if available
+            if r.content:
+                files = r.content.split("\n")[:5]  # show first 5 files
+                for f in files:
+                    if f and not f.startswith("..."):
+                        try:
+                            rel = Path(f).relative_to(Path.cwd())
+                            console.dim(f"          → {rel}")
+                        except ValueError:
+                            console.dim(f"          → {f}")
+                if len(r.content.split("\n")) > 5:
+                    console.dim("          ...")
         else:
             kind_label = (r.kind or "symbol").upper()
             if r.path:
