@@ -1458,7 +1458,9 @@ def stats(directory: Path | None):
     "-t",
     "--type",
     "key_type",
-    type=click.Choice(["all", "files", "symbols", "memories", "contexts"]),
+    type=click.Choice(
+        ["all", "files", "symbols", "memories", "contexts", "grep-cache"]
+    ),
     default="all",
     help="Filter by key type",
 )
@@ -1633,6 +1635,36 @@ def keys(
                 }
             )
 
+    if key_type in ("all", "grep-cache"):
+        query = """
+            SELECT key_hash, pattern, tool_type, created_at, vector_offset
+            FROM pattern_caches
+            ORDER BY created_at DESC
+        """
+        if limit:
+            query += f" LIMIT {limit}"
+        for row in cur.execute(query):
+            key_hash = row["key_hash"]
+            if key_hash < 0:
+                key_hash = key_hash + (1 << 64)
+            # count matched files
+            file_count = cur.execute(
+                "SELECT COUNT(*) FROM pattern_cache_files "
+                "WHERE pattern_key_hash = ?",
+                (row["key_hash"],),
+            ).fetchone()[0]
+            results.append(
+                {
+                    "type": "grep-cache",
+                    "key": f"grep:{row['pattern'][:50]}",
+                    "pattern": row["pattern"],
+                    "tool_type": row["tool_type"],
+                    "file_count": file_count,
+                    "key_hash": f"0x{key_hash:016x}",
+                    "embedded": row["vector_offset"] is not None,
+                }
+            )
+
     conn.close()
 
     if show_json:
@@ -1643,10 +1675,15 @@ def keys(
         click.echo("no keys found")
         return
 
-    files = [r for r in results if r["type"] == "file"]
-    symbols_list = [r for r in results if r["type"] == "symbol"]
-    memories = [r for r in results if r["type"] == "memory"]
-    contexts_list = [r for r in results if r["type"] == "context"]
+    grouped: dict[str, list[dict]] = {}
+    for r in results:
+        grouped.setdefault(r["type"], []).append(r)
+
+    files = grouped.get("file", [])
+    symbols_list = grouped.get("symbol", [])
+    memories = grouped.get("memory", [])
+    contexts_list = grouped.get("context", [])
+    grep_cache_list = grouped.get("grep-cache", [])
 
     try:
         from rich.console import Console
@@ -1707,6 +1744,22 @@ def keys(
             rich_console.print(table)
             rich_console.print()
 
+        if grep_cache_list:
+            table = Table(title=f"Grep Cache ({len(grep_cache_list)})")
+            table.add_column("V", width=1, justify="center")
+            table.add_column("Tool", style="magenta", width=5)
+            table.add_column("Pattern", style="blue", overflow="fold")
+            table.add_column("Files", justify="right", style="green")
+            for g in grep_cache_list:
+                embed = "[green]✓[/]" if g["embedded"] else "[red]✗[/]"
+                tool = (g.get("tool_type") or "grep").upper()[:5]
+                pattern = g["pattern"][:60]
+                if len(g["pattern"]) > 60:
+                    pattern += "…"
+                table.add_row(embed, tool, pattern, str(g["file_count"]))
+            rich_console.print(table)
+            rich_console.print()
+
         rich_console.print(
             "[dim]V = vector embedding "
             "([green]✓[/] computed, [red]✗[/] pending)[/]"
@@ -1754,6 +1807,16 @@ def keys(
                 if m["task"]:
                     click.echo(f"      task: {m['task']}")
                 click.echo(f"      text: {m['text']}")
+
+        if grep_cache_list:
+            click.echo(f"\n{'=' * 60}")
+            click.echo(f"GREP CACHE ({len(grep_cache_list)})")
+            click.echo("=" * 60)
+            for g in grep_cache_list:
+                embed_mark = "✓" if g["embedded"] else "✗"
+                tool = (g.get("tool_type") or "grep").upper()
+                click.echo(f"[{embed_mark}] {tool}: {g['pattern']}")
+                click.echo(f"      files: {g['file_count']}")
 
         click.echo(f"\ntotal: {len(results)} keys")
 
