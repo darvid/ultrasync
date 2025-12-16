@@ -28,7 +28,7 @@ logger = structlog.get_logger(__name__)
 class SearchResult:
     """A single search result with provenance tracking."""
 
-    type: str  # "file" or "symbol"
+    type: str  # "file", "symbol", or "pattern"
     key_hash: int | None
     score: float
     source: (
@@ -202,6 +202,16 @@ def search(
                                 sym_record.blob_offset,
                                 sym_record.blob_length,
                             )
+                elif item_type == "pattern":
+                    pattern_record = manager.tracker.get_pattern_cache(key_hash)
+                    if pattern_record:
+                        name = pattern_record.pattern
+                        kind = pattern_record.tool_type
+                        # include matched files as content
+                        content = "\n".join(pattern_record.matched_files[:20])
+                        if len(pattern_record.matched_files) > 20:
+                            extra = len(pattern_record.matched_files) - 20
+                            content += f"\n... and {extra} more"
                 output.append(
                     SearchResult(
                         type=item_type,

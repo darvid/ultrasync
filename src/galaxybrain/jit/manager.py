@@ -1295,7 +1295,7 @@ class JITIndexManager:
         Args:
             query_vector: Embedding vector to search for
             top_k: Maximum results to return
-            result_type: "all", "file", or "symbol"
+            result_type: "all", "file", "symbol", or "pattern"
 
         Returns:
             List of (key_hash, score, type) tuples
@@ -1346,6 +1346,23 @@ class JITIndexManager:
                     score = compute_score(vec)
                     results.append((sym_record.key_hash, score, "symbol"))
                     seen_keys.add(sym_record.key_hash)
+
+        if result_type in ("all", "pattern"):
+            for pattern_record in self.tracker.iter_patterns():
+                if pattern_record.key_hash in seen_keys:
+                    continue
+                if pattern_record.vector_offset is None:
+                    continue
+
+                vec = self.vector_store.read(
+                    pattern_record.vector_offset,
+                    pattern_record.vector_length or 0,
+                )
+                if vec is not None:
+                    self.vector_cache.put(pattern_record.key_hash, vec)
+                    score = compute_score(vec)
+                    results.append((pattern_record.key_hash, score, "pattern"))
+                    seen_keys.add(pattern_record.key_hash)
 
         results.sort(key=lambda x: x[1], reverse=True)
         logger.debug(

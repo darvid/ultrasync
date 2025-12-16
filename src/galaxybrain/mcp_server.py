@@ -1178,6 +1178,60 @@ context:api, context:data, context:infra
         return result
 
     @mcp.tool()
+    def search_patterns(
+        query: str,
+        top_k: int = 10,
+    ) -> dict[str, Any]:
+        """Search cached grep/glob patterns semantically.
+
+        Use this to find previously cached grep/glob results without
+        re-running the search. Patterns are embedded when cached, so
+        you can search with natural language.
+
+        Examples:
+            - "authentication" finds grep patterns like "handleAuth"
+            - "react components" finds glob patterns like "**/*.tsx"
+            - "database queries" finds patterns related to SQL/ORM
+
+        Args:
+            query: Natural language query to find relevant patterns
+            top_k: Maximum results to return (default: 10)
+
+        Returns:
+            Dictionary with matching patterns, their tool type (grep/glob),
+            and the files they matched
+        """
+        if state.jit_manager.provider is None:
+            return {"error": "embedding provider not available"}
+
+        q_vec = state.jit_manager.provider.embed(query)
+        results = state.jit_manager.search_vectors(
+            q_vec, top_k, result_type="pattern"
+        )
+
+        output = []
+        for key_hash, score, _ in results:
+            pattern_record = state.jit_manager.tracker.get_pattern_cache(
+                key_hash
+            )
+            if pattern_record:
+                output.append(
+                    {
+                        "pattern": pattern_record.pattern,
+                        "tool_type": pattern_record.tool_type,
+                        "score": round(score, 4),
+                        "matched_files": pattern_record.matched_files,
+                        "key_hash": _key_to_hex(key_hash),
+                    }
+                )
+
+        return {
+            "query": query,
+            "results": output,
+            "count": len(output),
+        }
+
+    @mcp.tool()
     def list_contexts() -> dict[str, Any]:
         """List all detected context types with file counts.
 
@@ -1374,7 +1428,7 @@ context:api, context:data, context:infra
     async def search(
         query: str,
         top_k: int = 10,
-        result_type: Literal["all", "file", "symbol"] = "all",
+        result_type: Literal["all", "file", "symbol", "pattern"] = "all",
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
@@ -1393,11 +1447,18 @@ context:api, context:data, context:infra
         For symbol results, source code is included by default - no need
         to call get_source separately.
 
+        PATTERN SEARCH: If you've previously used grep/glob to find files,
+        try searching for that pattern here first! Cached grep/glob results
+        are indexed and searchable - e.g., "grep pattern handleSubmit" or
+        "files matching auth" will find previously cached pattern results
+        instantly without re-running grep.
+
         Args:
             query: Natural language search query (not regex!)
             top_k: Maximum results to return
-            result_type: "all", "file", or "symbol" (use "symbol" for
-                functions/classes)
+            result_type: "all", "file", "symbol", or "pattern" (use
+                "symbol" for functions/classes, "pattern" for cached
+                grep/glob results)
             fallback_glob: Glob pattern for fallback (default: common
                 code extensions)
             format: Output format - "tsv" (compact, ~3x fewer tokens) or
