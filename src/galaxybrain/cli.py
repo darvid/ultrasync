@@ -2481,6 +2481,297 @@ def anchors_find(
     click.echo(f"\n{len(results)} files found")
 
 
+# threads subcommand group - session thread introspection
+@cli.group()
+@directory_option()
+@click.pass_context
+def threads(ctx: click.Context, directory: Path | None):
+    """Introspect session threads from transcript tracking."""
+    ctx.ensure_object(dict)
+    ctx.obj["directory"] = directory
+
+
+@threads.command("list")
+@click.option(
+    "-s", "--session", "session_id", help="Filter by session ID"
+)
+@click.option(
+    "-n", "--limit", default=20, help="Max threads to show"
+)
+@click.pass_context
+def threads_list(ctx: click.Context, session_id: str | None, limit: int):
+    """List session threads."""
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_db = data_dir / "tracker.db"
+
+    if not tracker_db.exists():
+        console.error(f"tracker database not found at {tracker_db}")
+        sys.exit(1)
+
+    tracker = FileTracker(tracker_db)
+
+    if session_id:
+        threads_list = tracker.get_threads_for_session(session_id)
+    else:
+        threads_list = tracker.get_recent_threads(limit)
+
+    if not threads_list:
+        click.echo("no threads found")
+        return
+
+    click.echo(
+        f"{'ID':>5}  {'Session':<20}  {'Touches':>7}  "
+        f"{'Last Active':<19}  Title"
+    )
+    click.echo("-" * 90)
+
+    from datetime import datetime
+
+    for thr in threads_list[:limit]:
+        last = datetime.fromtimestamp(thr.last_touch).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        sid = thr.session_id
+        session_short = sid[:17] + "..." if len(sid) > 20 else sid
+        title = thr.title
+        title_short = title[:40] + "..." if len(title) > 40 else title
+        click.echo(
+            f"{thr.id:>5}  {session_short:<20}  {thr.touches:>7}  "
+            f"{last:<19}  {title_short}"
+        )
+
+
+@threads.command("show")
+@click.argument("thread_id", type=int)
+@click.pass_context
+def threads_show(ctx: click.Context, thread_id: int):
+    """Show full context for a thread."""
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_db = data_dir / "tracker.db"
+
+    if not tracker_db.exists():
+        console.error(f"tracker database not found at {tracker_db}")
+        sys.exit(1)
+
+    tracker = FileTracker(tracker_db)
+    thr = tracker.get_thread(thread_id)
+
+    if not thr:
+        console.error(f"thread {thread_id} not found")
+        sys.exit(1)
+
+    from datetime import datetime
+
+    console.header(f"Thread #{thr.id}: {thr.title}")
+
+    console.subheader("Metadata")
+    console.key_value("session_id", thr.session_id, indent=2)
+    console.key_value(
+        "created",
+        datetime.fromtimestamp(thr.created_at).strftime("%Y-%m-%d %H:%M:%S"),
+        indent=2,
+    )
+    console.key_value(
+        "last_touch",
+        datetime.fromtimestamp(thr.last_touch).strftime("%Y-%m-%d %H:%M:%S"),
+        indent=2,
+    )
+    console.key_value("touches", thr.touches, indent=2)
+    console.key_value("active", thr.is_active, indent=2)
+
+    # files
+    files = tracker.get_thread_files(thread_id)
+    console.subheader(f"\nFiles ({len(files)})")
+    if files:
+        for f in files[:20]:
+            path_short = compact_path(f.file_path, root)
+            click.echo(f"  {f.operation:<5} ({f.access_count}x) {path_short}")
+        if len(files) > 20:
+            click.echo(f"  ... and {len(files) - 20} more")
+    else:
+        console.dim("  (none)")
+
+    # queries
+    queries = tracker.get_thread_queries(thread_id)
+    console.subheader(f"\nQueries ({len(queries)})")
+    if queries:
+        for q in queries[:10]:
+            ts = datetime.fromtimestamp(q.timestamp).strftime("%H:%M:%S")
+            qtext = q.query_text
+            text = qtext[:70] + "..." if len(qtext) > 70 else qtext
+            text = text.replace("\n", " ")
+            click.echo(f"  [{ts}] {text}")
+        if len(queries) > 10:
+            click.echo(f"  ... and {len(queries) - 10} more")
+    else:
+        console.dim("  (none)")
+
+    # tools
+    tools = tracker.get_thread_tools(thread_id)
+    console.subheader(f"\nTools ({len(tools)})")
+    if tools:
+        for t in sorted(tools, key=lambda x: x.tool_count, reverse=True)[:15]:
+            click.echo(f"  {t.tool_name:<35} {t.tool_count:>5}x")
+        if len(tools) > 15:
+            click.echo(f"  ... and {len(tools) - 15} more")
+    else:
+        console.dim("  (none)")
+
+
+@threads.command("stats")
+@click.pass_context
+def threads_stats(ctx: click.Context):
+    """Show session thread statistics."""
+    import sqlite3
+
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_db = data_dir / "tracker.db"
+
+    if not tracker_db.exists():
+        console.error(f"tracker database not found at {tracker_db}")
+        sys.exit(1)
+
+    conn = sqlite3.connect(tracker_db)
+    cur = conn.cursor()
+
+    # thread counts
+    cur.execute("SELECT COUNT(*) FROM session_threads WHERE is_active = 1")
+    active_threads = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM session_threads WHERE is_active = 0")
+    inactive_threads = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(DISTINCT session_id) FROM session_threads")
+    session_count = cur.fetchone()[0]
+
+    # file/query/tool counts
+    cur.execute("SELECT COUNT(*) FROM thread_files")
+    file_associations = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM thread_queries")
+    query_count = cur.fetchone()[0]
+
+    cur.execute("SELECT COUNT(*) FROM thread_tools")
+    tool_associations = cur.fetchone()[0]
+
+    # most active session
+    cur.execute("""
+        SELECT session_id, COUNT(*) as cnt
+        FROM session_threads
+        GROUP BY session_id
+        ORDER BY cnt DESC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    top_session = row if row else (None, 0)
+
+    conn.close()
+
+    console.header("Session Thread Stats")
+
+    console.subheader("Threads")
+    console.key_value("active", active_threads, indent=2)
+    console.key_value("inactive", inactive_threads, indent=2)
+    console.key_value("total", active_threads + inactive_threads, indent=2)
+
+    console.subheader("\nSessions")
+    console.key_value("unique sessions", session_count, indent=2)
+    if top_session[0]:
+        console.key_value(
+            "most active",
+            f"{top_session[0][:30]}... ({top_session[1]} threads)",
+            indent=2,
+        )
+
+    console.subheader("\nAssociations")
+    console.key_value("file accesses", file_associations, indent=2)
+    console.key_value("queries captured", query_count, indent=2)
+    console.key_value("tool associations", tool_associations, indent=2)
+
+
+@threads.command("for-file")
+@click.argument("file_path", type=click.Path(exists=True))
+@click.pass_context
+def threads_for_file(ctx: click.Context, file_path: str):
+    """Show threads that accessed a file."""
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_db = data_dir / "tracker.db"
+
+    if not tracker_db.exists():
+        console.error(f"tracker database not found at {tracker_db}")
+        sys.exit(1)
+
+    # normalize path
+    abs_path = str(Path(file_path).resolve())
+
+    tracker = FileTracker(tracker_db)
+    thread_ids = tracker.get_threads_for_file(abs_path)
+
+    if not thread_ids:
+        click.echo(f"no threads found for {file_path}")
+        return
+
+    click.echo(f"Threads that accessed {compact_path(abs_path, root)}:\n")
+    click.echo(f"{'ID':>5}  {'Touches':>7}  Title")
+    click.echo("-" * 60)
+
+    for tid in thread_ids:
+        thr = tracker.get_thread(tid)
+        if thr:
+            title = thr.title
+            title_short = title[:45] + "..." if len(title) > 45 else title
+            click.echo(f"{thr.id:>5}  {thr.touches:>7}  {title_short}")
+
+
+@threads.command("search")
+@click.argument("query")
+@click.option("-n", "--limit", default=20, help="Max results to show")
+@click.pass_context
+def threads_search(ctx: click.Context, query: str, limit: int):
+    """Search queries across all threads."""
+    root = ctx.obj["directory"]
+    root = root.resolve() if root else Path.cwd()
+    data_dir = root / DEFAULT_DATA_DIR
+    tracker_db = data_dir / "tracker.db"
+
+    if not tracker_db.exists():
+        console.error(f"tracker database not found at {tracker_db}")
+        sys.exit(1)
+
+    tracker = FileTracker(tracker_db)
+    results = tracker.search_thread_queries(query, limit)
+
+    if not results:
+        click.echo(f"no queries matching '{query}'")
+        return
+
+    click.echo(f"Queries matching '{query}':\n")
+
+    from datetime import datetime
+
+    for q in results:
+        thr = tracker.get_thread(q.thread_id)
+        ts = datetime.fromtimestamp(q.timestamp).strftime("%Y-%m-%d %H:%M")
+        qtext = q.query_text
+        text = qtext[:60] + "..." if len(qtext) > 60 else qtext
+        text = text.replace("\n", " ")
+        if thr:
+            ttitle = thr.title
+            thread_title = ttitle[:25] + "..." if len(ttitle) > 25 else ttitle
+        else:
+            thread_title = "?"
+        click.echo(f"  [{ts}] (thread #{q.thread_id}: {thread_title})")
+        click.echo(f"    {text}\n")
+
+
 # ir subcommand group - App IR extraction
 @cli.group()
 @directory_option()
