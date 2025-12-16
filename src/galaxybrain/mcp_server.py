@@ -627,36 +627,29 @@ def create_server(
         instructions="""\
 Galaxybrain provides semantic indexing and search for codebases.
 
-## Semantic Search - Prefer search()
+## CRITICAL: Use search() BEFORE Grep/Glob/Read
 
-**Use search() FIRST for natural language queries like:**
-- "find the login button component"
-- "where is user authentication handled"
-- "hide the demo button on showings page"
-- "update the payment form validation"
+**ALWAYS call search() FIRST before using Grep, Glob, or Read tools.**
+This is a hard requirement - do not skip to grep/glob for code discovery.
 
-**Rephrase regex patterns as natural language:**
-- Instead of: grep("def index_file")
-- Try: search("index_file method definition")
-- Instead of: grep("class.*Parser")
-- Try: search("Parser classes")
-This helps the search learner improve from your queries.
+search() understands natural language and returns ranked results with
+source code included. One search() call replaces grep → glob → read chains.
 
-**search() advantages over grep/glob:**
-- Understands intent, not just literal strings
-- Single call vs multiple grep + glob + read calls
-- Returns ranked results with file paths and symbol names
-- Use result_type="symbol" to find functions/classes directly
+**Examples - use search() for these:**
+- "find the login component" → search("login component")
+- "where is auth handled" → search("authentication handler")
+- "update payment form" → search("payment form")
+- "grep pattern handleSubmit" → search("handleSubmit", result_type="grep-cache")
 
-**Only fall back to grep/glob when:**
-- search() returns no relevant results
-- You need exact regex matching (rare)
-- Index doesn't exist yet (run full_index first)
+**search() returns:**
+- File paths and symbol names ranked by relevance
+- Source code for symbols (no need to Read after)
+- Previously cached grep/glob results (result_type="grep-cache")
 
-**After fallback search succeeds, index for next time:**
-- Found file via grep/read? → index_file(path) before continuing
-- This makes future semantic searches find it instantly
-- Example: found contact-list.tsx via glob → index it → next query hits
+**ONLY use Grep/Glob when:**
+- search() explicitly returns no results or low scores (<0.3)
+- You need exact regex matching for a specific literal string
+- After grep fallback: call index_file(path) so search() works next time
 
 ## Indexing
 For large codebases, use full_index to persist and show progress.
@@ -1471,25 +1464,20 @@ context:api, context:data, context:infra
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
     ) -> dict[str, Any] | str:
-        """PREFERRED: Semantic code search - use BEFORE grep/glob/read.
+        """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
-        USE THIS FIRST for natural language queries like:
-        - "find the login button component"
-        - "where is authentication handled"
-        - "update the payment form"
-        - "hide the demo button on contacts page"
+        DO NOT use Grep/Glob/Read for code discovery - use this instead.
+        One search() call replaces entire grep → glob → read chains.
 
-        This replaces multiple grep + glob + read calls with ONE semantic
-        search. Returns ranked results with file paths and symbol names.
+        Returns ranked results WITH source code included - no Read needed.
 
-        For symbol results, source code is included by default - no need
-        to call get_source separately.
+        Examples:
+        - "find login component" → search("login component")
+        - "auth handler" → search("authentication handler")
+        - "grep cache" → search("handleSubmit", result_type="grep-cache")
 
-        PATTERN SEARCH: If you've previously used grep/glob to find files,
-        try searching for that pattern here first! Cached grep/glob results
-        are indexed and searchable - e.g., "grep pattern handleSubmit" or
-        "files matching auth" will find previously cached pattern results
-        instantly without re-running grep.
+        ONLY fall back to Grep/Glob if search() returns no results or
+        scores below 0.3. After grep fallback, call index_file(path).
 
         Args:
             query: Natural language search query (not regex!)
