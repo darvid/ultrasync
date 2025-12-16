@@ -44,10 +44,10 @@ def _format_search_results_tsv(
     source: str,
     hint: str | None = None,
 ) -> str:
-    """Format jit_search results as compact TSV for reduced token usage.
+    """Format search results as compact TSV for reduced token usage.
 
     Format:
-        # jit_search <elapsed>ms src=<source>
+        # search <elapsed>ms src=<source>
         # [hint if present]
         # type  path  name  kind  lines  score  key_hash
         F  src/foo.py  -  -  -  0.92  0x1234
@@ -55,7 +55,7 @@ def _format_search_results_tsv(
 
     ~3-4x fewer tokens than JSON format.
     """
-    lines = [f"# jit_search {elapsed_ms:.1f}ms src={source}"]
+    lines = [f"# search {elapsed_ms:.1f}ms src={source}"]
     if hint:
         lines.append(f"# {hint}")
     lines.append("# type\tpath\tname\tkind\tlines\tscore\tkey_hash")
@@ -573,9 +573,9 @@ def create_server(
         instructions="""\
 Galaxybrain provides semantic indexing and search for codebases.
 
-## Semantic Search - Prefer jit_search
+## Semantic Search - Prefer search()
 
-**Use jit_search FIRST for natural language queries like:**
+**Use search() FIRST for natural language queries like:**
 - "find the login button component"
 - "where is user authentication handled"
 - "hide the demo button on showings page"
@@ -583,29 +583,29 @@ Galaxybrain provides semantic indexing and search for codebases.
 
 **Rephrase regex patterns as natural language:**
 - Instead of: grep("def index_file")
-- Try: jit_search("index_file method definition")
+- Try: search("index_file method definition")
 - Instead of: grep("class.*Parser")
-- Try: jit_search("Parser classes")
+- Try: search("Parser classes")
 This helps the search learner improve from your queries.
 
-**jit_search advantages over grep/glob:**
+**search() advantages over grep/glob:**
 - Understands intent, not just literal strings
 - Single call vs multiple grep + glob + read calls
 - Returns ranked results with file paths and symbol names
 - Use result_type="symbol" to find functions/classes directly
 
 **Only fall back to grep/glob when:**
-- jit_search returns no relevant results
+- search() returns no relevant results
 - You need exact regex matching (rare)
-- Index doesn't exist yet (run jit_full_index first)
+- Index doesn't exist yet (run full_index first)
 
 **After fallback search succeeds, index for next time:**
-- Found file via grep/read? → jit_index_file(path) before continuing
+- Found file via grep/read? → index_file(path) before continuing
 - This makes future semantic searches find it instantly
 - Example: found contact-list.tsx via glob → index it → next query hits
 
 ## Indexing
-For large codebases, use jit_full_index to persist and show progress.
+For large codebases, use full_index to persist and show progress.
 
 ## Memory - Automatic Usage
 
@@ -634,11 +634,11 @@ context:api, context:data, context:infra
 ## Index Freshness
 
 **Re-index after modifying code:**
-- After editing a file with indexed symbols → jit_reindex_file(path)
-- After adding new functions/classes → jit_index_file(path)
+- After editing a file with indexed symbols → reindex_file(path)
+- After adding new functions/classes → index_file(path)
 - Stale index = search results may reference old code
 
-**Use jit_get_source to verify:**
+**Use get_source to verify:**
 - Get actual indexed source by key_hash from search results
 - Compare with current file to detect staleness
 """,
@@ -892,7 +892,7 @@ context:api, context:data, context:infra
     # -----------------------------------------------------------------------
 
     @mcp.tool()
-    async def jit_index_file(
+    async def index_file(
         path: str,
         force: bool = False,
     ) -> dict[str, Any]:
@@ -903,7 +903,7 @@ context:api, context:data, context:infra
         unless force=True.
 
         Call this after finding a file via grep/read fallback to ensure
-        future jit_search queries find it instantly.
+        future search() queries find it instantly.
 
         Args:
             path: Path to the file to index
@@ -920,14 +920,14 @@ context:api, context:data, context:infra
         if result.status == "skipped" and result.reason == "up_to_date":
             response["hint"] = (
                 "File already indexed but specific element not found. Use "
-                "jit_add_symbol(name='descriptive name', source_code='...', "
+                "add_symbol(name='descriptive name', source_code='...', "
                 "file_path='path', line_start=N) to add inline JSX/UI "
                 "elements to the index for future searches."
             )
         return response
 
     @mcp.tool()
-    async def jit_index_directory(
+    async def index_directory(
         path: str,
         pattern: str = "**/*",
         exclude: list[str] | None = None,
@@ -958,7 +958,7 @@ context:api, context:data, context:infra
         return {"status": "no_files_to_index"}
 
     @mcp.tool()
-    async def jit_add_symbol(
+    async def add_symbol(
         name: str,
         source_code: str,
         file_path: str | None = None,
@@ -968,7 +968,7 @@ context:api, context:data, context:infra
     ) -> dict[str, Any]:
         """Add a code symbol directly to the JIT index.
 
-        Use this when jit_search can't find inline JSX, UI elements, or
+        Use this when search() can't find inline JSX, UI elements, or
         nested code that isn't extracted as a standalone symbol. This
         adds it to the index so future searches find it.
 
@@ -992,7 +992,7 @@ context:api, context:data, context:infra
         return response
 
     @mcp.tool()
-    async def jit_reindex_file(path: str) -> dict[str, Any]:
+    async def reindex_file(path: str) -> dict[str, Any]:
         """Invalidate and reindex a file in the JIT index.
 
         Use when a file has changed significantly and you want to
@@ -1010,7 +1010,7 @@ context:api, context:data, context:infra
         return response
 
     @mcp.tool()
-    def jit_delete_file(path: str) -> dict[str, Any]:
+    def delete_file(path: str) -> dict[str, Any]:
         """Delete a file and all its symbols from the index.
 
         Use when a file is deleted from the codebase or you want to
@@ -1029,10 +1029,10 @@ context:api, context:data, context:infra
         }
 
     @mcp.tool()
-    def jit_delete_symbol(key_hash: str) -> dict[str, Any]:
+    def delete_symbol(key_hash: str) -> dict[str, Any]:
         """Delete a single symbol from the index by key hash.
 
-        Use to remove manually added symbols (via jit_add_symbol) or
+        Use to remove manually added symbols (via add_symbol) or
         individual extracted symbols.
 
         Args:
@@ -1049,7 +1049,7 @@ context:api, context:data, context:infra
         }
 
     @mcp.tool()
-    def jit_delete_memory(memory_id: str) -> dict[str, Any]:
+    def delete_memory(memory_id: str) -> dict[str, Any]:
         """Delete a memory entry from the index.
 
         Use to remove memories that are no longer relevant or were
@@ -1068,7 +1068,7 @@ context:api, context:data, context:infra
         }
 
     @mcp.tool()
-    def jit_get_stats() -> dict[str, Any]:
+    def get_stats() -> dict[str, Any]:
         """Get JIT index statistics.
 
         Returns file count, symbol count, blob size, vector cache usage,
@@ -1087,7 +1087,7 @@ context:api, context:data, context:infra
         return asdict(stats)
 
     @mcp.tool()
-    def jit_recent(
+    def recently_indexed(
         limit: int = 10,
         item_type: Literal["all", "files", "symbols", "memories"] = "all",
     ) -> dict[str, Any]:
@@ -1161,12 +1161,12 @@ context:api, context:data, context:infra
         return result
 
     @mcp.tool()
-    def jit_list_contexts() -> dict[str, Any]:
+    def list_contexts() -> dict[str, Any]:
         """List all detected context types with file counts.
 
         Returns context types auto-detected during AOT indexing via
         pattern matching (no LLM required). Use these for turbo-fast
-        filtered queries with jit_files_by_context.
+        filtered queries with files_by_context.
 
         Context types include:
         - context:auth - Authentication/authorization code
@@ -1191,7 +1191,7 @@ context:api, context:data, context:infra
         }
 
     @mcp.tool()
-    def jit_files_by_context(
+    def files_by_context(
         context: str,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -1200,7 +1200,7 @@ context:api, context:data, context:infra
         This is a ~1ms SQLite query - no embedding lookup required.
         Files are auto-classified during AOT indexing via pattern matching.
 
-        Use jit_list_contexts first to see available context types.
+        Use list_contexts first to see available context types.
 
         Args:
             context: Context type to filter by (e.g., "context:auth")
@@ -1229,7 +1229,7 @@ context:api, context:data, context:infra
         return results
 
     @mcp.tool()
-    def jit_list_insights() -> dict[str, Any]:
+    def list_insights() -> dict[str, Any]:
         """List all detected insight types with counts.
 
         Returns insight types auto-detected during AOT indexing via
@@ -1263,7 +1263,7 @@ context:api, context:data, context:infra
         }
 
     @mcp.tool()
-    def jit_insights_by_type(
+    def insights_by_type(
         insight_type: str,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
@@ -1272,7 +1272,7 @@ context:api, context:data, context:infra
         This is a ~1ms SQLite query - no embedding lookup required.
         Insights are auto-extracted during AOT indexing via pattern matching.
 
-        Use jit_list_insights first to see available insight types.
+        Use list_insights first to see available insight types.
 
         Args:
             insight_type: Insight type to filter by (e.g., "insight:todo")
@@ -1299,13 +1299,13 @@ context:api, context:data, context:infra
         return results
 
     @mcp.tool()
-    def jit_compact_vectors(force: bool = False) -> dict[str, Any]:
+    def compact_vectors(force: bool = False) -> dict[str, Any]:
         """Compact the vector store to reclaim dead bytes.
 
         This is a stop-the-world operation that rewrites vectors.dat
         with only live vectors, reclaiming space from orphaned vectors.
 
-        Use jit_get_stats first to check vector_needs_compaction and
+        Use get_stats first to check vector_needs_compaction and
         vector_dead_bytes to see if compaction is worthwhile.
 
         Args:
@@ -1320,7 +1320,7 @@ context:api, context:data, context:infra
         return asdict(result)
 
     @mcp.tool()
-    async def jit_full_index(
+    async def full_index(
         path: str | None = None,
         patterns: list[str] | None = None,
         resume: bool = True,
@@ -1330,7 +1330,7 @@ context:api, context:data, context:infra
         Indexes all matching files in the directory. Progress is
         checkpointed so indexing can resume if interrupted.
 
-        **IMPORTANT**: For large codebases, prefer jit_index_directory
+        **IMPORTANT**: For large codebases, prefer index_directory
         which indexes incrementally. Use this for initial full indexing.
 
         Args:
@@ -1354,7 +1354,7 @@ context:api, context:data, context:infra
         return {"status": "no_files_to_index"}
 
     @mcp.tool()
-    async def jit_search(
+    async def search(
         query: str,
         top_k: int = 10,
         result_type: Literal["all", "file", "symbol"] = "all",
@@ -1374,7 +1374,7 @@ context:api, context:data, context:infra
         search. Returns ranked results with file paths and symbol names.
 
         For symbol results, source code is included by default - no need
-        to call jit_get_source separately.
+        to call get_source separately.
 
         Args:
             query: Natural language search query (not regex!)
@@ -1422,7 +1422,7 @@ context:api, context:data, context:infra
         if not results or top_score < 0.7:
             hint = (
                 "Weak/no matches. If you find the file via grep/read, "
-                "call jit_index_file(path) so future searches find it."
+                "call index_file(path) so future searches find it."
             )
 
         # return compact TSV format by default (3-4x fewer tokens)
@@ -1456,11 +1456,11 @@ context:api, context:data, context:infra
         return response
 
     @mcp.tool()
-    def jit_get_source(key_hash: str) -> dict[str, Any]:
+    def get_source(key_hash: str) -> dict[str, Any]:
         """Get source content for a file, symbol, or memory by key hash.
 
         Retrieves the actual source code or content stored in the blob
-        for any indexed item. Use key_hash values from jit_search results.
+        for any indexed item. Use key_hash values from search() results.
 
         Args:
             key_hash: The key hash from search results (hex string like
@@ -2103,7 +2103,7 @@ context:api, context:data, context:infra
         """Stop the transcript watcher.
 
         Disables automatic indexing. Files can still be indexed manually
-        using jit_index_file.
+        using index_file.
 
         Returns:
             Status confirmation
