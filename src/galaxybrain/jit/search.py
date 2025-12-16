@@ -39,6 +39,7 @@ class SearchResult:
     kind: str | None = None  # symbol kind (function, class, method, etc.)
     line_start: int | None = None  # starting line number for symbols
     line_end: int | None = None  # ending line number for symbols
+    content: str | None = None  # source code content (symbols only)
 
 
 @dataclass
@@ -54,6 +55,22 @@ class SearchStats:
     files_indexed: int = 0
 
 
+def _fetch_symbol_content(
+    manager: "JITIndexManager",
+    blob_offset: int,
+    blob_length: int,
+) -> str | None:
+    """Fetch symbol source code from blob storage.
+
+    This is cheap - just a seek+read on the mmapped/cached blob file.
+    """
+    try:
+        content = manager.blob.read(blob_offset, blob_length)
+        return content.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
 def search(
     query: str,
     manager: "JITIndexManager",
@@ -61,6 +78,7 @@ def search(
     top_k: int = 10,
     fallback_glob: str | None = None,
     result_type: str = "all",
+    include_source: bool = True,
 ) -> tuple[list[SearchResult], SearchStats]:
     """Multi-strategy search with automatic fallback.
 
@@ -71,6 +89,8 @@ def search(
         top_k: Maximum results to return
         fallback_glob: File extensions for rg fallback
         result_type: Filter by type - "all", "file", or "symbol"
+        include_source: Include source code content for symbol results
+            (default: True). This is cheap as it reads from the blob.
 
     Returns:
         Tuple of (results, stats) where stats tracks which strategies were used
@@ -110,6 +130,7 @@ def search(
             sym_kind = None
             sym_line_start = None
             sym_line_end = None
+            sym_content = None
             sym_record = manager.tracker.get_symbol_by_key(sym_key)
             if sym_record:
                 sym_path = sym_record.file_path
@@ -117,6 +138,10 @@ def search(
                 sym_kind = sym_record.kind
                 sym_line_start = sym_record.line_start
                 sym_line_end = sym_record.line_end
+                if include_source:
+                    sym_content = _fetch_symbol_content(
+                        manager, sym_record.blob_offset, sym_record.blob_length
+                    )
             return [
                 SearchResult(
                     type="symbol",
@@ -128,6 +153,7 @@ def search(
                     source="aot_index",
                     line_start=sym_line_start,
                     line_end=sym_line_end,
+                    content=sym_content,
                 )
             ], stats
 
@@ -157,6 +183,7 @@ def search(
                 kind = None
                 line_start = None
                 line_end = None
+                content = None
                 if item_type == "file":
                     file_record = manager.tracker.get_file_by_key(key_hash)
                     if file_record:
@@ -169,6 +196,12 @@ def search(
                         kind = sym_record.kind
                         line_start = sym_record.line_start
                         line_end = sym_record.line_end
+                        if include_source:
+                            content = _fetch_symbol_content(
+                                manager,
+                                sym_record.blob_offset,
+                                sym_record.blob_length,
+                            )
                 output.append(
                     SearchResult(
                         type=item_type,
@@ -180,6 +213,7 @@ def search(
                         source="semantic",
                         line_start=line_start,
                         line_end=line_end,
+                        content=content,
                     )
                 )
             return output, stats
@@ -235,6 +269,7 @@ def search(
                 kind = None
                 line_start = None
                 line_end = None
+                content = None
                 if item_type == "file":
                     file_record = manager.tracker.get_file_by_key(key_hash)
                     if file_record:
@@ -247,6 +282,12 @@ def search(
                         kind = sym_record.kind
                         line_start = sym_record.line_start
                         line_end = sym_record.line_end
+                        if include_source:
+                            content = _fetch_symbol_content(
+                                manager,
+                                sym_record.blob_offset,
+                                sym_record.blob_length,
+                            )
                 output.append(
                     SearchResult(
                         type=item_type,
@@ -258,6 +299,7 @@ def search(
                         source="grep_then_indexed",
                         line_start=line_start,
                         line_end=line_end,
+                        content=content,
                     )
                 )
             return output, stats

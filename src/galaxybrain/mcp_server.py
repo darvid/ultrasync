@@ -1286,6 +1286,7 @@ context:api, context:data, context:infra
         result_type: Literal["all", "file", "symbol"] = "all",
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
+        include_source: bool = True,
     ) -> dict[str, Any] | str:
         """PREFERRED: Semantic code search - use BEFORE grep/glob/read.
 
@@ -1298,6 +1299,9 @@ context:api, context:data, context:infra
         This replaces multiple grep + glob + read calls with ONE semantic
         search. Returns ranked results with file paths and symbol names.
 
+        For symbol results, source code is included by default - no need
+        to call jit_get_source separately.
+
         Args:
             query: Natural language search query (not regex!)
             top_k: Maximum results to return
@@ -1307,10 +1311,14 @@ context:api, context:data, context:infra
                 code extensions)
             format: Output format - "tsv" (compact, ~3x fewer tokens) or
                 "json" (verbose). Default: "json"
+            include_source: Include source code for symbol results
+                (default: True). Set to False for lightweight metadata-only
+                queries.
 
         Returns:
             TSV: Compact tab-separated format with header comments
-            JSON: Full results with timing, paths, symbol names, and scores
+            JSON: Full results with timing, paths, symbol names, scores,
+                and source code for symbols
         """
         import time
 
@@ -1325,6 +1333,7 @@ context:api, context:data, context:infra
             top_k=top_k,
             fallback_glob=fallback_glob,
             result_type=result_type,
+            include_source=include_source,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 
@@ -1363,6 +1372,7 @@ context:api, context:data, context:infra
                     "source": r.source,
                     "line_start": r.line_start,
                     "line_end": r.line_end,
+                    "content": r.content,
                 }
                 for r in results
             ],
