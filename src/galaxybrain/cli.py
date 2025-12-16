@@ -1643,7 +1643,9 @@ def keys(
         """
         if limit:
             query += f" LIMIT {limit}"
-        for row in cur.execute(query):
+        # fetchall() to avoid cursor reuse bug with nested query
+        rows = cur.execute(query).fetchall()
+        for row in rows:
             key_hash = row["key_hash"]
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
