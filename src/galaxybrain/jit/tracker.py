@@ -1570,3 +1570,105 @@ class FileTracker:
         cursor = self.conn.execute("DELETE FROM pattern_caches")
         self._maybe_commit()
         return cursor.rowcount
+
+    # -----------------------------------------------------------------------
+    # Recent items queries (for debugging/inspection)
+    # -----------------------------------------------------------------------
+
+    def get_recent_files(self, limit: int = 10) -> list[FileRecord]:
+        """Get most recently indexed files."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM files
+            ORDER BY indexed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        return [
+            FileRecord(
+                path=row["path"],
+                mtime=row["mtime"],
+                size=row["size"],
+                content_hash=row["content_hash"],
+                blob_offset=row["blob_offset"],
+                blob_length=row["blob_length"],
+                key_hash=to_unsigned_64(row["key_hash"]),
+                indexed_at=row["indexed_at"],
+                vector_offset=row["vector_offset"],
+                vector_length=row["vector_length"],
+                detected_contexts=row["detected_contexts"],
+            )
+            for row in rows
+        ]
+
+    def get_recent_symbols(
+        self, limit: int = 10
+    ) -> list[tuple[SymbolRecord, float]]:
+        """Get most recently indexed symbols (by file indexed_at).
+
+        Returns tuples of (SymbolRecord, indexed_at) since symbols inherit
+        their timestamp from the parent file.
+        """
+        rows = self.conn.execute(
+            """
+            SELECT s.*, f.indexed_at
+            FROM symbols s
+            JOIN files f ON s.file_path = f.path
+            ORDER BY f.indexed_at DESC, s.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        return [
+            (
+                SymbolRecord(
+                    id=row["id"],
+                    file_path=row["file_path"],
+                    name=row["name"],
+                    kind=row["kind"],
+                    line_start=row["line_start"],
+                    line_end=row["line_end"],
+                    blob_offset=row["blob_offset"],
+                    blob_length=row["blob_length"],
+                    key_hash=to_unsigned_64(row["key_hash"]),
+                    vector_offset=row["vector_offset"],
+                    vector_length=row["vector_length"],
+                ),
+                row["indexed_at"],
+            )
+            for row in rows
+        ]
+
+    def get_recent_memories(self, limit: int = 10) -> list[MemoryRecord]:
+        """Get most recently created memories."""
+        rows = self.conn.execute(
+            """
+            SELECT * FROM memories
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        return [
+            MemoryRecord(
+                id=row["id"],
+                task=row["task"],
+                insights=row["insights"],
+                context=row["context"],
+                symbol_keys=row["symbol_keys"],
+                text=row["text"],
+                tags=row["tags"],
+                blob_offset=row["blob_offset"],
+                blob_length=row["blob_length"],
+                key_hash=to_unsigned_64(row["key_hash"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+                vector_offset=row["vector_offset"],
+                vector_length=row["vector_length"],
+            )
+            for row in rows
+        ]

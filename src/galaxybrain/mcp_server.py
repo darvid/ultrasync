@@ -1087,6 +1087,80 @@ context:api, context:data, context:infra
         return asdict(stats)
 
     @mcp.tool()
+    def jit_recent(
+        limit: int = 10,
+        item_type: Literal["all", "files", "symbols", "memories"] = "all",
+    ) -> dict[str, Any]:
+        """Show most recently indexed items.
+
+        Use this to verify the transcript watcher is working, or to see
+        what files/symbols have been indexed recently.
+
+        Args:
+            limit: Maximum items per category (default: 10)
+            item_type: Filter by type - "all", "files", "symbols", or
+                "memories"
+
+        Returns:
+            Dictionary with recent files, symbols, and/or memories
+            sorted by indexed/created time (newest first)
+        """
+        from datetime import datetime, timezone
+
+        result: dict[str, Any] = {}
+
+        if item_type in ("all", "files"):
+            files = state.jit_manager.tracker.get_recent_files(limit)
+            result["files"] = [
+                {
+                    "path": f.path,
+                    "indexed_at": datetime.fromtimestamp(
+                        f.indexed_at, tz=timezone.utc
+                    ).isoformat(),
+                    "size": f.size,
+                    "key_hash": _key_to_hex(f.key_hash),
+                }
+                for f in files
+            ]
+
+        if item_type in ("all", "symbols"):
+            symbols = state.jit_manager.tracker.get_recent_symbols(limit)
+            result["symbols"] = [
+                {
+                    "name": s.name,
+                    "kind": s.kind,
+                    "file_path": s.file_path,
+                    "lines": f"{s.line_start}-{s.line_end}"
+                    if s.line_end
+                    else str(s.line_start),
+                    "indexed_at": datetime.fromtimestamp(
+                        indexed_at, tz=timezone.utc
+                    ).isoformat(),
+                    "key_hash": _key_to_hex(s.key_hash),
+                }
+                for s, indexed_at in symbols
+            ]
+
+        if item_type in ("all", "memories"):
+            memories = state.jit_manager.tracker.get_recent_memories(limit)
+            result["memories"] = [
+                {
+                    "id": m.id,
+                    "task": m.task,
+                    "text": m.text[:100] + "..."
+                    if len(m.text) > 100
+                    else m.text,
+                    "created_at": datetime.fromtimestamp(
+                        m.created_at, tz=timezone.utc
+                    ).isoformat(),
+                    "key_hash": _key_to_hex(m.key_hash),
+                }
+                for m in memories
+            ]
+
+        return result
+
+    @mcp.tool()
     def jit_list_contexts() -> dict[str, Any]:
         """List all detected context types with file counts.
 
