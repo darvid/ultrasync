@@ -5,6 +5,51 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+# Directories that should always be excluded from indexing
+EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".tox",
+        ".nox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "target",  # Rust
+        "dist",
+        "build",
+        ".next",  # Next.js
+        ".nuxt",  # Nuxt
+        ".output",  # Nitro/Nuxt
+        "coverage",
+        ".coverage",
+        ".cache",
+        "vendor",  # Go, PHP
+    }
+)
+
+
+def should_ignore_path(path: Path) -> bool:
+    """Check if a path should be ignored based on directory name patterns.
+
+    This is a fast check that doesn't require git. Use this for filtering
+    individual file paths before indexing.
+
+    Args:
+        path: File path to check (can be absolute or relative)
+
+    Returns:
+        True if the path contains an excluded directory and should be skipped
+    """
+    # check if any path component is in the excluded set
+    for part in path.parts:
+        if part in EXCLUDED_DIR_NAMES:
+            return True
+    return False
+
 
 def get_tracked_files(
     root: Path,

@@ -25,6 +25,8 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from galaxybrain.git import should_ignore_path
+
 if TYPE_CHECKING:
     from galaxybrain.jit.manager import JITIndexManager
     from galaxybrain.jit.session_threads import PersistentThreadManager
@@ -1351,6 +1353,14 @@ class TranscriptWatcher:
                 )
                 continue
 
+            # skip ignored paths (node_modules, .git, etc.)
+            if should_ignore_path(event.path):
+                logger.debug(
+                    "skipping ignored path: %s",
+                    event.path,
+                )
+                continue
+
             # queue for indexing (debounced)
             # write/edit operations need full reindex to evict old vectors
             needs_reindex = event.operation in ("write", "edit")
@@ -1577,12 +1587,19 @@ class TranscriptWatcher:
                 # handle both absolute and relative paths
                 if f.startswith(project_root_str):
                     # already absolute
-                    project_files.append(f)
+                    abs_path = f
                 elif not f.startswith("/"):
                     # relative path - make absolute
                     abs_path = str(self.project_root / f)
-                    project_files.append(abs_path)
-                # else: absolute path outside project, skip
+                else:
+                    # absolute path outside project, skip
+                    continue
+
+                # skip ignored paths (node_modules, .git, etc.)
+                if should_ignore_path(Path(abs_path)):
+                    continue
+
+                project_files.append(abs_path)
             except (ValueError, TypeError):
                 continue
 

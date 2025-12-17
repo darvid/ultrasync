@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from galaxybrain.file_scanner import FileScanner
-from galaxybrain.git import get_tracked_files
+from galaxybrain.git import get_tracked_files, should_ignore_path
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
@@ -157,6 +157,13 @@ class JITIndexManager:
 
         t_start = time.perf_counter()
         path = path.resolve()
+
+        # skip ignored paths (node_modules, .git, etc.)
+        if should_ignore_path(path):
+            logger.debug("skipping ignored path: %s", path)
+            return IndexResult(
+                status="skipped", reason="ignored_path", path=str(path)
+            )
 
         if not path.exists():
             return IndexResult(status="error", reason="not_found")
@@ -405,6 +412,13 @@ class JITIndexManager:
         """Full index: register + embed. Use register_file() for JIT."""
         path = path.resolve()
 
+        # skip ignored paths (node_modules, .git, etc.)
+        if should_ignore_path(path):
+            logger.debug("skipping ignored path: %s", path)
+            return IndexResult(
+                status="skipped", reason="ignored_path", path=str(path)
+            )
+
         if not path.exists():
             return IndexResult(status="error", reason="not_found")
 
@@ -606,6 +620,13 @@ class JITIndexManager:
     async def reindex_file(self, path: Path) -> IndexResult:
         path = path.resolve()
 
+        # skip ignored paths (node_modules, .git, etc.)
+        if should_ignore_path(path):
+            logger.debug("skipping ignored path: %s", path)
+            return IndexResult(
+                status="skipped", reason="ignored_path", path=str(path)
+            )
+
         old_file = self.tracker.get_file(path)
         if old_file:
             self.vector_cache.evict(old_file.key_hash)
@@ -627,6 +648,13 @@ class JITIndexManager:
         without immediate embedding. Embeddings computed lazily on search.
         """
         path = path.resolve()
+
+        # skip ignored paths (node_modules, .git, etc.)
+        if should_ignore_path(path):
+            logger.debug("skipping ignored path: %s", path)
+            return IndexResult(
+                status="skipped", reason="ignored_path", path=str(path)
+            )
 
         old_file = self.tracker.get_file(path)
         if old_file:
