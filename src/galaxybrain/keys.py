@@ -11,24 +11,6 @@ import struct
 
 DEFAULT_PERSON = b"galaxybrain"
 
-# SQLite INTEGER is signed 64-bit, but our hashes are unsigned
-MAX_SIGNED_64 = 2**63 - 1
-UNSIGNED_64_MOD = 2**64
-
-
-def to_signed_64(val: int) -> int:
-    """Convert unsigned 64-bit to signed for SQLite storage."""
-    if val > MAX_SIGNED_64:
-        return val - UNSIGNED_64_MOD
-    return val
-
-
-def to_unsigned_64(val: int) -> int:
-    """Convert signed 64-bit back to unsigned after SQLite retrieval."""
-    if val < 0:
-        return val + UNSIGNED_64_MOD
-    return val
-
 
 def hash64(key: str, person: bytes = DEFAULT_PERSON) -> int:
     """Compute a 64-bit BLAKE2b hash of a key string.

@@ -167,7 +167,7 @@ class StatsPanel(Static):
         lines = [
             "[bold cyan]Index Statistics[/]",
             "",
-            "[yellow]Tracker (SQLite)[/]",
+            "[yellow]Tracker (LMDB)[/]",
             f"  files:    {stats.file_count:,}",
             f"  symbols:  {stats.symbol_count:,}",
             f"  memories: {stats.memory_count:,}",

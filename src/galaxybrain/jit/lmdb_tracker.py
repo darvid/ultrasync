@@ -1976,6 +1976,62 @@ class FileTracker:
                         count += 1
         return count
 
+    def get_thread_stats(self) -> dict[str, Any]:
+        """Get aggregate statistics for session threads.
+
+        Returns dict with:
+            active_threads: count of active threads
+            inactive_threads: count of inactive threads
+            session_count: unique session IDs
+            file_associations: total thread-file links
+            query_count: total captured queries
+            tool_associations: total tool usage records
+            top_session: (session_id, thread_count) or (None, 0)
+        """
+        active = 0
+        inactive = 0
+        sessions: set[str] = set()
+        session_counts: dict[str, int] = {}
+
+        with self.env.begin(db=self._db(b"threads")) as txn:
+            cursor = txn.cursor()
+            for _, value in cursor:
+                record = msgpack.unpackb(value)
+                if record.get("is_active"):
+                    active += 1
+                else:
+                    inactive += 1
+                sid = record.get("session_id", "")
+                sessions.add(sid)
+                session_counts[sid] = session_counts.get(sid, 0) + 1
+
+        file_assoc = 0
+        with self.env.begin(db=self._db(b"thread_files")) as txn:
+            file_assoc = txn.stat()["entries"]
+
+        query_count = 0
+        with self.env.begin(db=self._db(b"thread_queries")) as txn:
+            query_count = txn.stat()["entries"]
+
+        tool_assoc = 0
+        with self.env.begin(db=self._db(b"thread_tools")) as txn:
+            tool_assoc = txn.stat()["entries"]
+
+        top_session: tuple[str | None, int] = (None, 0)
+        if session_counts:
+            top_sid = max(session_counts, key=lambda k: session_counts[k])
+            top_session = (top_sid, session_counts[top_sid])
+
+        return {
+            "active_threads": active,
+            "inactive_threads": inactive,
+            "session_count": len(sessions),
+            "file_associations": file_assoc,
+            "query_count": query_count,
+            "tool_associations": tool_assoc,
+            "top_session": top_session,
+        }
+
     # =========================================================================
     # Thread File Association Methods
     # =========================================================================

@@ -1,6 +1,6 @@
 """Persistent session thread management.
 
-Wraps the in-memory ThreadManager with SQLite persistence, enabling
+Wraps the in-memory ThreadManager with LMDB persistence, enabling
 threads to survive across sessions and providing rich metadata about
 user activity patterns.
 """
@@ -47,7 +47,7 @@ class ThreadContext:
 
 
 class PersistentThreadManager:
-    """Manages session threads with SQLite persistence.
+    """Manages session threads with LMDB persistence.
 
     Provides semantic routing of events to threads, with persistence
     so threads survive across sessions. Integrates with the JIT index
@@ -65,7 +65,7 @@ class PersistentThreadManager:
         """Initialize the persistent thread manager.
 
         Args:
-            tracker: FileTracker for SQLite persistence
+            tracker: FileTracker for LMDB persistence
             embedder: EmbeddingProvider for computing embeddings
             vector_cache: VectorCache for storing centroids
             similarity_threshold: Min similarity to route to existing thread

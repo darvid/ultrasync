@@ -1350,27 +1350,13 @@ def stats(directory: Path | None):
         console.error(f"tracker database not found at {tracker_db}")
         sys.exit(1)
 
-    import sqlite3
-
-    conn = sqlite3.connect(tracker_db)
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM files")
-    file_count = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM symbols")
-    symbol_count = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM memories")
-    memory_count = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM files WHERE vector_offset IS NOT NULL")
-    embedded_files = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM symbols WHERE vector_offset IS NOT NULL")
-    embedded_symbols = cur.fetchone()[0]
-
-    conn.close()
+    tracker = FileTracker(tracker_db)
+    file_count = tracker.file_count()
+    symbol_count = tracker.symbol_count()
+    memory_count = tracker.memory_count()
+    embedded_files = tracker.embedded_file_count()
+    embedded_symbols = tracker.embedded_symbol_count()
+    tracker.close()
 
     blob_size = blob_file.stat().st_size if blob_file.exists() else 0
     index_size = index_file.stat().st_size if index_file.exists() else 0
@@ -1390,7 +1376,7 @@ def stats(directory: Path | None):
 
     console.header(f"Index Stats ({data_dir})")
 
-    console.subheader("Tracker (SQLite)")
+    console.subheader("Tracker (LMDB)")
     console.key_value("files", file_count, indent=2)
     console.key_value("symbols", symbol_count, indent=2)
     console.key_value("memories", memory_count, indent=2)
@@ -2587,8 +2573,6 @@ def threads_show(ctx: click.Context, thread_id: int):
 @click.pass_context
 def threads_stats(ctx: click.Context):
     """Show session thread statistics."""
-    import sqlite3
-
     root = ctx.obj["directory"]
     root = root.resolve() if root else Path.cwd()
     data_dir = root / DEFAULT_DATA_DIR
@@ -2598,41 +2582,17 @@ def threads_stats(ctx: click.Context):
         console.error(f"tracker database not found at {tracker_db}")
         sys.exit(1)
 
-    conn = sqlite3.connect(tracker_db)
-    cur = conn.cursor()
+    tracker = FileTracker(tracker_db)
+    stats = tracker.get_thread_stats()
+    tracker.close()
 
-    # thread counts
-    cur.execute("SELECT COUNT(*) FROM session_threads WHERE is_active = 1")
-    active_threads = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM session_threads WHERE is_active = 0")
-    inactive_threads = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(DISTINCT session_id) FROM session_threads")
-    session_count = cur.fetchone()[0]
-
-    # file/query/tool counts
-    cur.execute("SELECT COUNT(*) FROM thread_files")
-    file_associations = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM thread_queries")
-    query_count = cur.fetchone()[0]
-
-    cur.execute("SELECT COUNT(*) FROM thread_tools")
-    tool_associations = cur.fetchone()[0]
-
-    # most active session
-    cur.execute("""
-        SELECT session_id, COUNT(*) as cnt
-        FROM session_threads
-        GROUP BY session_id
-        ORDER BY cnt DESC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    top_session = row if row else (None, 0)
-
-    conn.close()
+    active_threads = stats["active_threads"]
+    inactive_threads = stats["inactive_threads"]
+    session_count = stats["session_count"]
+    file_associations = stats["file_associations"]
+    query_count = stats["query_count"]
+    tool_associations = stats["tool_associations"]
+    top_session = stats["top_session"]
 
     console.header("Session Thread Stats")
 

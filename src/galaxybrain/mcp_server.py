@@ -1299,7 +1299,7 @@ context:api, context:data, context:infra
     ) -> list[dict[str, Any]]:
         """List files matching a detected context type (turbo-fast, no LLM).
 
-        This is a ~1ms SQLite query - no embedding lookup required.
+        This is a ~1ms LMDB lookup - no embedding lookup required.
         Files are auto-classified during AOT indexing via pattern matching.
 
         Use list_contexts first to see available context types.
@@ -1371,7 +1371,7 @@ context:api, context:data, context:infra
     ) -> list[dict[str, Any]]:
         """List insights of a specific type with file paths and line numbers.
 
-        This is a ~1ms SQLite query - no embedding lookup required.
+        This is a ~1ms LMDB lookup - no embedding lookup required.
         Insights are auto-extracted during AOT indexing via pattern matching.
 
         Use list_insights first to see available insight types.
