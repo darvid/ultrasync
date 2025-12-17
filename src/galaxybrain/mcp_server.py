@@ -408,6 +408,16 @@ class ServerState:
                 embedding_provider=self._embedder,
             )
 
+    async def _init_index_manager_async(self) -> None:
+        """Initialize index manager without blocking event loop.
+
+        Runs model loading in thread pool so MCP handshake can complete.
+        """
+        import asyncio
+
+        if self._embedder is None or self._jit_manager is None:
+            await asyncio.to_thread(self._ensure_jit_initialized)
+
     def _ensure_aot_initialized(self) -> None:
         """Try to load AOT GlobalIndex if it exists."""
         if self._aot_checked:
@@ -503,7 +513,7 @@ class ServerState:
             )
             return
 
-        self._ensure_jit_initialized()
+        await self._init_index_manager_async()
         assert self._jit_manager is not None
         assert self._embedder is not None
 
@@ -601,22 +611,48 @@ def create_server(
         enable_learning=enable_learning,
     )
 
-    # eagerly init jit_manager ONLY if index already exists
-    # this makes first search fast (AOT ready) without creating files on startup
-    if state._jit_data_dir.exists():
-        state._ensure_jit_initialized()
+    # check if index exists for eager initialization
+    tracker_db = state._jit_data_dir / "tracker.db"
+    has_existing_index = tracker_db.exists()
 
     # lifespan context manager for startup/shutdown hooks
     # this runs AFTER the event loop starts, so async code works properly
     @asynccontextmanager
     async def lifespan(app: FastMCP):
         """Lifecycle hooks for the MCP server."""
-        # startup: auto-start transcript watcher if configured
+        import asyncio
+
+        # startup: launch initialization in background (don't block MCP handshake)
+        # model loading takes 5-10 seconds on first run, so we fire-and-forget
+        init_task: asyncio.Task | None = None
+        watcher_task: asyncio.Task | None = None
+
+        # eagerly initialize index manager in background if index exists
+        if has_existing_index and not watch_transcripts:
+            logger.info("initializing index manager in background...")
+            init_task = asyncio.create_task(state._init_index_manager_async())
+
+        # launch watcher (which also initializes index manager) in background
         if watch_transcripts:
-            logger.info("auto-starting transcript watcher...")
-            await state.start_watcher()
+            logger.info("launching transcript watcher in background...")
+            watcher_task = asyncio.create_task(state.start_watcher())
+
+        # yield to event loop so tasks can start before MCP handshake
+        await asyncio.sleep(0)
+
         yield
-        # shutdown: stop watcher gracefully
+
+        # shutdown: wait for background tasks to finish, then cleanup
+        if init_task:
+            try:
+                await init_task
+            except Exception as e:
+                logger.error("background initialization failed: %s", e)
+        if watcher_task:
+            try:
+                await watcher_task
+            except Exception as e:
+                logger.error("watcher startup failed: %s", e)
         if state.watcher:
             logger.info("stopping transcript watcher...")
             await state.stop_watcher()
