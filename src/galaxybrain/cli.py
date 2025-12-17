@@ -1479,8 +1479,7 @@ def keys(
     context: str | None,
 ):
     """Dump all indexed keys (files, symbols, memories)."""
-    import sqlite3
-
+    from galaxybrain.jit.lmdb_tracker import FileTracker
     from galaxybrain.keys import file_key, mem_key, sym_key
 
     root = directory.resolve() if directory else Path.cwd()
@@ -1495,9 +1494,7 @@ def keys(
         click.echo(f"error: tracker database not found at {tracker_db}")
         sys.exit(1)
 
-    conn = sqlite3.connect(tracker_db)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    tracker = FileTracker(tracker_db)
 
     # if --context is specified, implicitly filter to files only
     if context and key_type == "all":
@@ -1507,167 +1504,130 @@ def keys(
 
     if key_type in ("all", "files"):
         if context:
-            like_pattern = f'%"{context}"%'
-            query = """
-                SELECT path, key_hash, vector_offset, detected_contexts
-                FROM files
-                WHERE detected_contexts LIKE ?
-                ORDER BY path
-            """
-            params: tuple = (like_pattern,)
-            if limit:
-                query += f" LIMIT {limit}"
-            rows = cur.execute(query, params).fetchall()
+            file_iter = tracker.iter_files_by_context(context)
         else:
-            query = """
-                SELECT path, key_hash, vector_offset, detected_contexts
-                FROM files ORDER BY path
-            """
-            if limit:
-                query += f" LIMIT {limit}"
-            rows = cur.execute(query).fetchall()
+            file_iter = tracker.iter_files()
 
-        for row in rows:
-            key_hash = row["key_hash"]
+        count = 0
+        for rec in file_iter:
+            if limit and count >= limit:
+                break
+            key_hash = rec.key_hash
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
-            key_str = file_key(row["path"])
+            key_str = file_key(rec.path)
             contexts = []
-            if row["detected_contexts"]:
-                contexts = json.loads(row["detected_contexts"])
+            if rec.detected_contexts:
+                contexts = json.loads(rec.detected_contexts)
             results.append(
                 {
                     "type": "file",
                     "key": key_str,
-                    "path": row["path"],
+                    "path": rec.path,
                     "key_hash": f"0x{key_hash:016x}",
-                    "embedded": row["vector_offset"] is not None,
+                    "embedded": rec.vector_offset is not None,
                     "contexts": contexts,
                 }
             )
+            count += 1
 
     if key_type in ("all", "symbols"):
-        query = """
-            SELECT file_path, name, kind, line_start, line_end,
-                   key_hash, vector_offset
-            FROM symbols ORDER BY file_path, line_start
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-        for row in cur.execute(query):
-            key_hash = row["key_hash"]
+        count = 0
+        for rec in tracker.iter_all_symbols():
+            if limit and count >= limit:
+                break
+            key_hash = rec.key_hash
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
-            end_line = row["line_end"] or row["line_start"]
+            end_line = rec.line_end or rec.line_start
             key_str = sym_key(
-                row["file_path"],
-                row["name"],
-                row["kind"],
-                row["line_start"],
+                rec.file_path,
+                rec.name,
+                rec.kind,
+                rec.line_start,
                 end_line,
             )
             results.append(
                 {
                     "type": "symbol",
                     "key": key_str,
-                    "path": row["file_path"],
-                    "name": row["name"],
-                    "kind": row["kind"],
-                    "lines": f"{row['line_start']}-{end_line}",
+                    "path": rec.file_path,
+                    "name": rec.name,
+                    "kind": rec.kind,
+                    "lines": f"{rec.line_start}-{end_line}",
                     "key_hash": f"0x{key_hash:016x}",
-                    "embedded": row["vector_offset"] is not None,
+                    "embedded": rec.vector_offset is not None,
                 }
             )
+            count += 1
 
     if key_type in ("all", "memories"):
-        query = """
-            SELECT id, task, insights, context, tags, text, key_hash,
-                   vector_offset, created_at
-            FROM memories ORDER BY created_at DESC
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-        for row in cur.execute(query):
-            key_hash = row["key_hash"]
+        count = 0
+        for rec in tracker.iter_memories():
+            if limit and count >= limit:
+                break
+            key_hash = rec.key_hash
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
-            mem_id = f"{row['id']:08x}"
-            key_str = mem_key(mem_id)
+            key_str = mem_key(rec.id)
+            text_preview = (
+                rec.text[:80] + "..." if len(rec.text) > 80 else rec.text
+            )
             results.append(
                 {
                     "type": "memory",
                     "key": key_str,
                     "id": key_str,
-                    "task": row["task"],
-                    "insights": row["insights"],
-                    "context": row["context"],
-                    "tags": row["tags"],
-                    "text": row["text"][:80] + "..."
-                    if len(row["text"]) > 80
-                    else row["text"],
+                    "task": rec.task,
+                    "insights": rec.insights,
+                    "context": rec.context,
+                    "tags": rec.tags,
+                    "text": text_preview,
                     "key_hash": f"0x{key_hash:016x}",
-                    "embedded": row["vector_offset"] is not None,
+                    "embedded": rec.vector_offset is not None,
                 }
             )
+            count += 1
 
     if key_type in ("all", "contexts"):
-        query = """
-            SELECT detected_contexts, COUNT(*) as cnt
-            FROM files
-            WHERE detected_contexts IS NOT NULL
-            GROUP BY detected_contexts
-        """
         context_counts: dict[str, int] = {}
-        for row in cur.execute(query):
-            contexts_json = row["detected_contexts"]
-            if contexts_json:
-                contexts = json.loads(contexts_json)
+        for rec in tracker.iter_files():
+            if rec.detected_contexts:
+                contexts = json.loads(rec.detected_contexts)
                 for ctx in contexts:
-                    prev = context_counts.get(ctx, 0)
-                    context_counts[ctx] = prev + row["cnt"]
+                    context_counts[ctx] = context_counts.get(ctx, 0) + 1
 
-        for ctx, count in sorted(context_counts.items()):
+        for ctx, file_count in sorted(context_counts.items()):
             results.append(
                 {
                     "type": "context",
                     "key": ctx,
-                    "file_count": count,
+                    "file_count": file_count,
                 }
             )
 
     if key_type in ("all", "grep-cache"):
-        query = """
-            SELECT key_hash, pattern, tool_type, created_at, vector_offset
-            FROM pattern_caches
-            ORDER BY created_at DESC
-        """
-        if limit:
-            query += f" LIMIT {limit}"
-        # fetchall() to avoid cursor reuse bug with nested query
-        rows = cur.execute(query).fetchall()
-        for row in rows:
-            key_hash = row["key_hash"]
+        count = 0
+        for rec in tracker.iter_patterns():
+            if limit and count >= limit:
+                break
+            key_hash = rec.key_hash
             if key_hash < 0:
                 key_hash = key_hash + (1 << 64)
-            # count matched files
-            file_count = cur.execute(
-                "SELECT COUNT(*) FROM pattern_cache_files "
-                "WHERE pattern_key_hash = ?",
-                (row["key_hash"],),
-            ).fetchone()[0]
             results.append(
                 {
                     "type": "grep-cache",
-                    "key": f"grep:{row['pattern'][:50]}",
-                    "pattern": row["pattern"],
-                    "tool_type": row["tool_type"],
-                    "file_count": file_count,
+                    "key": f"grep:{rec.pattern[:50]}",
+                    "pattern": rec.pattern,
+                    "tool_type": rec.tool_type,
+                    "file_count": len(rec.matched_files),
                     "key_hash": f"0x{key_hash:016x}",
-                    "embedded": row["vector_offset"] is not None,
+                    "embedded": rec.vector_offset is not None,
                 }
             )
+            count += 1
 
-    conn.close()
+    tracker.close()
 
     if show_json:
         click.echo(json.dumps(results, indent=2))
