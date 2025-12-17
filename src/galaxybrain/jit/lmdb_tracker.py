@@ -511,21 +511,40 @@ class FileTracker:
     ) -> bool:
         """Update vector location for a file."""
         key = _pack_u64(key_hash)
+        files_db = self._db(b"files")
+        files_by_key_db = self._db(b"files_by_key")
 
-        with self.env.begin(write=True) as txn:
-            path_data = txn.get(key, db=self._db(b"files_by_key"))
+        # use batch transaction if in batch mode
+        if self._batch_mode and self._batch_txn:
+            txn = self._batch_txn
+            path_data = txn.get(key, db=files_by_key_db)
             if path_data is None:
                 return False
 
-            record_data = txn.get(path_data, db=self._db(b"files"))
+            record_data = txn.get(path_data, db=files_db)
             if record_data is None:
                 return False
 
             record = msgpack.unpackb(record_data)
             record["vector_offset"] = vector_offset
             record["vector_length"] = vector_length
-            txn.put(path_data, msgpack.packb(record), db=self._db(b"files"))
+            txn.put(path_data, msgpack.packb(record), db=files_db)
             return True
+        else:
+            with self.env.begin(write=True) as txn:
+                path_data = txn.get(key, db=files_by_key_db)
+                if path_data is None:
+                    return False
+
+                record_data = txn.get(path_data, db=files_db)
+                if record_data is None:
+                    return False
+
+                record = msgpack.unpackb(record_data)
+                record["vector_offset"] = vector_offset
+                record["vector_length"] = vector_length
+                txn.put(path_data, msgpack.packb(record), db=files_db)
+                return True
 
     def iter_files(self, batch_size: int = 100) -> Iterator[FileRecord]:
         """Iterate over all indexed files."""
@@ -804,29 +823,56 @@ class FileTracker:
         symbols_by_file_db = self._db(b"symbols_by_file")
         symbols_by_key_db = self._db(b"symbols_by_key")
 
-        with self.env.begin(write=True) as txn:
-            sym_ids_data = txn.get(file_path_key, db=symbols_by_file_db)
-            if sym_ids_data is None:
-                return 0
+        # use batch transaction if in batch mode
+        if self._batch_mode and self._batch_txn:
+            return self._delete_symbols_impl(
+                self._batch_txn,
+                file_path_key,
+                symbols_db,
+                symbols_by_file_db,
+                symbols_by_key_db,
+            )
+        else:
+            with self.env.begin(write=True) as txn:
+                return self._delete_symbols_impl(
+                    txn,
+                    file_path_key,
+                    symbols_db,
+                    symbols_by_file_db,
+                    symbols_by_key_db,
+                )
 
-            sym_ids = msgpack.unpackb(sym_ids_data)
-            count = 0
+    def _delete_symbols_impl(
+        self,
+        txn: Any,
+        file_path_key: bytes,
+        symbols_db: Any,
+        symbols_by_file_db: Any,
+        symbols_by_key_db: Any,
+    ) -> int:
+        """Implementation of delete_symbols using provided transaction."""
+        sym_ids_data = txn.get(file_path_key, db=symbols_by_file_db)
+        if sym_ids_data is None:
+            return 0
 
-            for sym_id in sym_ids:
-                sym_data = txn.get(_pack_u64(sym_id), db=symbols_db)
-                if sym_data:
-                    record = msgpack.unpackb(sym_data)
-                    # Clean up symbols_by_key index
-                    txn.delete(
-                        _pack_u64(record["key_hash"]), db=symbols_by_key_db
-                    )
-                    # Delete symbol record
-                    txn.delete(_pack_u64(sym_id), db=symbols_db)
-                    count += 1
+        sym_ids = msgpack.unpackb(sym_ids_data)
+        count = 0
 
-            # Delete file -> symbols mapping
-            txn.delete(file_path_key, db=symbols_by_file_db)
-            return count
+        for sym_id in sym_ids:
+            sym_data = txn.get(_pack_u64(sym_id), db=symbols_db)
+            if sym_data:
+                record = msgpack.unpackb(sym_data)
+                # Clean up symbols_by_key index
+                txn.delete(
+                    _pack_u64(record["key_hash"]), db=symbols_by_key_db
+                )
+                # Delete symbol record
+                txn.delete(_pack_u64(sym_id), db=symbols_db)
+                count += 1
+
+        # Delete file -> symbols mapping
+        txn.delete(file_path_key, db=symbols_by_file_db)
+        return count
 
     def delete_symbol_by_key(self, key_hash: int) -> bool:
         """Delete a single symbol by key hash."""
@@ -874,7 +920,9 @@ class FileTracker:
         symbols_db = self._db(b"symbols")
         symbols_by_key_db = self._db(b"symbols_by_key")
 
-        with self.env.begin(write=True) as txn:
+        # use batch transaction if in batch mode
+        if self._batch_mode and self._batch_txn:
+            txn = self._batch_txn
             sym_id_data = txn.get(_pack_u64(key_hash), db=symbols_by_key_db)
             if sym_id_data is None:
                 return False
@@ -888,6 +936,21 @@ class FileTracker:
             record["vector_length"] = vector_length
             txn.put(sym_id_data, msgpack.packb(record), db=symbols_db)
             return True
+        else:
+            with self.env.begin(write=True) as txn:
+                sym_id_data = txn.get(_pack_u64(key_hash), db=symbols_by_key_db)
+                if sym_id_data is None:
+                    return False
+
+                sym_data = txn.get(sym_id_data, db=symbols_db)
+                if sym_data is None:
+                    return False
+
+                record = msgpack.unpackb(sym_data)
+                record["vector_offset"] = vector_offset
+                record["vector_length"] = vector_length
+                txn.put(sym_id_data, msgpack.packb(record), db=symbols_db)
+                return True
 
     def symbol_count(self) -> int:
         """Count total indexed symbols."""
