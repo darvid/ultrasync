@@ -1211,7 +1211,7 @@ context:api, context:data, context:infra
     @mcp.tool()
     def search_grep_cache(
         query: str,
-        top_k: int = 10,
+        top_k: int = 5,
     ) -> dict[str, Any]:
         """Search cached grep/glob results semantically.
 
@@ -1458,7 +1458,7 @@ context:api, context:data, context:infra
     @mcp.tool()
     async def search(
         query: str,
-        top_k: int = 10,
+        top_k: int = 5,
         result_type: Literal["all", "file", "symbol", "grep-cache"] = "all",
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
@@ -1682,7 +1682,7 @@ context:api, context:data, context:infra
         context: list[str] | None = None,
         insights: list[str] | None = None,
         tags: list[str] | None = None,
-        top_k: int = 10,
+        top_k: int = 5,
     ) -> list[MemorySearchResultItem]:
         """Search memories with semantic and structured filters.
 
