@@ -480,7 +480,10 @@ class FileTracker:
                         txn.put(ctx_key, b"", db=context_idx_db)
 
     def delete_file(self, path: Path) -> bool:
-        """Delete a file and clean up indexes."""
+        """Delete a file and clean up indexes (including symbols)."""
+        # Delete associated symbols first (cascade delete)
+        self.delete_symbols(path)
+
         path_resolved = str(path.resolve())
         path_key = path_resolved.encode("utf-8")
 

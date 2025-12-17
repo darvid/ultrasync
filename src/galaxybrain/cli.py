@@ -17,7 +17,7 @@ from galaxybrain.call_graph import (
     compute_content_hash,
 )
 from galaxybrain.hyperscan_search import HyperscanSearch
-from galaxybrain.jit.lmdb_tracker import FileTracker, SymbolRecord
+from galaxybrain.jit import FileTracker, SymbolRecord
 from galaxybrain.jit.manager import JITIndexManager
 from galaxybrain.jit.search import search
 from galaxybrain.keys import hash64
@@ -1479,7 +1479,6 @@ def keys(
     context: str | None,
 ):
     """Dump all indexed keys (files, symbols, memories)."""
-    from galaxybrain.jit.lmdb_tracker import FileTracker
     from galaxybrain.keys import file_key, mem_key, sym_key
 
     root = directory.resolve() if directory else Path.cwd()

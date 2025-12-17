@@ -19,7 +19,7 @@ class TestMemoryRecord:
     """Tests for MemoryRecord dataclass."""
 
     def test_memory_record_creation(self):
-        from galaxybrain.jit.tracker import MemoryRecord
+        from galaxybrain.jit import MemoryRecord
 
         record = MemoryRecord(
             id="mem:test1234",
@@ -43,7 +43,7 @@ class TestFileTrackerMemory:
     """Tests for FileTracker memory methods."""
 
     def test_upsert_and_get_memory(self, temp_data_dir):
-        from galaxybrain.jit.tracker import FileTracker
+        from galaxybrain.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -70,7 +70,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_get_memory_by_key(self, temp_data_dir):
-        from galaxybrain.jit.tracker import FileTracker
+        from galaxybrain.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -94,7 +94,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_query_memories_by_task(self, temp_data_dir):
-        from galaxybrain.jit.tracker import FileTracker
+        from galaxybrain.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -148,7 +148,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_delete_memory(self, temp_data_dir):
-        from galaxybrain.jit.tracker import FileTracker
+        from galaxybrain.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 

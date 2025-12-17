@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from galaxybrain.jit.tracker import FileTracker
+from galaxybrain.jit import FileTracker
 
 
 class TestFileTracker:
