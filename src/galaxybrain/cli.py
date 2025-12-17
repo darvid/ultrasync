@@ -17,9 +17,9 @@ from galaxybrain.call_graph import (
     compute_content_hash,
 )
 from galaxybrain.hyperscan_search import HyperscanSearch
+from galaxybrain.jit.lmdb_tracker import FileTracker, SymbolRecord
 from galaxybrain.jit.manager import JITIndexManager
 from galaxybrain.jit.search import search
-from galaxybrain.jit.tracker import FileTracker, SymbolRecord
 from galaxybrain.keys import hash64
 from galaxybrain.taxonomy import (
     Classifier,

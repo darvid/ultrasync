@@ -27,9 +27,9 @@ from textual.widgets.tree import TreeNode
 
 if TYPE_CHECKING:
     from galaxybrain.call_graph import CallGraph
+    from galaxybrain.jit.lmdb_tracker import SymbolRecord
     from galaxybrain.jit.manager import IndexStats, JITIndexManager
     from galaxybrain.jit.memory import MemoryEntry
-    from galaxybrain.jit.tracker import SymbolRecord
     from galaxybrain.taxonomy import CodebaseIR
 
 

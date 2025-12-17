@@ -9,7 +9,7 @@ import numpy as np
 
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
-from galaxybrain.jit.tracker import FileTracker, MemoryRecord
+from galaxybrain.jit.lmdb_tracker import FileTracker, MemoryRecord
 from galaxybrain.keys import hash64, mem_key
 
 if TYPE_CHECKING:

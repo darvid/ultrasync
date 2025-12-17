@@ -13,7 +13,7 @@ from galaxybrain.hyperscan_search import HyperscanSearch
 from galaxybrain.taxonomy import CodebaseIR, FileIR, SymbolClassification
 
 if TYPE_CHECKING:
-    from galaxybrain.jit.tracker import FileTracker
+    from galaxybrain.jit.lmdb_tracker import FileTracker
 
 
 @dataclass

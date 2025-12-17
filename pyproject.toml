@@ -2,44 +2,49 @@
 name = "galaxybrain"
 version = "0.1.0"
 readme = "README.md"
-authors = [
-    { name = "David Gidwani", email = "david.gidwani@gmail.com" }
-]
 requires-python = ">=3.14"
+authors = [{ name = "David Gidwani", email = "david.gidwani@gmail.com" }]
 dependencies = [
-    "click>=8.1",
-    "galaxybrain-index",
-    "hyperscan>=0.8.0",
-    "mcp>=1.2.0",
-    "numpy>=1.24",
-    "sentence-transformers>=3",
-    "structlog>=24.0",
+  "click>=8.1",
+  "galaxybrain-index",
+  "hyperscan>=0.8.0",
+  "lmdb>=1.5.1",
+  "mcp>=1.2.0",
+  "msgpack>=1.1.0",
+  "numpy>=1.24",
+  "sentence-transformers>=3",
+  "structlog>=24.0",
 ]
 
-[tool.uv.sources]
-galaxybrain-index = { path = "crates/galaxybrain_index", editable = true }
+[project.scripts]
+galaxybrain = "galaxybrain._entry:main"
 
 [project.optional-dependencies]
 cli = [
-    "rich>=13.0",
-    "textual>=0.50",
+  "rich>=13.0",
+  "textual>=0.50",
+]
+
+[dependency-groups]
+dev = [
+  "ipython>=8.37.0",
+  "maturin>=1.5",
+  "pytest>=9.0.1",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.14.8",
+  "tombi>=0.7.7",
+]
+docs = [
+  "zensical>=0.0.11",
 ]
 
 [build-system]
 requires = ["uv_build>=0.9.15,<0.10.0"]
 build-backend = "uv_build"
 
-[dependency-groups]
-dev = [
-    "ipython>=8.37.0",
-    "maturin>=1.5",
-    "pytest>=9.0.1",
-    "pytest-asyncio>=0.24.0",
-    "ruff>=0.14.8",
-]
-
-[project.scripts]
-galaxybrain = "galaxybrain._entry:main"
+[tool.pytest]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 80
@@ -56,6 +61,5 @@ quote-style = "double"
 indent-style = "space"
 docstring-code-format = true
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
+[tool.uv.sources]
+galaxybrain-index = { path = "crates/galaxybrain_index", editable = true }

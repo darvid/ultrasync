@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from galaxybrain.jit.tracker import (
+from galaxybrain.jit.lmdb_tracker import (
     SessionThreadRecord,
     ThreadFileRecord,
     ThreadQueryRecord,
@@ -22,7 +22,7 @@ from galaxybrain.jit.tracker import (
 
 if TYPE_CHECKING:
     from galaxybrain.embeddings import EmbeddingProvider
-    from galaxybrain.jit.tracker import FileTracker
+    from galaxybrain.jit.lmdb_tracker import FileTracker
     from galaxybrain.jit.vectors import VectorCache
 
 

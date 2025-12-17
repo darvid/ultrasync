@@ -12,9 +12,9 @@ from galaxybrain.git import get_tracked_files, should_ignore_path
 from galaxybrain.jit.blob import BlobAppender
 from galaxybrain.jit.cache import VectorCache
 from galaxybrain.jit.embed_queue import EmbedQueue
+from galaxybrain.jit.lmdb_tracker import FileTracker
 from galaxybrain.jit.memory import MemoryManager
 from galaxybrain.jit.progress import IndexingProgress
-from galaxybrain.jit.tracker import FileTracker
 from galaxybrain.jit.vector_store import CompactionResult, VectorStore
 from galaxybrain.keys import hash64, hash64_file_key, hash64_sym_key
 from galaxybrain.patterns import PatternSetManager

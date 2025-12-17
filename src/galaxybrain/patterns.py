@@ -7,7 +7,7 @@ import hyperscan
 
 if TYPE_CHECKING:
     from galaxybrain.jit.blob import BlobAppender
-    from galaxybrain.jit.tracker import FileTracker
+    from galaxybrain.jit.lmdb_tracker import FileTracker
 
 # Common file extension groups for pattern filtering
 JS_EXTENSIONS = [
