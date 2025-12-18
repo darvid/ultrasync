@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from galaxybrain.transcript_watcher import ClaudeCodeParser, CodexParser
+from ultrasync.transcript_watcher import ClaudeCodeParser, CodexParser
 
 
 class TestClaudeCodeParserToolCorrelation:
@@ -49,7 +49,7 @@ class TestClaudeCodeParserToolCorrelation:
                         {
                             "type": "tool_use",
                             "id": "toolu_search_456",
-                            "name": "mcp__galaxybrain__jit_search",
+                            "name": "mcp__ultrasync__jit_search",
                             "input": {"query": "login button"},
                         }
                     ]
@@ -72,7 +72,7 @@ class TestClaudeCodeParserToolCorrelation:
                         {
                             "type": "tool_use",
                             "id": "toolu_search_789",
-                            "name": "mcp__galaxybrain__jit_search",
+                            "name": "mcp__ultrasync__jit_search",
                             "input": {"query": "payment form"},
                         }
                     ]
@@ -104,7 +104,7 @@ class TestClaudeCodeParserToolCorrelation:
         events = parser.parse_tool_calls(tool_result_line)
 
         assert len(events) == 1
-        assert events[0].tool_name == "mcp__galaxybrain__jit_search"
+        assert events[0].tool_name == "mcp__ultrasync__jit_search"
         assert events[0].tool_input == {"query": "payment form"}
         assert events[0].tool_result is not None
         # result should be the parsed list
@@ -122,7 +122,7 @@ class TestClaudeCodeParserToolCorrelation:
                         {
                             "type": "tool_use",
                             "id": "toolu_struct_123",
-                            "name": "mcp__galaxybrain__jit_search",
+                            "name": "mcp__ultrasync__jit_search",
                             "input": {"query": "auth handler"},
                         }
                     ]
@@ -189,7 +189,7 @@ class TestClaudeCodeParserToolCorrelation:
                         {
                             "type": "tool_use",
                             "id": "toolu_remove_me",
-                            "name": "mcp__galaxybrain__jit_search",
+                            "name": "mcp__ultrasync__jit_search",
                             "input": {"query": "test"},
                         }
                     ]

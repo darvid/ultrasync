@@ -1,6 +1,6 @@
 """Tests for keying and hashing layer."""
 
-from galaxybrain.keys import (
+from ultrasync.keys import (
     file_key,
     hash64,
     hash64_file_key,

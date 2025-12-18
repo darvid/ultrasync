@@ -1,6 +1,6 @@
 import pytest
 
-from galaxybrain.jit.blob import BLOB_HEADER_SIZE, BlobAppender, BlobEntry
+from ultrasync.jit.blob import BLOB_HEADER_SIZE, BlobAppender, BlobEntry
 
 
 class TestBlobAppender:

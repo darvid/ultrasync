@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 import pytest
 
-from galaxybrain.jit.embed_queue import EmbedQueue
+from ultrasync.jit.embed_queue import EmbedQueue
 
 
 class MockEmbeddingProvider:

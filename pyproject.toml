@@ -1,12 +1,12 @@
 [project]
-name = "galaxybrain"
+name = "ultrasync"
 version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.14"
 authors = [{ name = "David Gidwani", email = "david.gidwani@gmail.com" }]
 dependencies = [
   "click>=8.1",
-  "galaxybrain-index",
+  "ultrasync-index",
   "hyperscan>=0.8.0",
   "lmdb>=1.5.1",
   "mcp>=1.2.0",
@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-galaxybrain = "galaxybrain._entry:main"
+ultrasync = "ultrasync._entry:main"
 
 [project.optional-dependencies]
 cli = [
@@ -62,4 +62,4 @@ indent-style = "space"
 docstring-code-format = true
 
 [tool.uv.sources]
-galaxybrain-index = { path = "crates/galaxybrain_index", editable = true }
+ultrasync-index = { path = "crates/ultrasync_index", editable = true }

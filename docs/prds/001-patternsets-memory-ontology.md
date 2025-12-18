@@ -285,7 +285,7 @@ Memory keys follow the established hashing pattern:
 
 ```python
 import uuid
-from galaxybrain.keys import hash64
+from ultrasync.keys import hash64
 
 def create_memory_key() -> tuple[str, int]:
     """Generate a unique memory ID and its hash."""
@@ -762,10 +762,10 @@ pattern_scan:
 
 ### Hash Function
 
-All keys use BLAKE2b with 8-byte digest and "galaxybrain" personalization:
+All keys use BLAKE2b with 8-byte digest and "ultrasync" personalization:
 
 ```python
-def hash64(key: str, person: bytes = b"galaxybrain") -> int:
+def hash64(key: str, person: bytes = b"ultrasync") -> int:
     h = hashlib.blake2b(
         key.encode("utf-8"),
         digest_size=8,

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from galaxybrain.jit.manager import JITIndexManager
+from ultrasync.jit.manager import JITIndexManager
 
 
 class MockEmbeddingProvider:
@@ -26,7 +26,7 @@ class TestJITIndexManager:
     @pytest.fixture
     def manager(self, tmp_path):
         provider = MockEmbeddingProvider()
-        data_dir = tmp_path / ".galaxybrain"
+        data_dir = tmp_path / ".ultrasync"
         mgr = JITIndexManager(
             data_dir=data_dir,
             embedding_provider=provider,

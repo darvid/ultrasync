@@ -1,6 +1,6 @@
 import pytest
 
-from galaxybrain_index import MutableGlobalIndex
+from ultrasync_index import MutableGlobalIndex
 
 
 class TestMutableGlobalIndexCreate:

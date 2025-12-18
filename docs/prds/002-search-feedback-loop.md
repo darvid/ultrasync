@@ -70,13 +70,13 @@ avoid correlating unrelated tool calls.
 
 ### 2.1 Tool Call Detection
 
-Extend `ClaudeCodeParser` to detect galaxybrain tool calls:
+Extend `ClaudeCodeParser` to detect ultrasync tool calls:
 
 ```python
 GALAXYBRAIN_TOOLS = {
-    "mcp__galaxybrain__jit_search",
-    "mcp__galaxybrain__jit_index_file",
-    "mcp__galaxybrain__jit_add_symbol",
+    "mcp__ultrasync__jit_search",
+    "mcp__ultrasync__jit_index_file",
+    "mcp__ultrasync__jit_add_symbol",
 }
 
 FALLBACK_TOOLS = {"Read", "Grep", "Glob"}
@@ -132,7 +132,7 @@ class SearchLearner:
         """Process a tool call from transcript."""
 
         # detect our jit_search calls
-        if tool_name == "mcp__galaxybrain__jit_search":
+        if tool_name == "mcp__ultrasync__jit_search":
             await self._handle_search(tool_input, tool_result)
 
         # track fallback reads
@@ -413,8 +413,8 @@ GALAXYBRAIN_LEARN_TIMEOUT=60
 ### 6.2 CLI Options
 
 ```bash
-galaxybrain mcp -w --learn         # enable watching + learning
-galaxybrain mcp -w --no-learn      # watching only, no learning
+ultrasync mcp -w --learn         # enable watching + learning
+ultrasync mcp -w --no-learn      # watching only, no learning
 ```
 
 ---

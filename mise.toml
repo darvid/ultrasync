@@ -12,7 +12,7 @@ run = "uv sync --all-extras --dev"
 
 [tasks.build]
 description = "Build rust extension"
-run = "uv run maturin develop -m galaxybrain_index/Cargo.toml"
+run = "uv run maturin develop -m ultrasync_index/Cargo.toml"
 
 [tasks.dev]
 description = "Sync deps and build rust extension"
@@ -20,11 +20,11 @@ depends = ["sync", "build"]
 
 [tasks.lint]
 description = "Run ruff linter"
-run = "ruff check src/galaxybrain"
+run = "ruff check src/ultrasync"
 
 [tasks.fmt]
 description = "Format code with ruff"
-run = "ruff format src/galaxybrain"
+run = "ruff format src/ultrasync"
 
 [tasks.test]
 description = "Run pytest"
@@ -32,4 +32,4 @@ run = "uv run pytest"
 
 [tasks.voyager]
 description = "Launch the Voyager TUI"
-run = "uv run galaxybrain voyager"
+run = "uv run ultrasync voyager"

@@ -363,20 +363,20 @@ class AppIRExtractor:
 
 ```bash
 # Extract IR from current directory
-galaxybrain ir extract
+ultrasync ir extract
 
 # Extract with output format
-galaxybrain ir extract --format yaml > app-ir.yaml
-galaxybrain ir extract --format json > app-ir.json
-galaxybrain ir extract --format markdown > SPEC.md
+ultrasync ir extract --format yaml > app-ir.yaml
+ultrasync ir extract --format json > app-ir.json
+ultrasync ir extract --format markdown > SPEC.md
 
 # Extract specific components
-galaxybrain ir entities      # just entities
-galaxybrain ir endpoints     # just API surface
-galaxybrain ir flows         # just feature flows
+ultrasync ir entities      # just entities
+ultrasync ir endpoints     # just API surface
+ultrasync ir flows         # just feature flows
 
 # Verbose output with confidence scores
-galaxybrain ir extract -v
+ultrasync ir extract -v
 ```
 
 ### 5.4 MCP Tools
@@ -427,12 +427,12 @@ def ir_summarize() -> str:
 **Phase 1: Entity Extraction**
 - Secondary patterns for field extraction
 - Entity synthesis from models + schemas
-- CLI `galaxybrain ir entities`
+- CLI `ultrasync ir entities`
 
 **Phase 2: Endpoint Extraction**
 - Route metadata extraction
 - Flow tracing via call graph
-- CLI `galaxybrain ir endpoints`
+- CLI `ultrasync ir endpoints`
 
 **Phase 3: Business Rules**
 - Business rule pattern sets
@@ -457,7 +457,7 @@ def ir_summarize() -> str:
 
 ### 7.2 Integration Tests
 
-- Extract IR from galaxybrain codebase itself
+- Extract IR from ultrasync codebase itself
 - Extract IR from sample Next.js app
 - Extract IR from sample FastAPI app
 - Validate IR schema compliance
@@ -494,7 +494,7 @@ Target: >80% recall on entities/endpoints, >60% on business rules.
 
 ## 9. Acceptance Criteria
 
-- [ ] `galaxybrain ir extract` produces valid AppIR
+- [ ] `ultrasync ir extract` produces valid AppIR
 - [ ] Entities extracted with >80% field coverage
 - [ ] Routes extracted with correct method/path
 - [ ] Flows traced through call graph

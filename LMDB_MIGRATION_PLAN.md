@@ -48,7 +48,7 @@ sub-microsecond key lookups.
 ### Database Layout (Sub-DBs in single environment)
 
 ```
-galaxybrain.lmdb/
+ultrasync.lmdb/
 ├── data.mdb        # Main data file (mmap'd)
 └── lock.mdb        # Lock file
 
@@ -94,7 +94,7 @@ Use **msgpack** for records:
 
 ### Phase 1: Create `LMDBTracker` class
 
-New file: `src/galaxybrain/jit/lmdb_tracker.py`
+New file: `src/ultrasync/jit/lmdb_tracker.py`
 
 ```python
 import lmdb

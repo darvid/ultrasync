@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from galaxybrain.taxonomy import (
+from ultrasync.taxonomy import (
     DEFAULT_TAXONOMY,
     Classification,
     CodebaseIR,

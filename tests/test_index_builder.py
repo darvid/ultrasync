@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from galaxybrain.file_registry import FileEntry, FileRegistry
-from galaxybrain.file_scanner import FileMetadata, SymbolInfo
-from galaxybrain.index_builder import (
+from ultrasync.file_registry import FileEntry, FileRegistry
+from ultrasync.file_scanner import FileMetadata, SymbolInfo
+from ultrasync.index_builder import (
     BUCKET_SIZE,
     HEADER_SIZE,
     MAGIC,

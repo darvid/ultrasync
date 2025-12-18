@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from galaxybrain.jit.cache import VectorCache
+from ultrasync.jit.cache import VectorCache
 
 
 class TestVectorCache:

@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from galaxybrain.hyperscan_search import HyperscanSearch
-from galaxybrain_index import GlobalIndex
+from ultrasync.hyperscan_search import HyperscanSearch
+from ultrasync_index import GlobalIndex
 
 # Binary format constants (must match lib.rs)
 MAGIC = b"FXINDEX\0"

@@ -5,14 +5,14 @@ from textwrap import dedent
 
 import pytest
 
-from galaxybrain.call_graph import (
+from ultrasync.call_graph import (
     CallGraph,
     CallGraphBuilder,
     CallSite,
     SymbolNode,
     build_call_graph,
 )
-from galaxybrain.taxonomy import CodebaseIR, FileIR, SymbolClassification
+from ultrasync.taxonomy import CodebaseIR, FileIR, SymbolClassification
 
 
 class TestSymbolNode:

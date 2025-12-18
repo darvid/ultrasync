@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from galaxybrain.events import EventType, SessionEvent
+from ultrasync.events import EventType, SessionEvent
 
 
 class TestEventType:

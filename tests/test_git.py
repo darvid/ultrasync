@@ -1,10 +1,10 @@
-"""Tests for galaxybrain.git module."""
+"""Tests for ultrasync.git module."""
 
 from pathlib import Path
 
 import pytest
 
-from galaxybrain.git import EXCLUDED_DIR_NAMES, should_ignore_path
+from ultrasync.git import EXCLUDED_DIR_NAMES, should_ignore_path
 
 
 class TestShouldIgnorePath:
@@ -46,7 +46,7 @@ class TestShouldIgnorePath:
             "/home/user/project/src/components/Button.tsx",
             "/home/user/project/package.json",
             "src/main.py",
-            "/home/user/dev/galaxybrain/src/galaxybrain/git.py",
+            "/home/user/dev/ultrasync/src/ultrasync/git.py",
             "/home/user/project/lib/utils.ts",
             "/home/user/project/tests/test_main.py",
             "/home/user/project/README.md",

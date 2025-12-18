@@ -17,5 +17,5 @@ target/
 Cargo.lock
 
 # Galaxybrain
-.galaxybrain_index.json
-.galaxybrain/
+.ultrasync_index.json
+.ultrasync/

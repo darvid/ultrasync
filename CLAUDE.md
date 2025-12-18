@@ -22,10 +22,10 @@ uv sync
 uv sync --group dev
 
 # lint
-ruff check src/galaxybrain
+ruff check src/ultrasync
 
 # format
-ruff format src/galaxybrain
+ruff format src/ultrasync
 
 # run ipython for testing
 uv run ipython
@@ -38,20 +38,20 @@ uv run ipython
 cargo fmt && cargo clippy --all-targets --all-features
 
 # build and install into venv (from project root)
-uv run maturin develop -m galaxybrain_index/Cargo.toml
+uv run maturin develop -m ultrasync_index/Cargo.toml
 ```
 
 ## Architecture
 
 ### Two-Layer System
 
-1. **Rust crate `galaxybrain_index`** (pyo3 + maturin):
+1. **Rust crate `ultrasync_index`** (pyo3 + maturin):
    - `GlobalIndex` - mmaps `index.dat` and `blob.dat`, exposes zero-copy
      slices via `slice_for_key(u64) -> Option[memoryview]`
    - `ThreadIndex` - in-memory vector index for small working sets
      (<500 items), brute-force cosine similarity
 
-2. **Python package `galaxybrain`**:
+2. **Python package `ultrasync`**:
    - `embeddings.EmbeddingProvider` - sentence-transformers wrapper
    - `events.SessionEvent` / `EventType` - normalized IDE/agent events
    - `threads.Thread` / `ThreadManager` - hot thread management with

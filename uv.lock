@@ -231,12 +231,12 @@ wheels = [
 ]
 
 [[package]]
-name = "galaxybrain"
+name = "ultrasync"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
-    { name = "galaxybrain-index" },
+    { name = "ultrasync-index" },
     { name = "hyperscan" },
     { name = "lmdb" },
     { name = "mcp" },
@@ -268,7 +268,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
-    { name = "galaxybrain-index", editable = "crates/galaxybrain_index" },
+    { name = "ultrasync-index", editable = "crates/ultrasync_index" },
     { name = "hyperscan", specifier = ">=0.8.0" },
     { name = "lmdb", specifier = ">=1.5.1" },
     { name = "mcp", specifier = ">=1.2.0" },
@@ -293,9 +293,9 @@ dev = [
 docs = [{ name = "zensical", specifier = ">=0.0.11" }]
 
 [[package]]
-name = "galaxybrain-index"
+name = "ultrasync-index"
 version = "0.1.0"
-source = { editable = "crates/galaxybrain_index" }
+source = { editable = "crates/ultrasync_index" }
 
 [[package]]
 name = "h11"

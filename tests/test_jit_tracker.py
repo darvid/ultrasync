@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from galaxybrain.jit import FileTracker
+from ultrasync.jit import FileTracker
 
 
 class TestFileTracker:

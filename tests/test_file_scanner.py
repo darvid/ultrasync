@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from galaxybrain.file_scanner import FileMetadata, FileScanner, SymbolInfo
+from ultrasync.file_scanner import FileMetadata, FileScanner, SymbolInfo
 
 
 class TestSymbolInfo:

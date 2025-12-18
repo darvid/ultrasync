@@ -1,6 +1,6 @@
 # PRD Format Specification
 
-Product Requirement Documents for galaxybrain features.
+Product Requirement Documents for ultrasync features.
 
 ## Naming Convention
 

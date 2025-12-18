@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from galaxybrain.regex_safety import (
+from ultrasync.regex_safety import (
     SafePattern,
     analyze_pattern,
     safe_compile,
