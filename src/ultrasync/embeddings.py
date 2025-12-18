@@ -7,13 +7,21 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
 
+# ~4 chars per token, 512 token limit -> 1500 chars is safe with headroom
+DEFAULT_MAX_CHARS = 1500
+
 
 class EmbeddingProvider:
     """Wraps a sentence-transformers model for text embedding."""
 
-    def __init__(self, model: str = DEFAULT_EMBEDDING_MODEL) -> None:
+    def __init__(
+        self,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        max_chars: int = DEFAULT_MAX_CHARS,
+    ) -> None:
         self._model_name = model
         self._model = SentenceTransformer(model)
+        self._max_chars = max_chars
         dim = self._model.get_sentence_embedding_dimension()
         if dim is None:
             raise ValueError(
@@ -21,6 +29,12 @@ class EmbeddingProvider:
             )
         self._dim = int(dim)
         self._cache: dict[str, np.ndarray] = {}
+
+    def _truncate(self, text: str) -> str:
+        """Truncate text to max chars to avoid silent model truncation."""
+        if len(text) <= self._max_chars:
+            return text
+        return text[: self._max_chars]
 
     @property
     def model(self) -> str:
@@ -31,6 +45,7 @@ class EmbeddingProvider:
         return self._dim
 
     def embed(self, text: str) -> np.ndarray:
+        text = self._truncate(text)
         cached = self._cache.get(text)
         if cached is not None:
             return cached
@@ -43,6 +58,7 @@ class EmbeddingProvider:
         return vec
 
     def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
+        texts = [self._truncate(t) for t in texts]
         results: list[np.ndarray] = []
         to_embed: list[tuple[int, str]] = []
 
