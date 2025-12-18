@@ -1499,6 +1499,7 @@ context:api, context:data, context:infra
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
+        threshold: float = 0.5,
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -1528,6 +1529,9 @@ context:api, context:data, context:infra
             include_source: Include source code for symbol results
                 (default: True). Set to False for lightweight metadata-only
                 queries.
+            threshold: Minimum confidence score for results (default: 0.5).
+                Results below this threshold are filtered out. Set to 0.0
+                to return all results regardless of score.
 
         Returns:
             TSV: Compact tab-separated format with header comments
@@ -1559,7 +1563,7 @@ context:api, context:data, context:infra
         else:
             primary_source = "semantic"
 
-        # add hint when results are weak/empty
+        # compute hint based on original results BEFORE filtering
         hint = None
         top_score = results[0].score if results else 0
         if not results or top_score < 0.7:
@@ -1568,10 +1572,13 @@ context:api, context:data, context:infra
                 "call index_file(path) so future searches find it."
             )
 
+        # apply confidence threshold - filter out low-score results
+        filtered_results = [r for r in results if r.score >= threshold]
+
         # return compact TSV format by default (3-4x fewer tokens)
         if format == "tsv":
             return _format_search_results_tsv(
-                results, elapsed_ms, primary_source, hint
+                filtered_results, elapsed_ms, primary_source, hint
             )
 
         # verbose JSON format
@@ -1591,7 +1598,7 @@ context:api, context:data, context:infra
                     "line_end": r.line_end,
                     "content": r.content,
                 }
-                for r in results
+                for r in filtered_results
             ],
         }
         if hint:
