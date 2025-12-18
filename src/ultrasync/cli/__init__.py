@@ -18,6 +18,7 @@ from ultrasync.cli.commands.anchors import (
 from ultrasync.cli.commands.callgraph import Callgraph
 from ultrasync.cli.commands.compact import Compact
 from ultrasync.cli.commands.delete import Delete
+from ultrasync.cli.commands.enrich import Enrich, EnrichClear, EnrichList
 from ultrasync.cli.commands.grep import Grep, Sgrep
 from ultrasync.cli.commands.index import Index
 from ultrasync.cli.commands.ir import (
@@ -99,6 +100,11 @@ _IrEndpoints = Annotated[IrEndpoints, tyro.conf.subcommand("ir:endpoints")]
 _IrServices = Annotated[IrServices, tyro.conf.subcommand("ir:services")]
 _IrFlows = Annotated[IrFlows, tyro.conf.subcommand("ir:flows")]
 
+# Enrich subcommands
+_Enrich = Annotated[Enrich, tyro.conf.subcommand("enrich")]
+_EnrichList = Annotated[EnrichList, tyro.conf.subcommand("enrich:list")]
+_EnrichClear = Annotated[EnrichClear, tyro.conf.subcommand("enrich:clear")]
+
 # Top-level commands using pipe syntax
 Command = (
     _Index
@@ -136,6 +142,9 @@ Command = (
     | _IrEndpoints
     | _IrServices
     | _IrFlows
+    | _Enrich
+    | _EnrichList
+    | _EnrichClear
 )
 
 

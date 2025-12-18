@@ -86,19 +86,25 @@ class VectorStore:
         dim = vector.shape[0]
         header = struct.pack("<I", dim)
         data = vector.tobytes()
-
-        offset = self._size
         length = len(header) + len(data)
+
+        # Refresh size from actual file before appending
+        # This handles cases where another process/instance wrote to the file
+        self._size = self.path.stat().st_size
+        offset = self._size
 
         with open(self.path, "ab") as f:
             f.write(header)
             f.write(data)
+            f.flush()  # ensure data hits OS buffer before returning
 
         self._size += length
         return VectorEntry(offset=offset, length=length, dim=dim)
 
     def read(self, offset: int, length: int) -> np.ndarray | None:
         """Read a vector from the store."""
+        # refresh size from file in case another instance appended
+        self._size = self.path.stat().st_size
         if offset < 0 or offset + length > self._size:
             return None
 

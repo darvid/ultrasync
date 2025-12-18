@@ -628,6 +628,16 @@ class FileTracker:
         """List all context types that have at least one file."""
         return sorted(self.get_context_stats().keys())
 
+    def get_contexts_for_file(self, path: str) -> list[str]:
+        """Get detected contexts for a specific file."""
+        file_record = self.get_file(Path(path))
+        if file_record and file_record.detected_contexts:
+            try:
+                return json.loads(file_record.detected_contexts)
+            except json.JSONDecodeError:
+                return []
+        return []
+
     # =========================================================================
     # Symbol Operations
     # =========================================================================

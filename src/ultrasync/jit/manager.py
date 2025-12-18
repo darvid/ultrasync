@@ -564,6 +564,7 @@ class JITIndexManager:
         symbol_type: str = "snippet",
         line_start: int | None = None,
         line_end: int | None = None,
+        embed_text: str | None = None,
     ) -> IndexResult:
         content = source_code.encode("utf-8")
         blob_entry = self.blob.append(content)
@@ -579,7 +580,9 @@ class JITIndexManager:
         if self.aot_index is not None:
             self.aot_index.insert(key, blob_entry.offset, blob_entry.length)
 
-        embed_text = f"{symbol_type} {name}: {source_code[:500]}"
+        # Use custom embed_text if provided, otherwise build from name/content
+        if embed_text is None:
+            embed_text = f"{symbol_type} {name}: {source_code[:500]}"
 
         if self._started:
             embedding = await self.embed_queue.embed(
@@ -1471,7 +1474,7 @@ class JITIndexManager:
 
         # enrich with paths
         out = []
-        for key_hash, score in results:
+        for key_hash, score, _type in results:
             rec = self.tracker.get_file_by_key(key_hash)
             out.append((key_hash, score, rec.path if rec else ""))
         return out
