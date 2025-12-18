@@ -204,6 +204,15 @@ wheels = [
 ]
 
 [[package]]
+name = "docstring-parser"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/9d/c3b43da9515bd270df0f80548d9944e389870713cc1fe2b8fb35fe2bcefd/docstring_parser-0.17.0.tar.gz", hash = "sha256:583de4a309722b3315439bb31d64ba3eebada841f2e2cee23b99df001434c912", size = 27442, upload-time = "2025-07-21T07:35:01.868Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/e2/2537ebcff11c1ee1ff17d8d0b6f4db75873e3b0fb32c2d4a2ee31ecb310a/docstring_parser-0.17.0-py3-none-any.whl", hash = "sha256:cf2569abd23dce8099b300f9b4fa8191e9582dda731fd533daf54c4551658708", size = 36896, upload-time = "2025-07-21T07:35:00.684Z" },
+]
+
+[[package]]
 name = "executing"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -229,73 +238,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/b6/27/954057b0d1f53f086
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/c7/b64cae5dba3a1b138d7123ec36bb5ccd39d39939f18454407e5468f4763f/fsspec-2025.12.0-py3-none-any.whl", hash = "sha256:8bf1fe301b7d8acfa6e8571e3b1c3d158f909666642431cc78a1b7b4dbc5ec5b", size = 201422, upload-time = "2025-12-03T15:23:41.434Z" },
 ]
-
-[[package]]
-name = "ultrasync"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "click" },
-    { name = "ultrasync-index" },
-    { name = "hyperscan" },
-    { name = "lmdb" },
-    { name = "mcp" },
-    { name = "msgpack" },
-    { name = "numpy" },
-    { name = "sentence-transformers" },
-    { name = "structlog" },
-]
-
-[package.optional-dependencies]
-cli = [
-    { name = "rich" },
-    { name = "textual" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ipython" },
-    { name = "maturin" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-    { name = "tombi" },
-]
-docs = [
-    { name = "zensical" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "click", specifier = ">=8.1" },
-    { name = "ultrasync-index", editable = "crates/ultrasync_index" },
-    { name = "hyperscan", specifier = ">=0.8.0" },
-    { name = "lmdb", specifier = ">=1.5.1" },
-    { name = "mcp", specifier = ">=1.2.0" },
-    { name = "msgpack", specifier = ">=1.1.0" },
-    { name = "numpy", specifier = ">=1.24" },
-    { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0" },
-    { name = "sentence-transformers", specifier = ">=3" },
-    { name = "structlog", specifier = ">=24.0" },
-    { name = "textual", marker = "extra == 'cli'", specifier = ">=0.50" },
-]
-provides-extras = ["cli"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ipython", specifier = ">=8.37.0" },
-    { name = "maturin", specifier = ">=1.5" },
-    { name = "pytest", specifier = ">=9.0.1" },
-    { name = "pytest-asyncio", specifier = ">=0.24.0" },
-    { name = "ruff", specifier = ">=0.14.8" },
-    { name = "tombi", specifier = ">=0.7.7" },
-]
-docs = [{ name = "zensical", specifier = ">=0.0.11" }]
-
-[[package]]
-name = "ultrasync-index"
-version = "0.1.0"
-source = { editable = "crates/ultrasync_index" }
 
 [[package]]
 name = "h11"
@@ -1663,6 +1605,18 @@ wheels = [
 ]
 
 [[package]]
+name = "typeguard"
+version = "4.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c7/68/71c1a15b5f65f40e91b65da23b8224dad41349894535a97f63a52e462196/typeguard-4.4.4.tar.gz", hash = "sha256:3a7fd2dffb705d4d0efaed4306a704c89b9dee850b688f060a8b1615a79e5f74", size = 75203, upload-time = "2025-06-18T09:56:07.624Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/a9/e3aee762739c1d7528da1c3e06d518503f8b6c439c35549b53735ba52ead/typeguard-4.4.4-py3-none-any.whl", hash = "sha256:b5f562281b6bfa1f5492470464730ef001646128b180769880468bd84b68b09e", size = 34874, upload-time = "2025-06-18T09:56:05.999Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1684,6 +1638,20 @@ wheels = [
 ]
 
 [[package]]
+name = "tyro"
+version = "1.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docstring-parser" },
+    { name = "typeguard" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/93/fb557288e37cf367b089f8936fa4716fdc3a9aa0055759d4375a840aea1a/tyro-1.0.2.tar.gz", hash = "sha256:8f96040a4d599bbed8a797949ff65807cbd4940a8f0f071f225a0bed423e8136", size = 450360, upload-time = "2025-12-16T03:41:28.048Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/26/b75b0991f20c3d88df03ac17cdd36d482dddfac4b6286e504356223c12ae/tyro-1.0.2-py3-none-any.whl", hash = "sha256:f3782ba8c9d6d4ec481c267a96dd85b3fbd2a84866b73bb3ee3c092e3ca883b0", size = 180597, upload-time = "2025-12-16T03:41:26.613Z" },
+]
+
+[[package]]
 name = "uc-micro-py"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1691,6 +1659,73 @@ sdist = { url = "https://files.pythonhosted.org/packages/91/7a/146a99696aee0609e
 wheels = [
     { url = "https://files.pythonhosted.org/packages/37/87/1f677586e8ac487e29672e4b17455758fce261de06a0d086167bb760361a/uc_micro_py-1.0.3-py3-none-any.whl", hash = "sha256:db1dffff340817673d7b466ec86114a9dc0e9d4d9b5ba229d9d60e5c12600cd5", size = 6229, upload-time = "2024-02-09T16:52:00.371Z" },
 ]
+
+[[package]]
+name = "ultrasync"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "hyperscan" },
+    { name = "lmdb" },
+    { name = "mcp" },
+    { name = "msgpack" },
+    { name = "numpy" },
+    { name = "sentence-transformers" },
+    { name = "structlog" },
+    { name = "tyro" },
+    { name = "ultrasync-index" },
+]
+
+[package.optional-dependencies]
+cli = [
+    { name = "rich" },
+    { name = "textual" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipython" },
+    { name = "maturin" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+    { name = "tombi" },
+]
+docs = [
+    { name = "zensical" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hyperscan", specifier = ">=0.8.0" },
+    { name = "lmdb", specifier = ">=1.5.1" },
+    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "msgpack", specifier = ">=1.1.0" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0" },
+    { name = "sentence-transformers", specifier = ">=3" },
+    { name = "structlog", specifier = ">=24.0" },
+    { name = "textual", marker = "extra == 'cli'", specifier = ">=0.50" },
+    { name = "tyro", specifier = ">=0.9" },
+    { name = "ultrasync-index", editable = "crates/ultrasync_index" },
+]
+provides-extras = ["cli"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ipython", specifier = ">=8.37.0" },
+    { name = "maturin", specifier = ">=1.5" },
+    { name = "pytest", specifier = ">=9.0.1" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "ruff", specifier = ">=0.14.8" },
+    { name = "tombi", specifier = ">=0.7.7" },
+]
+docs = [{ name = "zensical", specifier = ">=0.0.11" }]
+
+[[package]]
+name = "ultrasync-index"
+version = "0.1.0"
+source = { editable = "crates/ultrasync_index" }
 
 [[package]]
 name = "urllib3"

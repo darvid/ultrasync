@@ -21,9 +21,9 @@ def main():
         )
 
     # now safe to import the real CLI
-    from ultrasync.cli import main as cli_main
+    from ultrasync.cli import main
 
-    return cli_main()
+    return main()
 
 
 if __name__ == "__main__":
