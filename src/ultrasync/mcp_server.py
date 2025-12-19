@@ -662,69 +662,40 @@ def create_server(
         "ultrasync",
         lifespan=lifespan,
         instructions="""\
-Galaxybrain provides semantic indexing and search for codebases.
+Ultrasync provides semantic indexing and search for codebases.
 
-## CRITICAL: Use search() BEFORE Grep/Glob/Read
+<tool_selection>
+Use search() for code discovery - it understands natural language and
+returns ranked results with source code included.
 
-**ALWAYS call search() FIRST before using Grep, Glob, or Read tools.**
-This is a hard requirement - do not skip to grep/glob for code discovery.
+search("login component")     → finds login-related code
+search("auth handler")        → finds authentication logic
+search("handleSubmit")        → finds cached grep results
 
-search() understands natural language and returns ranked results with
-source code included. One search() call replaces grep → glob → read chains.
+search() replaces grep→glob→read chains with one call.
 
-**Examples - use search() for these:**
-- "find the login component" → search("login component")
-- "where is auth handled" → search("authentication handler")
-- "update payment form" → search("payment form")
-- "grep pattern handleSubmit" → search("handleSubmit", result_type="grep-cache")
+Fall back to Grep/Glob only when search() returns no results or
+scores below 0.3. After grep fallback, call index_file(path) so
+future searches succeed.
+</tool_selection>
 
-**search() returns:**
-- File paths and symbol names ranked by relevance
-- Source code for symbols (no need to Read after)
-- Previously cached grep/glob results (result_type="grep-cache")
+<indexing>
+Use full_index() for large codebases - shows progress, persists results.
+After editing files, call reindex_file(path) to keep index fresh.
+</indexing>
 
-**ONLY use Grep/Glob when:**
-- search() explicitly returns no results or low scores (<0.3)
-- You need exact regex matching for a specific literal string
-- After grep fallback: call index_file(path) so search() works next time
+<memory>
+Write memories when: design decisions made, constraints identified,
+tradeoffs accepted, debug sessions completed, important context shared.
 
-## Indexing
-For large codebases, use full_index to persist and show progress.
+Search memories when: starting debug sessions, user references prior
+decisions, working on previously-touched files.
 
-## Memory - Automatic Usage
-
-**Write memories automatically when:**
-- Design decision made → insights=["insight:decision"]
-- Constraint identified → insights=["insight:constraint"]
-- Tradeoff accepted → insights=["insight:tradeoff"]
-- Pitfall discovered → insights=["insight:pitfall"]
-- Debug session done → task="task:debug" with findings
-- Important context shared for later reference
-
-**Search memories automatically when:**
-- Starting debug session → task="task:debug"
-- User asks about prior decisions → insights=["insight:decision"]
-- User says "remember when" / "what we discussed"
-- Starting work on previously-touched file/area
-
-**Taxonomy:**
-- Tasks: task:debug, task:implement_feature, task:refactor, \
-task:architect, task:bugfix, task:optimize, task:research
-- Insights: insight:decision, insight:constraint, insight:pitfall, \
-insight:tradeoff, insight:assumption, insight:todo
-- Context: context:frontend, context:backend, context:auth, \
-context:api, context:data, context:infra
-
-## Index Freshness
-
-**Re-index after modifying code:**
-- After editing a file with indexed symbols → reindex_file(path)
-- After adding new functions/classes → index_file(path)
-- Stale index = search results may reference old code
-
-**Use get_source to verify:**
-- Get actual indexed source by key_hash from search results
-- Compare with current file to detect staleness
+Taxonomy:
+- Tasks: task:debug, task:refactor, task:implement_feature
+- Insights: insight:decision, insight:constraint, insight:pitfall
+- Context: context:frontend, context:backend, context:auth, context:api
+</memory>
 """,
     )
 
