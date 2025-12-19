@@ -22,6 +22,7 @@ logger = structlog.get_logger(__name__)
 if TYPE_CHECKING:
     from ultrasync.call_graph import CallGraph
     from ultrasync.patterns import AnchorMatch, PatternSetManager
+    from ultrasync.service_detector import ServiceDetector
 
 # Type for progress callback: (current, total, current_file) -> None
 ProgressCallback = Callable[[int, int, str], None]
@@ -181,7 +182,9 @@ class AppIR:
         if sort_by == "none" or not items:
             return items
         elif sort_by == "name":
-            return sorted(items, key=lambda x: getattr(x, name_attr, "").lower())
+            return sorted(
+                items, key=lambda x: getattr(x, name_attr, "").lower()
+            )
         elif sort_by == "source" and source_attr:
             return sorted(
                 items, key=lambda x: getattr(x, source_attr, "").lower()
@@ -1443,6 +1446,7 @@ class AppIRExtractor:
         root: Path,
         pattern_manager: PatternSetManager | None = None,
         call_graph: CallGraph | None = None,
+        service_detector: ServiceDetector | None = None,
     ):
         self.root = root
         self.pattern_manager = pattern_manager
@@ -1452,6 +1456,60 @@ class AppIRExtractor:
         self.rule_extractor = BusinessRuleExtractor()
         self.effect_extractor = SideEffectExtractor()
         self._skip_tests = True  # default to skipping test files
+
+        # lazy init service detector if not provided
+        if service_detector is None:
+            from ultrasync.service_detector import ServiceDetector
+
+            service_detector = ServiceDetector(root)
+        self.service_detector = service_detector
+
+        # patterns for detecting pattern definition files by content
+        self._pattern_def_indicators = [
+            re.compile(r'r"[^"]*\\[.+*?|]'),  # raw strings with regex chars
+            re.compile(r"r'[^']*\\[.+*?|]"),  # raw strings with regex chars
+            re.compile(r"re\.compile\s*\("),  # regex compilation
+            re.compile(r"Pattern\s*\["),  # typing Pattern
+            re.compile(r"PATTERNS?\s*[=:]"),  # PATTERN/PATTERNS assignment
+        ]
+        # cache for content-based detection
+        self._pattern_file_cache: dict[str, bool] = {}
+
+    def _is_pattern_definition_file(self, path: Path, content: str) -> bool:
+        """Detect if file contains pattern definitions by content analysis.
+
+        Uses heuristics based on:
+        - Absolute count of pattern indicators (for large files)
+        - Density of indicators (for small files)
+        """
+        cache_key = str(path)
+        if cache_key in self._pattern_file_cache:
+            return self._pattern_file_cache[cache_key]
+
+        # count pattern definition indicators
+        indicator_count = 0
+        for pattern in self._pattern_def_indicators:
+            indicator_count += len(pattern.findall(content))
+
+        # normalize by file size (per 1000 chars)
+        content_len = max(len(content), 1)
+        density = (indicator_count * 1000) / content_len
+
+        # threshold: either high absolute count OR high density
+        # - 20+ pattern indicators = definitely a pattern file
+        # - density > 0.8 per 1000 chars = pattern-heavy file
+        is_pattern_file = indicator_count >= 20 or density > 0.8
+
+        if is_pattern_file:
+            logger.debug(
+                "detected pattern definition file",
+                path=cache_key,
+                indicator_count=indicator_count,
+                density=round(density, 2),
+            )
+
+        self._pattern_file_cache[cache_key] = is_pattern_file
+        return is_pattern_file
 
     def extract(
         self,
@@ -1684,35 +1742,15 @@ class AppIRExtractor:
         together. Uses parallel I/O for file reads, then serial processing
         for pattern matching (Hyperscan scratch is not thread-safe).
 
+        Service detection now uses multi-signal approach with:
+        - AST-based import detection (high confidence)
+        - Package manifest checking (very high confidence)
+        - Path-based confidence modifiers (skip test/pattern files)
+
         Args:
             progress_callback: Optional callback(current, total, file) for
                                progress updates
         """
-        # Service detection patterns (compiled for perf)
-        service_patterns = {
-            "stripe": (
-                re.compile(r"stripe\.|PaymentIntent|Subscription", re.I),
-                ["payments"],
-            ),
-            "resend": (re.compile(r"resend\.|Resend\(", re.I), ["email"]),
-            "sendgrid": (re.compile(r"sendgrid|@sendgrid", re.I), ["email"]),
-            "aws_s3": (
-                re.compile(r"S3Client|s3\..*Bucket|putObject", re.I),
-                ["storage"],
-            ),
-            "postgres": (
-                re.compile(r"pg\.|postgres|PostgreSQL", re.I),
-                ["database"],
-            ),
-            "redis": (
-                re.compile(r"redis\.|Redis\(|createClient", re.I),
-                ["cache"],
-            ),
-            "openai": (
-                re.compile(r"openai\.|OpenAI\(|ChatCompletion", re.I),
-                ["ai"],
-            ),
-        }
         model_schema_types = {"anchor:models", "anchor:schemas"}
 
         # Collect files
@@ -1750,7 +1788,6 @@ class AppIRExtractor:
         # Phase 2: Serial processing (Hyperscan not thread-safe)
         entities: list[EntityDef] = []
         endpoints: list[EndpointDef] = []
-        services: dict[str, ExternalService] = {}
         entity_names_seen: set[str] = set()
 
         stats = {
@@ -1799,40 +1836,47 @@ class AppIRExtractor:
                             entities.append(entity)
 
             # Extract endpoints from route anchors
-            for anchor in anchors:
-                if anchor.anchor_type == "anchor:routes":
-                    stats["route_anchors"] += 1
-                    endpoint = self.route_extractor.extract_from_anchor(
-                        anchor, formatted_path, content
-                    )
-                    if endpoint:
-                        endpoint.business_rules = self.rule_extractor.extract(
-                            content
+            # Skip files with high pattern definition density to avoid
+            # false positives from pattern definition strings
+            if not self._is_pattern_definition_file(file_path, content):
+                for anchor in anchors:
+                    if anchor.anchor_type == "anchor:routes":
+                        stats["route_anchors"] += 1
+                        endpoint = self.route_extractor.extract_from_anchor(
+                            anchor, formatted_path, content
                         )
-                        endpoint.side_effects = self.effect_extractor.extract(
-                            content
-                        )
-                        endpoints.append(endpoint)
+                        if endpoint:
+                            endpoint.business_rules = (
+                                self.rule_extractor.extract(content)
+                            )
+                            endpoint.side_effects = (
+                                self.effect_extractor.extract(content)
+                            )
+                            endpoints.append(endpoint)
 
-            # Detect external services (regex - can stay here)
-            rel_path = str(file_path.relative_to(self.root))
-            for svc_name, (pattern, usage) in service_patterns.items():
-                if pattern.search(content):
-                    stats["service_matches"] += 1
-                    if svc_name not in services:
-                        services[svc_name] = ExternalService(
-                            name=svc_name,
-                            usage=usage,
-                            sources=[],
-                        )
-                    if rel_path not in services[svc_name].sources:
-                        services[svc_name].sources.append(rel_path)
+        # Detect external services using multi-signal approach
+        # This uses AST parsing, package manifests, and confidence scoring
+        # to avoid false positives from pattern definition files
+        service_matches = self.service_detector.detect_all(
+            file_contents, min_confidence=0.5
+        )
+        services: list[ExternalService] = []
+        for match in service_matches:
+            services.append(
+                ExternalService(
+                    name=match.name,
+                    usage=match.usage,
+                    sources=match.sources,
+                )
+            )
+            stats["service_matches"] += len(match.signals)
 
         process_ms = round((time.perf_counter() - process_start) * 1000, 1)
         logger.debug(
             "extraction complete",
             read_ms=read_ms,
             process_ms=process_ms,
+            services_detected=len(services),
             **stats,
         )
-        return entities, endpoints, list(services.values())
+        return entities, endpoints, services
