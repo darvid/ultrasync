@@ -1,9 +1,4 @@
-"""LMDB-backed metadata tracker for ultrasync JIT indexing.
-
-Replaces SQLite with LMDB for zero-copy mmap access and sub-microsecond
-key lookups. Maintains the same interface as FileTracker for drop-in
-replacement.
-"""
+"""LMDB-backed metadata tracker for ultrasync JIT indexing."""
 
 import json
 import struct
@@ -15,10 +10,6 @@ from typing import Any
 
 import lmdb
 import msgpack
-
-# =============================================================================
-# Data Classes (same as tracker.py for compatibility)
-# =============================================================================
 
 
 @dataclass
@@ -143,11 +134,6 @@ class ThreadToolRecord:
     last_used: float
 
 
-# =============================================================================
-# Key Encoding Utilities
-# =============================================================================
-
-
 def _pack_u64(val: int) -> bytes:
     """Pack u64 as big-endian for lexicographic ordering."""
     return struct.pack(">Q", val)
@@ -181,11 +167,6 @@ def _composite_key(*parts: str | int | bytes) -> bytes:
     return b"\x00".join(encoded)
 
 
-# =============================================================================
-# Batch Context Manager
-# =============================================================================
-
-
 class BatchContext:
     """Context manager for batch LMDB operations.
 
@@ -211,13 +192,8 @@ class BatchContext:
             self.tracker._batch_mode = False
 
 
-# =============================================================================
-# LMDB Tracker Implementation
-# =============================================================================
-
-
 class FileTracker:
-    """LMDB-backed metadata tracker with same interface as FileTracker."""
+    """LMDB-backed metadata tracker."""
 
     # Sub-database names
     _DBS = [
@@ -319,10 +295,6 @@ class FileTracker:
             self._batch_txn = None
         self.env.close()
 
-    # =========================================================================
-    # Counter Management (for AUTOINCREMENT replacement)
-    # =========================================================================
-
     def _next_id(self, counter_name: str, txn: Any = None) -> int:
         """Get next ID for a counter, atomically incrementing it.
 
@@ -359,10 +331,6 @@ class FileTracker:
         with self.env.begin() as txn:
             data = txn.get(key, db=db)
             return _unpack_u64(data) if data else 0
-
-    # =========================================================================
-    # File Operations
-    # =========================================================================
 
     def needs_index(self, path: Path) -> bool:
         """Check if file needs indexing based on mtime/size."""
@@ -678,10 +646,6 @@ class FileTracker:
             except json.JSONDecodeError:
                 return []
         return []
-
-    # =========================================================================
-    # Symbol Operations
-    # =========================================================================
 
     def get_symbols(self, path: Path) -> list[SymbolRecord]:
         """Get all symbols for a file."""
@@ -1084,10 +1048,6 @@ class FileTracker:
                 if record.kind == insight_type:
                     yield record
 
-    # =========================================================================
-    # Checkpoint Operations
-    # =========================================================================
-
     def save_checkpoint(
         self,
         processed_files: int,
@@ -1142,10 +1102,6 @@ class FileTracker:
             txn.put(b"checkpoints", _pack_u64(0), db=self._db(b"counters"))
         return count
 
-    # =========================================================================
-    # Metadata Operations
-    # =========================================================================
-
     def get_metadata(self, key: str) -> str | None:
         """Get metadata value by key."""
         with self.env.begin(db=self._db(b"metadata")) as txn:
@@ -1160,10 +1116,6 @@ class FileTracker:
                 value.encode("utf-8"),
                 db=self._db(b"metadata"),
             )
-
-    # =========================================================================
-    # Memory Operations
-    # =========================================================================
 
     def upsert_memory(
         self,
@@ -1354,10 +1306,6 @@ class FileTracker:
         memories.sort(key=lambda m: m.created_at, reverse=True)
         return memories[:limit]
 
-    # =========================================================================
-    # Vector Stats Operations
-    # =========================================================================
-
     def live_vector_stats(self) -> tuple[int, int]:
         """Sum live vector bytes and count across all tables."""
         total_bytes = 0
@@ -1513,10 +1461,6 @@ class FileTracker:
 
         return updated
 
-    # =========================================================================
-    # Stale Files Iterator
-    # =========================================================================
-
     def iter_stale_files(
         self,
         root: Path,
@@ -1559,10 +1503,6 @@ class FileTracker:
         if batch:
             yield batch
 
-    # =========================================================================
-    # Transcript Position Operations
-    # =========================================================================
-
     def get_transcript_position(self, path: Path) -> int:
         """Get the last read position for a transcript file."""
         with self.env.begin(db=self._db(b"transcript_pos")) as txn:
@@ -1596,10 +1536,6 @@ class FileTracker:
                 txn.delete(key, db=self._db(b"transcript_pos"))
                 count += 1
         return count
-
-    # =========================================================================
-    # Pattern Cache Operations
-    # =========================================================================
 
     def cache_pattern(
         self,
@@ -1858,10 +1794,6 @@ class FileTracker:
                     if cache:
                         yield cache
 
-    # =========================================================================
-    # Session Thread Operations
-    # =========================================================================
-
     def create_thread(
         self,
         session_id: str,
@@ -2081,10 +2013,6 @@ class FileTracker:
             "top_session": top_session,
         }
 
-    # =========================================================================
-    # Thread File Association Methods
-    # =========================================================================
-
     def add_thread_file(
         self,
         thread_id: int,
@@ -2164,10 +2092,6 @@ class FileTracker:
                     result.append(_unpack_u64(thread_id_bytes))
 
         return list(set(result))
-
-    # =========================================================================
-    # Thread Query Methods
-    # =========================================================================
 
     def add_thread_query(
         self,
@@ -2281,10 +2205,6 @@ class FileTracker:
                 record["embedding_offset"] = embedding_offset
                 record["embedding_length"] = embedding_length
                 txn.put(key, msgpack.packb(record), db=thread_queries_db)
-
-    # =========================================================================
-    # Thread Tool Usage Methods
-    # =========================================================================
 
     def record_thread_tool(self, thread_id: int, tool_name: str) -> None:
         """Record or increment tool usage for a thread."""

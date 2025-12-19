@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ultrasync.git import should_ignore_path
+from ultrasync.search_learner import ToolCallEvent
 
 if TYPE_CHECKING:
     from ultrasync.jit.manager import JITIndexManager
@@ -49,16 +50,6 @@ class FileAccessEvent:
     path: Path
     tool_name: str
     operation: str  # "read", "write", "edit"
-    timestamp: float | None = None
-
-
-@dataclass
-class ToolCallEvent:
-    """A tool call detected in transcript (for search learning)."""
-
-    tool_name: str
-    tool_input: dict[str, Any]
-    tool_result: dict[str, Any] | list | None = None
     timestamp: float | None = None
 
 

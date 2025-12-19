@@ -62,11 +62,6 @@ def compact_path(full_path: str, root: Path) -> str:
     return ".../" + "/".join(parts[-3:])
 
 
-# =============================================================================
-# File Explorer
-# =============================================================================
-
-
 class FileExplorerTree(Tree[Path]):
     """File tree explorer widget with context badges."""
 
@@ -154,11 +149,6 @@ class FileExplorerTree(Tree[Path]):
         self._context_map = context_map
 
 
-# =============================================================================
-# Stats Panel
-# =============================================================================
-
-
 class StatsPanel(Static):
     """Panel showing index statistics."""
 
@@ -230,11 +220,6 @@ class StatsPanel(Static):
         self.update("\n".join(lines))
 
 
-# =============================================================================
-# Symbols Table
-# =============================================================================
-
-
 class SymbolsTable(DataTable):
     """Searchable symbols table."""
 
@@ -283,11 +268,6 @@ class SymbolsTable(DataTable):
                 str(sym.line_start),
                 key=str(sym.key_hash),
             )
-
-
-# =============================================================================
-# Contexts Table
-# =============================================================================
 
 
 class ContextsList(DataTable):
@@ -353,11 +333,6 @@ class ContextSymbolsTable(DataTable):
             )
 
 
-# =============================================================================
-# Insights Table
-# =============================================================================
-
-
 class InsightsTable(DataTable):
     """Table showing code insights (TODOs, FIXMEs, etc.)."""
 
@@ -392,11 +367,6 @@ class InsightsTable(DataTable):
             )
 
 
-# =============================================================================
-# Memories Table
-# =============================================================================
-
-
 class MemoriesTable(DataTable):
     """Table showing stored memories."""
 
@@ -425,11 +395,6 @@ class MemoriesTable(DataTable):
                 created,
                 key=mem.id,
             )
-
-
-# =============================================================================
-# Call Graph Table
-# =============================================================================
 
 
 class EmptyStatePanel(Static):
@@ -494,11 +459,6 @@ class CallGraphTable(DataTable):
             )
 
 
-# =============================================================================
-# Classification Table
-# =============================================================================
-
-
 class ClassificationTable(DataTable):
     """Classification results as a data table."""
 
@@ -533,11 +493,6 @@ class ClassificationTable(DataTable):
                 str(symbol_count),
                 key=file_ir.path_rel,
             )
-
-
-# =============================================================================
-# Detail Panels
-# =============================================================================
 
 
 class SymbolDetailsPanel(Static):
@@ -650,11 +605,6 @@ class MemoryDetailsPanel(Static):
         self.update("\n".join(lines))
 
 
-# =============================================================================
-# Search Results Panel
-# =============================================================================
-
-
 class SearchResultsPanel(Static):
     """Panel showing semantic search results."""
 
@@ -677,11 +627,6 @@ class SearchResultsPanel(Static):
                 lines.append(f"  [dim]{path}[/]")
 
         self.update("\n".join(lines))
-
-
-# =============================================================================
-# Main App
-# =============================================================================
 
 
 class VoyagerApp(App[None]):

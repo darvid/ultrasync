@@ -1,7 +1,7 @@
-import logging
 import os
 
 import numpy as np
+import structlog
 from sentence_transformers import SentenceTransformer
 
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
@@ -11,7 +11,7 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
 # ~4 chars per token, 512 token limit -> 1500 chars is safe with headroom
 DEFAULT_MAX_CHARS = 1500
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _get_device() -> str:
@@ -41,7 +41,7 @@ class EmbeddingProvider:
         self._max_chars = max_chars
         self._device = device or _get_device()
 
-        logger.info("loading embedding model %s on %s", model, self._device)
+        logger.info("loading embedding model", model=model, device=self._device)
         self._model = SentenceTransformer(model, device=self._device)
 
         dim = self._model.get_sentence_embedding_dimension()
