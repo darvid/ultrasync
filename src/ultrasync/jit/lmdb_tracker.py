@@ -575,7 +575,7 @@ class FileTracker:
                 if not key.startswith(prefix):
                     break
                 # Extract path from composite key
-                path_bytes = key[len(prefix):]
+                path_bytes = key[len(prefix) :]
                 record_data = txn.get(path_bytes, db=files_db)
                 if record_data:
                     yield self._unpack_file_record(record_data)
@@ -876,9 +876,7 @@ class FileTracker:
             if sym_data:
                 record = msgpack.unpackb(sym_data)
                 # Clean up symbols_by_key index
-                txn.delete(
-                    _pack_u64(record["key_hash"]), db=symbols_by_key_db
-                )
+                txn.delete(_pack_u64(record["key_hash"]), db=symbols_by_key_db)
                 # Delete symbol record
                 txn.delete(_pack_u64(sym_id), db=symbols_db)
                 count += 1
@@ -1601,7 +1599,7 @@ class FileTracker:
                         if not k.startswith(prefix):
                             break
                         # Extract file path and delete reverse index
-                        file_path = k[len(prefix):]
+                        file_path = k[len(prefix) :]
                         rev_key = file_path + b"\x00" + key
                         txn.delete(rev_key, db=pattern_files_rev_db)
                         txn.delete(k, db=pattern_files_db)
@@ -1638,7 +1636,7 @@ class FileTracker:
                 for k, _ in cursor:
                     if not k.startswith(prefix):
                         break
-                    file_path = k[len(prefix):].decode("utf-8")
+                    file_path = k[len(prefix) :].decode("utf-8")
                     matched_files.append(file_path)
 
             return PatternCacheRecord(
@@ -1666,7 +1664,7 @@ class FileTracker:
                 for k, _ in cursor:
                     if not k.startswith(prefix):
                         break
-                    pattern_key = k[len(prefix):]
+                    pattern_key = k[len(prefix) :]
                     result.append(_unpack_u64(pattern_key))
 
         return result
@@ -1706,7 +1704,7 @@ class FileTracker:
                         break
                     keys_to_delete.append(k)
                     # Delete reverse index
-                    file_path = k[len(prefix):]
+                    file_path = k[len(prefix) :]
                     rev_key = file_path + b"\x00" + key
                     txn.delete(rev_key, db=pattern_files_rev_db)
 
@@ -1904,7 +1902,7 @@ class FileTracker:
                 for key, _ in cursor:
                     if not key.startswith(prefix):
                         break
-                    thread_id_bytes = key[len(prefix):]
+                    thread_id_bytes = key[len(prefix) :]
                     data = txn.get(thread_id_bytes, db=threads_db)
                     if data:
                         thread = self._unpack_thread_record(data)
@@ -2121,7 +2119,7 @@ class FileTracker:
                 for key, _ in cursor:
                     if not key.startswith(prefix):
                         break
-                    thread_id_bytes = key[len(prefix):]
+                    thread_id_bytes = key[len(prefix) :]
                     result.append(_unpack_u64(thread_id_bytes))
 
         return list(set(result))
@@ -2176,7 +2174,7 @@ class FileTracker:
                 for key, _ in cursor:
                     if not key.startswith(prefix):
                         break
-                    query_id_bytes = key[len(prefix):]
+                    query_id_bytes = key[len(prefix) :]
                     query_ids.append(query_id_bytes)
 
         results = []
@@ -2296,3 +2294,147 @@ class FileTracker:
 
         results.sort(key=lambda t: t.tool_count, reverse=True)
         return results
+
+    def get_db_stats(self) -> dict[str, Any]:
+        """Get LMDB database statistics.
+
+        Returns dict with:
+            - map_size: configured max size
+            - last_pgno: last page number used
+            - last_txnid: last transaction id
+            - entries: total entries across all sub-dbs
+            - file_size: actual file size on disk
+        """
+        info = self.env.info()
+        stat = self.env.stat()
+
+        # get actual file size
+        data_file = self.db_path / "data.mdb"
+        file_size = data_file.stat().st_size if data_file.exists() else 0
+
+        # estimate live data size (pages * page_size)
+        page_size = stat["psize"]
+        last_pgno = info["last_pgno"]
+        estimated_used = last_pgno * page_size
+
+        return {
+            "map_size": info["map_size"],
+            "last_pgno": last_pgno,
+            "last_txnid": info["last_txnid"],
+            "page_size": page_size,
+            "entries": stat["entries"],
+            "file_size": file_size,
+            "estimated_used": estimated_used,
+            "estimated_waste": max(0, file_size - estimated_used),
+        }
+
+    def compact(self, force: bool = False) -> dict[str, Any]:
+        """Compact the LMDB database to reclaim free pages.
+
+        Creates a compacted copy, then replaces the original.
+        This is a stop-the-world operation.
+
+        Args:
+            force: Compact even if waste ratio is low
+
+        Returns:
+            Dict with bytes_before, bytes_after, bytes_reclaimed, success
+        """
+        import shutil
+        import tempfile
+
+        stats_before = self.get_db_stats()
+        file_size_before = stats_before["file_size"]
+
+        # check if compaction is worthwhile (>10% waste and >1MB)
+        waste_ratio = (
+            stats_before["estimated_waste"] / file_size_before
+            if file_size_before > 0
+            else 0
+        )
+        min_waste_bytes = 1024 * 1024  # 1MB
+
+        needs_compact = (
+            waste_ratio > 0.10
+            and stats_before["estimated_waste"] > min_waste_bytes
+        )
+
+        if not force and not needs_compact:
+            return {
+                "success": True,
+                "bytes_before": file_size_before,
+                "bytes_after": file_size_before,
+                "bytes_reclaimed": 0,
+                "skipped": True,
+                "reason": "below threshold (use force=True to override)",
+            }
+
+        # create temp directory for compacted copy
+        temp_dir = tempfile.mkdtemp(prefix="lmdb_compact_")
+        compact_path = Path(temp_dir) / "compacted"
+
+        try:
+            # copy with compaction
+            self.env.copy(str(compact_path), compact=True)
+
+            # get compacted size
+            compact_data = compact_path / "data.mdb"
+            file_size_after = (
+                compact_data.stat().st_size if compact_data.exists() else 0
+            )
+
+            # close current env
+            self.env.close()
+
+            # backup original
+            backup_path = self.db_path.with_suffix(".db.bak")
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+            shutil.move(str(self.db_path), str(backup_path))
+
+            # move compacted to original location
+            shutil.move(str(compact_path), str(self.db_path))
+
+            # remove backup
+            shutil.rmtree(backup_path)
+
+            # reopen
+            self.env = lmdb.open(
+                str(self.db_path),
+                map_size=10 * 1024**3,
+                max_dbs=len(self._DBS),
+                writemap=True,
+                map_async=True,
+            )
+
+            # reopen sub-databases
+            with self.env.begin(write=True) as txn:
+                for name in self._DBS:
+                    self._dbs[name] = self.env.open_db(name, txn=txn)
+
+            bytes_reclaimed = file_size_before - file_size_after
+
+            return {
+                "success": True,
+                "bytes_before": file_size_before,
+                "bytes_after": file_size_after,
+                "bytes_reclaimed": bytes_reclaimed,
+                "skipped": False,
+            }
+
+        except Exception as e:
+            # cleanup temp dir
+            if Path(temp_dir).exists():
+                shutil.rmtree(temp_dir)
+            return {
+                "success": False,
+                "bytes_before": file_size_before,
+                "bytes_after": file_size_before,
+                "bytes_reclaimed": 0,
+                "error": str(e),
+                "skipped": False,
+            }
+        finally:
+            # always cleanup temp dir
+            if Path(temp_dir).exists():
+                shutil.rmtree(temp_dir)

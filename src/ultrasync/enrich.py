@@ -718,6 +718,7 @@ async def enrich_codebase(
     output: Path | None = None,
     store_in_index: bool = True,
     map_files: bool = True,
+    compact_after: bool = True,
 ) -> EnrichmentResult:
     """High-level function to enrich a codebase.
 
@@ -730,6 +731,7 @@ async def enrich_codebase(
         output: Optional path to save results JSON
         store_in_index: Store questions in the JIT index for search
         map_files: Map questions to relevant files (recommended)
+        compact_after: Compact vector store after enrichment to reclaim space
 
     Returns:
         EnrichmentResult
@@ -778,8 +780,22 @@ async def enrich_codebase(
 
     # Store questions in index as searchable memories
     if store_in_index:
-        stored = await store_questions_in_index(jit, result.questions)
-        logger.info("stored questions in index", count=stored)
+        stored, skipped = await store_questions_in_index(jit, result.questions)
+        logger.info(
+            "stored questions in index",
+            stored=stored,
+            skipped_duplicates=skipped,
+        )
+
+    # Compact vector store to reclaim dead bytes from LMDB CoW
+    if compact_after:
+        compact_result = jit.compact_vectors(force=False)
+        if compact_result.bytes_reclaimed > 0:
+            logger.info(
+                "compacted vector store",
+                bytes_reclaimed=compact_result.bytes_reclaimed,
+                vectors_copied=compact_result.vectors_copied,
+            )
 
     # Save JSON if output specified
     if output:
@@ -791,7 +807,7 @@ async def enrich_codebase(
 async def store_questions_in_index(
     jit: JITIndexManager,
     questions: list[EnrichedQuestion],
-) -> int:
+) -> tuple[int, int]:
     """Store enriched questions mapped to actual files/symbols.
 
     Each question is stored as an enrichment_question symbol pointing to
@@ -799,8 +815,17 @@ async def store_questions_in_index(
     returns the relevant file, not the question itself.
 
     Questions without mapped files are stored with a fallback virtual path.
+
+    Deduplicates across runs - skips questions that already exist in the index.
+
+    Returns:
+        Tuple of (stored_count, skipped_count)
     """
+    from ultrasync.keys import hash64_sym_key
+
     stored = 0
+    skipped = 0
+
     for eq in questions:
         q_hash = hashlib.sha256(eq.question.encode()).hexdigest()[:12]
 
@@ -809,6 +834,15 @@ async def store_questions_in_index(
             # for that file, helping users find it with natural language
             for file_path in eq.mapped_files[:3]:  # limit to top 3 files
                 name = f"Q: {eq.question[:60]}"
+
+                # Check if this exact question->file mapping already exists
+                sym_key = hash64_sym_key(
+                    file_path, name, "enrichment_question", 0, 0
+                )
+                if jit.tracker.get_symbol_by_key(sym_key) is not None:
+                    skipped += 1
+                    continue
+
                 # Store full question as content, but embed JUST the question
                 # (no symbol_type prefix) for best semantic matching
                 content = f"[{eq.role}] {eq.question}"
@@ -833,6 +867,19 @@ async def store_questions_in_index(
         else:
             # No file mapping - store with virtual path as fallback
             name = f"enrichment:{q_hash}"
+
+            # Check if this question already exists
+            sym_key = hash64_sym_key(
+                ".ultrasync/enrichment.txt",
+                name,
+                "enrichment_question",
+                0,
+                0,
+            )
+            if jit.tracker.get_symbol_by_key(sym_key) is not None:
+                skipped += 1
+                continue
+
             content = f"[{eq.role}] {eq.question}"
 
             try:
@@ -841,7 +888,7 @@ async def store_questions_in_index(
                     source_code=content,
                     file_path=".ultrasync/enrichment.txt",
                     symbol_type="enrichment_question",
-                    line_start=stored,
+                    line_start=0,
                     embed_text=eq.question,  # clean embedding
                 )
                 stored += 1
@@ -852,4 +899,4 @@ async def store_questions_in_index(
                     error=str(e),
                 )
 
-    return stored
+    return stored, skipped

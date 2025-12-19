@@ -61,6 +61,14 @@ class Enrich:
         default=False,
         metadata={"help": "Show generated questions without storing"},
     )
+    clean: bool = field(
+        default=False,
+        metadata={"help": "Clear existing enrichment questions first"},
+    )
+    compact: bool = field(
+        default=True,
+        metadata={"help": "Compact vector store after to reclaim space"},
+    )
 
     def run(self) -> int:
         """Execute the enrich command."""
@@ -80,6 +88,24 @@ class Enrich:
         console.info(f"  budget: {self.budget} questions")
         console.info(f"  map files: {self.map_files}")
 
+        # Clean existing enrichment questions if requested
+        if self.clean and not self.dry_run:
+            from ultrasync.jit.lmdb_tracker import FileTracker
+
+            tracker = FileTracker(db_path=data_dir / "tracker.db")
+            count = sum(
+                1
+                for sym in tracker.iter_all_symbols()
+                if sym.kind == "enrichment_question"
+            )
+            if count > 0:
+                console.info(f"cleaning {count} enrichment question(s)...")
+                for sym in list(tracker.iter_all_symbols()):
+                    if sym.kind == "enrichment_question":
+                        tracker.delete_symbol_by_key(sym.key_hash)
+                console.success(f"cleared {count} enrichment question(s)")
+            tracker.close()
+
         start_time = time.perf_counter()
 
         try:
@@ -93,6 +119,7 @@ class Enrich:
                     output=self.output,
                     store_in_index=not self.dry_run,
                     map_files=self.map_files,
+                    compact_after=self.compact and not self.dry_run,
                 )
             )
         except FileNotFoundError as e:
