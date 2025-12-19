@@ -117,13 +117,32 @@ class AnchorMatch:
     pattern: str  # the pattern that matched
 
 
+@dataclass
+class UnifiedMatch:
+    """A match from the unified pattern database."""
+
+    category: str  # "context" or "insight"
+    type_id: str  # e.g., "context:auth" or "insight:todo"
+    pattern_set_id: str  # e.g., "pat:ctx-auth" or "pat:ins-todo"
+    start: int
+    end: int
+    pattern: str
+
+
 class PatternSetManager:
     """Manages named PatternSets with Hyperscan compilation and scanning."""
 
     def __init__(self, data_dir: Path | None = None):
         self.data_dir = data_dir
         self.pattern_sets: dict[str, PatternSet] = {}
+
+        # Unified database for single-pass scanning
+        self._unified_db: hyperscan.Database | None = None
+        self._unified_pattern_map: dict[int, tuple[str, str, str, str]] = {}
+        # Maps pattern ID -> (category, type_id, pattern_set_id, pattern_str)
+
         self._load_builtin_patterns()
+        self._compile_unified_database()
 
     def _load_builtin_patterns(self) -> None:
         """Load built-in pattern sets."""
@@ -1058,6 +1077,69 @@ class PatternSetManager:
         db.compile(expressions=pattern_bytes, flags=flags, ids=ids)
         return db
 
+    def _compile_unified_database(self) -> None:
+        """Compile all context + insight patterns into one unified database.
+
+        This enables single-pass scanning instead of 22 separate scans per file.
+        Pattern IDs are globally unique across all pattern sets.
+        """
+        all_patterns: list[str] = []
+        all_ids: list[int] = []
+        self._unified_pattern_map = {}
+
+        global_id = 1
+
+        # Add context patterns
+        for pattern_set_id in CONTEXT_PATTERN_IDS:
+            ps = self.pattern_sets.get(pattern_set_id)
+            if not ps:
+                continue
+
+            # Convert pat:ctx-auth -> context:auth
+            type_id = pattern_set_id.replace("pat:ctx-", "context:")
+
+            for pattern in ps.patterns:
+                all_patterns.append(pattern)
+                all_ids.append(global_id)
+                self._unified_pattern_map[global_id] = (
+                    "context",
+                    type_id,
+                    pattern_set_id,
+                    pattern,
+                )
+                global_id += 1
+
+        # Add insight patterns
+        for pattern_set_id in INSIGHT_PATTERN_IDS:
+            ps = self.pattern_sets.get(pattern_set_id)
+            if not ps:
+                continue
+
+            # Convert pat:ins-todo -> insight:todo
+            type_id = pattern_set_id.replace("pat:ins-", "insight:")
+
+            for pattern in ps.patterns:
+                all_patterns.append(pattern)
+                all_ids.append(global_id)
+                self._unified_pattern_map[global_id] = (
+                    "insight",
+                    type_id,
+                    pattern_set_id,
+                    pattern,
+                )
+                global_id += 1
+
+        if not all_patterns:
+            self._unified_db = None
+            return
+
+        # Compile unified database
+        db = hyperscan.Database(mode=hyperscan.HS_MODE_BLOCK)
+        pattern_bytes = [p.encode("utf-8") for p in all_patterns]
+        flags = [hyperscan.HS_FLAG_SOM_LEFTMOST] * len(all_patterns)
+        db.compile(expressions=pattern_bytes, flags=flags, ids=all_ids)
+        self._unified_db = db
+
     def get(self, pattern_set_id: str) -> PatternSet | None:
         """Get a pattern set by ID."""
         return self.pattern_sets.get(pattern_set_id)
@@ -1151,6 +1233,151 @@ class PatternSetManager:
             pattern_set_id, blob, record.blob_offset, record.blob_length
         )
 
+    def scan_all_fast(
+        self,
+        data: bytes | str,
+        file_path: str | Path | None = None,
+        min_context_matches: int = 2,
+    ) -> tuple[list[str], list[InsightMatch]]:
+        """Single-pass unified scan for both contexts and insights.
+
+        This is ~20x faster than calling detect_contexts() + extract_insights()
+        separately because it does ONE Hyperscan scan instead of 22.
+
+        Args:
+            data: File content to scan (bytes or str)
+            file_path: Optional file path for extension-based filtering
+            min_context_matches: Minimum matches required to assign a context
+
+        Returns:
+            Tuple of (detected_contexts, insights)
+        """
+        if self._unified_db is None:
+            # Fallback to separate scans if unified DB not compiled
+            contexts = self.detect_contexts(
+                data, file_path, min_context_matches
+            )
+            insights = self.extract_insights(data)
+            return contexts, insights
+
+        # Normalize data
+        if isinstance(data, str):
+            data_bytes = data.encode("utf-8")
+            data_str = data
+        else:
+            data_bytes = bytes(data)
+            data_str = data_bytes.decode("utf-8", errors="replace")
+
+        # Build line index ONCE (cached for insight extraction)
+        lines = data_str.split("\n")
+        line_offsets: list[tuple[int, int]] = []
+        pos = 0
+        for line in lines:
+            line_bytes = line.encode("utf-8")
+            line_end = pos + len(line_bytes)
+            line_offsets.append((pos, line_end))
+            pos = line_end + 1  # +1 for newline
+
+        def find_line(offset: int) -> tuple[int, int, int]:
+            """Find line number and bounds for byte offset."""
+            for i, (start, end) in enumerate(line_offsets):
+                if start <= offset <= end:
+                    return (i + 1, start, end)  # 1-indexed
+            return (len(line_offsets), 0, len(data_bytes))
+
+        # Extract file extension for filtering
+        ext = None
+        if file_path:
+            ext = Path(file_path).suffix.lstrip(".").lower()
+
+        # Single unified scan
+        matches: list[UnifiedMatch] = []
+
+        def on_match(
+            id_: int,
+            start: int,
+            end: int,
+            flags: int,
+            context: object,
+        ) -> int:
+            info = self._unified_pattern_map.get(id_)
+            if info:
+                category, type_id, pattern_set_id, pattern = info
+                matches.append(
+                    UnifiedMatch(
+                        category=category,
+                        type_id=type_id,
+                        pattern_set_id=pattern_set_id,
+                        start=start,
+                        end=end,
+                        pattern=pattern,
+                    )
+                )
+            return 0
+
+        self._unified_db.scan(data_bytes, match_event_handler=on_match)
+
+        # Process matches into contexts and insights
+        context_counts: dict[str, int] = {}
+        context_extensions: dict[str, list[str] | None] = {}
+
+        # Pre-populate extension info from pattern sets
+        for pattern_set_id in CONTEXT_PATTERN_IDS:
+            ps = self.pattern_sets.get(pattern_set_id)
+            if ps:
+                type_id = pattern_set_id.replace("pat:ctx-", "context:")
+                context_extensions[type_id] = ps.extensions
+
+        insights: list[InsightMatch] = []
+        seen_insights: set[tuple[str, int]] = set()  # (type, line_num)
+
+        for match in matches:
+            if match.category == "context":
+                # Check extension filter
+                exts = context_extensions.get(match.type_id)
+                if exts and ext and ext not in exts:
+                    continue
+                context_counts[match.type_id] = (
+                    context_counts.get(match.type_id, 0) + 1
+                )
+
+            elif match.category == "insight":
+                line_num, line_start, line_end = find_line(match.start)
+
+                # Dedupe: only one insight per type per line
+                key = (match.type_id, line_num)
+                if key in seen_insights:
+                    continue
+                seen_insights.add(key)
+
+                line_text = (
+                    lines[line_num - 1] if line_num <= len(lines) else ""
+                )
+
+                insights.append(
+                    InsightMatch(
+                        insight_type=match.type_id,
+                        line_number=line_num,
+                        line_start=line_start,
+                        line_end=line_end,
+                        text=line_text.strip(),
+                        match_start=match.start,
+                        match_end=match.end,
+                    )
+                )
+
+        # Filter contexts by minimum match count
+        detected_contexts = [
+            ctx
+            for ctx, count in context_counts.items()
+            if count >= min_context_matches
+        ]
+
+        # Sort insights by line number
+        insights.sort(key=lambda x: x.line_number)
+
+        return detected_contexts, insights
+
     def detect_contexts(
         self,
         data: Buffer,
@@ -1221,10 +1448,11 @@ class PatternSetManager:
             data_bytes = bytes(data)
             data_str = data_bytes.decode("utf-8", errors="replace")
 
-        # Build line index: list of (line_start_offset, line_end_offset)
+        # Build line index ONCE and cache the lines list
+        lines = data_str.split("\n")
         line_offsets: list[tuple[int, int]] = []
         pos = 0
-        for line in data_str.split("\n"):
+        for line in lines:
             line_bytes = line.encode("utf-8")
             line_end = pos + len(line_bytes)
             line_offsets.append((pos, line_end))
@@ -1259,8 +1487,9 @@ class PatternSetManager:
                         continue
                     seen.add(key)
 
-                    # Extract line text
-                    line_text = data_str.split("\n")[line_num - 1]
+                    line_text = (
+                        lines[line_num - 1] if line_num <= len(lines) else ""
+                    )
 
                     insights.append(
                         InsightMatch(

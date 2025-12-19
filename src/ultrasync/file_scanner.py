@@ -51,8 +51,17 @@ class FileScanner:
     # skip symbol extraction for large files (likely bundled/minified)
     MAX_SCAN_BYTES = 500_000  # 500KB
 
-    def scan(self, path: Path) -> FileMetadata | None:
-        """Scan a file and extract metadata."""
+    def scan(
+        self,
+        path: Path,
+        content: bytes | str | None = None,
+    ) -> FileMetadata | None:
+        """Scan a file and extract metadata.
+
+        Args:
+            path: Path to the file
+            content: Optional pre-read content (bytes or str)
+        """
         if not path.is_file():
             return None
 
@@ -68,21 +77,27 @@ class FileScanner:
             filename_no_ext=filename_no_ext,
         )
 
-        try:
-            content = path.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            return metadata
+        # Use provided content or read from file
+        if content is None:
+            try:
+                text_content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                return metadata
+        elif isinstance(content, bytes):
+            text_content = content.decode("utf-8", errors="ignore")
+        else:
+            text_content = content
 
         # skip symbol extraction for very large files (likely bundled/minified)
-        if len(content) > self.MAX_SCAN_BYTES:
+        if len(text_content) > self.MAX_SCAN_BYTES:
             return metadata
 
         if ext in self.PYTHON_EXTS:
-            self._scan_python(content, metadata)
+            self._scan_python(text_content, metadata)
         elif ext in self.TS_JS_EXTS:
-            self._scan_typescript(content, metadata)
+            self._scan_typescript(text_content, metadata)
         elif ext in self.RUST_EXTS:
-            self._scan_rust(content, metadata)
+            self._scan_rust(text_content, metadata)
 
         return metadata
 

@@ -210,8 +210,7 @@ class SearchLearner:
         result_count = len(results) if results else 0
 
         logger.debug(
-            "jit_search analysis: query=%r score=%.3f count=%d "
-            "threshold=%.3f",
+            "jit_search analysis: query=%r score=%.3f count=%d threshold=%.3f",
             query[:50],
             best_score,
             result_count,
@@ -263,8 +262,7 @@ class SearchLearner:
         # format 1: direct list (MCP tool return value)
         if isinstance(tool_result, list):
             logger.debug(
-                "_extract_search_results: format 1 (direct list), "
-                "%d items",
+                "_extract_search_results: format 1 (direct list), %d items",
                 len(tool_result),
             )
             return tool_result
@@ -309,8 +307,7 @@ class SearchLearner:
                         )
 
             logger.debug(
-                "_extract_search_results: dict format not recognized, "
-                "keys=%s",
+                "_extract_search_results: dict format not recognized, keys=%s",
                 list(tool_result.keys())[:5],
             )
 
@@ -538,8 +535,7 @@ class SearchLearner:
                     self.stats.files_learned += 1
                     files_indexed += 1
                     logger.info(
-                        "learned file %s from query %r "
-                        "(symbols=%d bytes=%d)",
+                        "learned file %s from query %r (symbols=%d bytes=%d)",
                         file_path.name,
                         session.query[:30],
                         result.symbols,

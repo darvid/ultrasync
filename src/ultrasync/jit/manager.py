@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,8 +154,6 @@ class JITIndexManager:
 
         Embedding happens lazily on search via ensure_embedded().
         """
-        import time
-
         t_start = time.perf_counter()
         path = path.resolve()
 
@@ -180,26 +179,27 @@ class JITIndexManager:
             )
         t_needs = time.perf_counter()
 
-        metadata = self.scanner.scan(path)
-        t_scan = time.perf_counter()
-        if not metadata:
-            return IndexResult(
-                status="skipped", reason="unsupported_type", path=str(path)
-            )
-
         try:
             content = path.read_bytes()
         except (OSError, PermissionError) as e:
             return IndexResult(status="error", reason=str(e), path=str(path))
         t_read = time.perf_counter()
 
+        metadata = self.scanner.scan(path, content)
+        t_scan = time.perf_counter()
+        if not metadata:
+            return IndexResult(
+                status="skipped", reason="unsupported_type", path=str(path)
+            )
+
         content_hash = self._content_hash(content)
         t_hash = time.perf_counter()
         blob_entry = self.blob.append(content)
         t_blob = time.perf_counter()
 
-        # Detect contexts using pattern matching (no LLM required)
-        detected_contexts = self.pattern_manager.detect_contexts(content, path)
+        detected_contexts, insights = self.pattern_manager.scan_all_fast(
+            content, path
+        )
         t_ctx = time.perf_counter()
 
         path_rel = str(path)
@@ -253,8 +253,7 @@ class JITIndexManager:
                     )
                 sym_count += 1
 
-        # Extract insights (TODOs, FIXMEs, etc.) as symbols
-        insights = self.pattern_manager.extract_insights(content)
+        # Process insights extracted from unified scan
         for insight in insights:
             insight_key = hash64_sym_key(
                 path_rel,
@@ -287,14 +286,14 @@ class JITIndexManager:
         if total_ms > 50:  # log slow files (>50ms)
             logger.warning(
                 "slow file %s: %.1fms total "
-                "(needs=%.1f scan=%.1f read=%.1f hash=%.1f blob=%.1f "
+                "(needs=%.1f read=%.1f scan=%.1f hash=%.1f blob=%.1f "
                 "ctx=%.1f upsert=%.1f aot=%.1f syms[%d]=%.1f)",
                 path.name,
                 total_ms,
                 (t_needs - t_check) * 1000,
-                (t_scan - t_needs) * 1000,
-                (t_read - t_scan) * 1000,
-                (t_hash - t_read) * 1000,
+                (t_read - t_needs) * 1000,
+                (t_scan - t_read) * 1000,
+                (t_hash - t_scan) * 1000,
                 (t_blob - t_hash) * 1000,
                 (t_ctx - t_blob) * 1000,
                 (t_upsert - t_ctx) * 1000,
@@ -798,7 +797,7 @@ class JITIndexManager:
         progress: IndexingProgress | None = None,
     ) -> None:
         """Batch embed all files for better performance."""
-        embed_batch_size = 64
+        embed_batch_size = 256 if self.provider.device != "cpu" else 64
 
         # Phase 1: Scanning files
         if progress:
@@ -849,9 +848,8 @@ class JITIndexManager:
                 content_hash = self._content_hash(content)
                 blob_entry = self.blob.append(content)
 
-                # Detect contexts via pattern matching (no LLM)
-                detected_contexts = self.pattern_manager.detect_contexts(
-                    content, file_path
+                detected_contexts, insights = (
+                    self.pattern_manager.scan_all_fast(content, file_path)
                 )
 
                 self.tracker.upsert_file(
@@ -901,8 +899,7 @@ class JITIndexManager:
                         sym_text = f"{sym.kind} {sym.name}"
                         sym_data.append((sym_text, sym_key))
 
-                # Extract insights (TODOs, FIXMEs, etc.) as symbols
-                insights = self.pattern_manager.extract_insights(content)
+                # Process insights from unified scan
                 for insight in insights:
                     insight_key = hash64_sym_key(
                         path_rel,
@@ -965,28 +962,45 @@ class JITIndexManager:
                 progress.log("No files need embedding")
             return
 
-        # Build text list for embedding
+        # Build text list for embedding with source tracking
         all_texts: list[str] = []
-        text_map: list[tuple[int, str, int]] = []
+        text_map: list[
+            tuple[int, str, int, str]
+        ] = []  # (file_idx, type, key, name)
+        file_paths: list[Path] = []
 
-        for file_idx, (_, file_text, file_key, sym_data) in enumerate(
+        file_count = 0
+        symbol_count = 0
+
+        for file_idx, (file_path, file_text, file_key, sym_data) in enumerate(
             file_data
         ):
-            text_map.append((file_idx, "file", file_key))
+            text_map.append((file_idx, "file", file_key, file_path.name))
             all_texts.append(file_text)
-            for sym_text, sym_key in sym_data:
-                text_map.append((file_idx, "symbol", sym_key))
-                all_texts.append(sym_text)
+            file_paths.append(file_path)
+            file_count += 1
 
-        # Phase 2: Embedding
+            for sym_text, sym_key in sym_data:
+                text_map.append((file_idx, "symbol", sym_key, sym_text))
+                all_texts.append(sym_text)
+                symbol_count += 1
+
+        # Phase 2: Embedding with detailed progress
         if progress:
             progress.start_phase(
                 "embed",
                 "Embedding texts",
                 len(all_texts),
             )
+            progress.set_stats(
+                device=self.provider.device,
+                files=file_count,
+                symbols=symbol_count,
+            )
 
         all_embeddings = []
+        embed_start = time.perf_counter()
+
         for batch_start in range(0, len(all_texts), embed_batch_size):
             batch_end = min(batch_start + embed_batch_size, len(all_texts))
             batch_texts = all_texts[batch_start:batch_end]
@@ -994,20 +1008,37 @@ class JITIndexManager:
             all_embeddings.extend(batch_embeddings)
 
             if progress:
+                elapsed = time.perf_counter() - embed_start
+                rate = batch_end / elapsed if elapsed > 0 else 0
+
+                # find what we just embedded
+                last_item = text_map[batch_end - 1]
+                item_type, item_name = last_item[1], last_item[3]
+                if item_type == "file":
+                    current = item_name
+                else:
+                    current = f"{item_name[:30]}"
+
                 progress.update_absolute(
                     "embed",
                     completed=batch_end,
-                    texts_embedded=batch_end,
+                    current_item=current,
+                    rate=f"{rate:.0f}/s",
                 )
 
         if progress:
-            progress.complete_phase("embed", f"Embedded {len(all_texts)} texts")
+            total_time = time.perf_counter() - embed_start
+            avg_rate = len(all_texts) / total_time if total_time > 0 else 0
+            progress.complete_phase(
+                "embed",
+                f"Embedded {len(all_texts)} texts ({avg_rate:.0f}/s)",
+            )
 
         # Phase 3: Writing vectors
         if progress:
             progress.start_phase("write", "Writing vectors", len(text_map))
 
-        for i, (_, item_type, key_hash) in enumerate(text_map):
+        for i, (_, item_type, key_hash, _) in enumerate(text_map):
             embedding = all_embeddings[i]
             vec_entry = self.vector_store.append(embedding)
             self.vector_cache.put(key_hash, embedding)

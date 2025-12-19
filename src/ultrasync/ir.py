@@ -560,7 +560,8 @@ SQLALCHEMY_FIELD_PATTERNS = [
         r"(\w+)\s*=\s*(?:db\.)?Column\s*\(\s*(?:db\.)?Enum\s*\(\s*(\w+)\s*\)",
         lambda m: FieldDef(name=m.group(1), type=f"enum:{m.group(2)}"),
     ),
-    # user_id = Column(Integer, ForeignKey("users.id")) or db.Column(..., db.ForeignKey(...))
+    # user_id = Column(Integer, ForeignKey("users.id"))
+    # or db.Column(..., db.ForeignKey(...))
     (
         r"(\w+)\s*=\s*(?:db\.)?Column\s*\([^)]*(?:db\.)?ForeignKey\s*\(\s*['\"](\w+)\.(\w+)['\"]",
         lambda m: FieldDef(

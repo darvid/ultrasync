@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path

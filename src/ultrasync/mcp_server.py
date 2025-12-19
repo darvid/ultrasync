@@ -622,7 +622,8 @@ def create_server(
         """Lifecycle hooks for the MCP server."""
         import asyncio
 
-        # startup: launch initialization in background (don't block MCP handshake)
+        # startup: launch initialization in background
+        # (don't block MCP handshake)
         # model loading takes 5-10 seconds on first run, so we fire-and-forget
         init_task: asyncio.Task | None = None
         watcher_task: asyncio.Task | None = None

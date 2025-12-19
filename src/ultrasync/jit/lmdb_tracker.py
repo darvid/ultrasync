@@ -182,6 +182,36 @@ def _composite_key(*parts: str | int | bytes) -> bytes:
 
 
 # =============================================================================
+# Batch Context Manager
+# =============================================================================
+
+
+class BatchContext:
+    """Context manager for batch LMDB operations.
+
+    Defers commits until the context exits, reducing transaction overhead
+    when doing many writes.
+    """
+
+    def __init__(self, tracker: "FileTracker"):
+        self.tracker = tracker
+
+    def __enter__(self) -> "BatchContext":
+        self.tracker.begin_batch()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is None:
+            self.tracker.end_batch()
+        else:
+            # Abort on exception
+            if self.tracker._batch_txn is not None:
+                self.tracker._batch_txn.abort()
+                self.tracker._batch_txn = None
+            self.tracker._batch_mode = False
+
+
+# =============================================================================
 # LMDB Tracker Implementation
 # =============================================================================
 
@@ -265,6 +295,17 @@ class FileTracker:
             self._batch_txn.commit()
             self._batch_txn = None
         self._batch_mode = False
+
+    def batch(self) -> "BatchContext":
+        """Context manager for batch mode.
+
+        Usage:
+            with tracker.batch():
+                for path in paths:
+                    tracker.upsert_file(...)
+                    tracker.upsert_symbol(...)
+        """
+        return BatchContext(self)
 
     def _maybe_commit(self, txn: lmdb.Transaction) -> None:
         """Commit transaction if not in batch mode."""
