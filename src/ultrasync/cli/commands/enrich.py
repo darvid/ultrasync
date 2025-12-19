@@ -108,20 +108,108 @@ class Enrich:
 
         start_time = time.perf_counter()
 
+        # Setup rich progress display
         try:
-            result = asyncio.run(
-                enrich_codebase(
-                    root=root,
-                    roles=[self.role],
-                    agent_command=self.agent,
-                    fast_mode=self.fast,
-                    question_budget=self.budget,
-                    output=self.output,
-                    store_in_index=not self.dry_run,
-                    map_files=self.map_files,
-                    compact_after=self.compact and not self.dry_run,
-                )
+            from rich.console import Console as RichConsole
+            from rich.live import Live
+            from rich.panel import Panel
+            from rich.table import Table
+            from rich.text import Text
+
+            use_rich = True
+        except ImportError:
+            use_rich = False
+
+        # Progress state
+        progress_state = {"phase": "", "message": "", "current": 0, "total": 0}
+
+        def make_progress_display():
+            """Build the progress display panel."""
+            table = Table.grid(padding=(0, 1))
+            table.add_column(style="cyan", justify="right")
+            table.add_column()
+
+            phase = progress_state["phase"]
+            msg = progress_state["message"]
+            cur = progress_state["current"]
+            tot = progress_state["total"]
+
+            # Phase indicator
+            phase_text = Text()
+            phase_text.append("⚡ ", style="yellow")
+            phase_name = phase.replace("_", " ").title()
+            phase_text.append(phase_name, style="bold cyan")
+            table.add_row("phase", phase_text)
+            table.add_row("status", msg)
+
+            if tot > 0:
+                pct = int(cur / tot * 100)
+                bar_width = 30
+                filled = int(bar_width * cur / tot)
+                bar = "█" * filled + "░" * (bar_width - filled)
+                prog = f"[green]{bar}[/] {cur}/{tot} ({pct}%)"
+                table.add_row("progress", prog)
+
+            return Panel(
+                table,
+                title="[bold]Enrichment Progress[/]",
+                border_style="blue",
             )
+
+        def progress_callback(p):
+            """Update progress state from callback."""
+            progress_state["phase"] = p.phase.value
+            progress_state["message"] = p.message
+            progress_state["current"] = p.current
+            progress_state["total"] = p.total
+            if use_rich and live:
+                live.update(make_progress_display())
+
+        async def run_with_progress():
+            return await enrich_codebase(
+                root=root,
+                roles=[self.role],
+                agent_command=self.agent,
+                fast_mode=self.fast,
+                question_budget=self.budget,
+                output=self.output,
+                store_in_index=not self.dry_run,
+                map_files=self.map_files,
+                compact_after=self.compact and not self.dry_run,
+                progress_callback=progress_callback,
+            )
+
+        live = None
+        try:
+            if use_rich:
+                rich_console = RichConsole()
+                with Live(
+                    make_progress_display(),
+                    console=rich_console,
+                    refresh_per_second=4,
+                ) as live:
+                    result = asyncio.run(run_with_progress())
+            else:
+                # Fallback: simple text progress
+                def simple_callback(p):
+                    print(f"\r{p.phase.value}: {p.message}", end="", flush=True)
+
+                result = asyncio.run(
+                    enrich_codebase(
+                        root=root,
+                        roles=[self.role],
+                        agent_command=self.agent,
+                        fast_mode=self.fast,
+                        question_budget=self.budget,
+                        output=self.output,
+                        store_in_index=not self.dry_run,
+                        map_files=self.map_files,
+                        compact_after=self.compact and not self.dry_run,
+                        progress_callback=simple_callback,
+                    )
+                )
+                print()  # newline after progress
+
         except FileNotFoundError as e:
             console.error(f"agent not found: {e}")
             console.info(f"make sure '{self.agent}' is installed and in PATH")

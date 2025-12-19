@@ -19,7 +19,9 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -28,6 +30,35 @@ import structlog
 
 if TYPE_CHECKING:
     from ultrasync.embeddings import EmbeddingProvider
+
+
+class EnrichPhase(Enum):
+    """Phases of the enrichment pipeline."""
+
+    EXTRACTING_IR = "extracting_ir"
+    GENERATING_QUESTIONS = "generating_questions"
+    DEDUPLICATING = "deduplicating"
+    MAPPING_FILES = "mapping_files"
+    STORING_INDEX = "storing_index"
+    COMPACTING = "compacting"
+    COMPLETE = "complete"
+
+
+@dataclass
+class EnrichProgress:
+    """Progress update for enrichment pipeline."""
+
+    phase: EnrichPhase
+    message: str
+    current: int = 0
+    total: int = 0
+    detail: str = ""
+
+
+# Type alias for progress callback
+ProgressCallback = Callable[[EnrichProgress], None]
+
+if TYPE_CHECKING:
     from ultrasync.ir import AppIR
     from ultrasync.jit.manager import JITIndexManager
 
@@ -507,13 +538,18 @@ If unsure, include fewer rather than more."""
         questions: list[str],
         ir: AppIR,
         batch_size: int = 5,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> dict[str, list[str]]:
         """Map questions to files, returning {question: [files]}."""
         file_info = self._summarize_files(ir)
         mappings: dict[str, list[str]] = {}
 
         # Process in batches
+        batch_num = 0
         for i in range(0, len(questions), batch_size):
+            batch_num += 1
+            if progress_callback:
+                progress_callback(batch_num, batch_size)
             batch = questions[i : i + batch_size]
             batch_str = "\n".join(f"{j + 1}. {q}" for j, q in enumerate(batch))
 
@@ -577,6 +613,7 @@ class IndexEnricher:
         ir: AppIR,
         roles: list[str] | None = None,
         index_results: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> EnrichmentResult:
         """Run the full enrichment pipeline.
 
@@ -584,11 +621,16 @@ class IndexEnricher:
             ir: Intermediate representation of the codebase
             roles: Developer roles to generate questions for
             index_results: Whether to index the mapped files
+            progress_callback: Optional callback for progress updates
 
         Returns:
             EnrichmentResult with questions and stats
         """
         t0 = time.perf_counter()
+
+        def report(phase: EnrichPhase, msg: str, cur: int = 0, tot: int = 0):
+            if progress_callback:
+                progress_callback(EnrichProgress(phase, msg, cur, tot))
 
         if roles is None:
             roles = ["general"]
@@ -601,19 +643,38 @@ class IndexEnricher:
         )
 
         # Phase 1: Generate questions for each role (parallel)
-        all_questions: list[str] = []
-        question_tasks = [
-            self.question_gen.generate(ir, role) for role in roles
-        ]
-        results = await asyncio.gather(*question_tasks)
+        report(
+            EnrichPhase.GENERATING_QUESTIONS,
+            f"generating questions for {len(roles)} role(s)...",
+            0,
+            len(roles),
+        )
 
-        for _role, questions in zip(roles, results, strict=True):
-            for q in questions:
-                all_questions.append(q)
+        all_questions: list[str] = []
+        for i, role in enumerate(roles):
+            report(
+                EnrichPhase.GENERATING_QUESTIONS,
+                f"calling agent for '{role}' role...",
+                i,
+                len(roles),
+            )
+            questions = await self.question_gen.generate(ir, role)
+            all_questions.extend(questions)
+            report(
+                EnrichPhase.GENERATING_QUESTIONS,
+                f"got {len(questions)} questions for '{role}'",
+                i + 1,
+                len(roles),
+            )
 
         logger.info("questions generated", total=len(all_questions))
 
         # Phase 2: Deduplicate (skip if small set in fast mode)
+        report(
+            EnrichPhase.DEDUPLICATING,
+            f"deduplicating {len(all_questions)} questions...",
+        )
+
         removed = 0
         if (
             self.config.fast_mode
@@ -632,11 +693,40 @@ class IndexEnricher:
             unique_questions = unique_questions[: self.config.question_budget]
             embeddings = embeddings[: self.config.question_budget]
 
+        report(
+            EnrichPhase.DEDUPLICATING,
+            f"{len(unique_questions)} unique (removed {removed} dupes)",
+            len(unique_questions),
+            len(unique_questions),
+        )
+
         # Phase 3: Map questions to files (skip in fast mode)
         mappings: dict[str, list[str]] = {}
         if not self.config.skip_file_mapping:
+            total_batches = (
+                len(unique_questions) + self.config.batch_size - 1
+            ) // self.config.batch_size
+
+            def batch_progress(batch_num: int, batch_size: int):
+                report(
+                    EnrichPhase.MAPPING_FILES,
+                    f"mapping batch {batch_num}/{total_batches}...",
+                    batch_num,
+                    total_batches,
+                )
+
+            report(
+                EnrichPhase.MAPPING_FILES,
+                f"mapping {len(unique_questions)} questions to files...",
+                0,
+                total_batches,
+            )
+
             mappings = await self.mapper.map_questions(
-                unique_questions, ir, batch_size=self.config.batch_size
+                unique_questions,
+                ir,
+                batch_size=self.config.batch_size,
+                progress_callback=batch_progress,
             )
         else:
             logger.debug("skipped file mapping (fast mode)")
@@ -670,16 +760,32 @@ class IndexEnricher:
             for eq in enriched:
                 files_to_index.update(eq.mapped_files)
 
+            total_files = len(files_to_index)
+            report(
+                EnrichPhase.STORING_INDEX,
+                f"indexing {total_files} mapped files...",
+                0,
+                total_files,
+            )
+
             for file_path in files_to_index:
                 try:
                     await self.jit.index_file(
                         self.root / file_path, force=False
                     )
                     indexed_count += 1
+                    report(
+                        EnrichPhase.STORING_INDEX,
+                        f"indexed {indexed_count}/{total_files}",
+                        indexed_count,
+                        total_files,
+                    )
                 except Exception as e:
                     logger.warning(
                         "failed to index file", file=file_path, error=str(e)
                     )
+
+        report(EnrichPhase.COMPLETE, "enrichment complete")
 
         duration = time.perf_counter() - t0
 
@@ -719,6 +825,7 @@ async def enrich_codebase(
     store_in_index: bool = True,
     map_files: bool = True,
     compact_after: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> EnrichmentResult:
     """High-level function to enrich a codebase.
 
@@ -732,6 +839,7 @@ async def enrich_codebase(
         store_in_index: Store questions in the JIT index for search
         map_files: Map questions to relevant files (recommended)
         compact_after: Compact vector store after enrichment to reclaim space
+        progress_callback: Optional callback for progress updates
 
     Returns:
         EnrichmentResult
@@ -741,16 +849,26 @@ async def enrich_codebase(
     from ultrasync.jit.manager import JITIndexManager
     from ultrasync.patterns import PatternSetManager
 
+    def report(phase: EnrichPhase, msg: str, cur: int = 0, tot: int = 0):
+        if progress_callback:
+            progress_callback(EnrichProgress(phase, msg, cur, tot))
+
     data_dir = root / DEFAULT_DATA_DIR
 
     # Load embedding model
+    report(EnrichPhase.EXTRACTING_IR, "loading embedding model...")
     EmbeddingProvider = get_embedder_class()
     embedder = EmbeddingProvider()
 
     # Extract IR
+    report(EnrichPhase.EXTRACTING_IR, "extracting codebase IR...")
     pattern_manager = PatternSetManager(data_dir=data_dir)
     extractor = AppIRExtractor(root, pattern_manager=pattern_manager)
     ir = extractor.extract(trace_flows=False, skip_tests=True)
+    report(
+        EnrichPhase.EXTRACTING_IR,
+        f"found {len(ir.files)} files, {len(ir.routes)} routes",
+    )
 
     # Setup JIT manager for indexing
     jit = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
@@ -776,11 +894,20 @@ async def enrich_codebase(
         ir=ir,
         roles=roles,
         index_results=map_files,  # index mapped files when mapping enabled
+        progress_callback=progress_callback,
     )
 
     # Store questions in index as searchable memories
     if store_in_index:
+        report(
+            EnrichPhase.STORING_INDEX,
+            f"storing {len(result.questions)} questions in index...",
+        )
         stored, skipped = await store_questions_in_index(jit, result.questions)
+        report(
+            EnrichPhase.STORING_INDEX,
+            f"stored {stored}, skipped {skipped} duplicates",
+        )
         logger.info(
             "stored questions in index",
             stored=stored,
@@ -789,8 +916,13 @@ async def enrich_codebase(
 
     # Compact vector store to reclaim dead bytes from LMDB CoW
     if compact_after:
+        report(EnrichPhase.COMPACTING, "compacting vector store...")
         compact_result = jit.compact_vectors(force=False)
         if compact_result.bytes_reclaimed > 0:
+            report(
+                EnrichPhase.COMPACTING,
+                f"reclaimed {compact_result.bytes_reclaimed} bytes",
+            )
             logger.info(
                 "compacted vector store",
                 bytes_reclaimed=compact_result.bytes_reclaimed,
@@ -801,6 +933,7 @@ async def enrich_codebase(
     if output:
         enricher.store_enrichment(result, output)
 
+    report(EnrichPhase.COMPLETE, "enrichment complete!")
     return result
 
 

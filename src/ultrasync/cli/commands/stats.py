@@ -10,6 +10,17 @@ from ultrasync.cli._common import DEFAULT_DATA_DIR
 from ultrasync.jit import FileTracker
 
 
+def _fmt_size(bytes_val: int) -> str:
+    """Format bytes as human-readable size."""
+    if bytes_val >= 1024**3:
+        return f"{bytes_val / 1024**3:.2f} GB"
+    elif bytes_val >= 1024**2:
+        return f"{bytes_val / 1024**2:.1f} MB"
+    elif bytes_val >= 1024:
+        return f"{bytes_val / 1024:.1f} KB"
+    return f"{bytes_val} B"
+
+
 @dataclass
 class Stats:
     """Show index statistics."""
@@ -43,11 +54,16 @@ class Stats:
         memory_count = tracker.memory_count()
         embedded_files = tracker.embedded_file_count()
         embedded_symbols = tracker.embedded_symbol_count()
+        db_stats = tracker.get_db_stats()
         tracker.close()
 
         blob_size = blob_file.stat().st_size if blob_file.exists() else 0
         index_size = index_file.stat().st_size if index_file.exists() else 0
         vector_size = vector_file.stat().st_size if vector_file.exists() else 0
+        tracker_size = db_stats["file_size"]
+
+        # total disk usage
+        total_size = blob_size + index_size + vector_size + tracker_size
 
         aot_count = 0
         aot_capacity = 0
@@ -67,13 +83,14 @@ class Stats:
         console.key_value("files", file_count, indent=2)
         console.key_value("symbols", symbol_count, indent=2)
         console.key_value("memories", memory_count, indent=2)
+        console.key_value("size", _fmt_size(tracker_size), indent=2)
 
         console.subheader("\nBlob Store")
-        console.key_value("size", f"{blob_size / 1024 / 1024:.2f} MB", indent=2)
+        console.key_value("size", _fmt_size(blob_size), indent=2)
 
         console.subheader("\nAOT Index")
         if index_size > 0:
-            console.key_value("size", f"{index_size / 1024:.1f} KB", indent=2)
+            console.key_value("size", _fmt_size(index_size), indent=2)
             console.key_value("entries", aot_count, indent=2)
             console.key_value("capacity", aot_capacity, indent=2)
             load_pct = (aot_count / aot_capacity * 100) if aot_capacity else 0
@@ -82,7 +99,7 @@ class Stats:
             console.dim("  not initialized")
 
         console.subheader("\nVector Store")
-        console.key_value("size", f"{vector_size / 1024:.1f} KB", indent=2)
+        console.key_value("size", _fmt_size(vector_size), indent=2)
         file_pct = (embedded_files / file_count * 100) if file_count else 0
         sym_pct = (embedded_symbols / symbol_count * 100) if symbol_count else 0
         console.key_value(
@@ -95,6 +112,9 @@ class Stats:
             f"{embedded_symbols}/{symbol_count} ({sym_pct:.1f}%)",
             indent=2,
         )
+
+        console.subheader("\nTotal Disk Usage")
+        console.key_value("size", _fmt_size(total_size), indent=2)
 
         warnings_list = []
         total_expected = file_count + symbol_count
