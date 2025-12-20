@@ -41,6 +41,7 @@ from ultrasync.cli.commands.query import Query
 from ultrasync.cli.commands.repl import Repl
 from ultrasync.cli.commands.show import Show, Symbols
 from ultrasync.cli.commands.source import GetSource
+from ultrasync.cli.commands.stack import StackComponents, StackDetect, StackHash
 from ultrasync.cli.commands.stats import Stats
 from ultrasync.cli.commands.threads import (
     ThreadsForFile,
@@ -104,6 +105,13 @@ _IrEndpoints = Annotated[IrEndpoints, tyro.conf.subcommand("ir:endpoints")]
 _IrServices = Annotated[IrServices, tyro.conf.subcommand("ir:services")]
 _IrFlows = Annotated[IrFlows, tyro.conf.subcommand("ir:flows")]
 
+# Stack subcommands
+_StackDetect = Annotated[StackDetect, tyro.conf.subcommand("stack")]
+_StackComponents = Annotated[
+    StackComponents, tyro.conf.subcommand("stack:components")
+]
+_StackHash = Annotated[StackHash, tyro.conf.subcommand("stack:hash")]
+
 # Enrich subcommands
 _Enrich = Annotated[Enrich, tyro.conf.subcommand("enrich")]
 _EnrichList = Annotated[EnrichList, tyro.conf.subcommand("enrich:list")]
@@ -147,6 +155,9 @@ Command = (
     | _IrEndpoints
     | _IrServices
     | _IrFlows
+    | _StackDetect
+    | _StackComponents
+    | _StackHash
     | _Enrich
     | _EnrichList
     | _EnrichClear
