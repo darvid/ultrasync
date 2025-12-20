@@ -89,7 +89,7 @@ def detect_features(component_id: str, root: Path) -> list[str]:
     ):
         return []
 
-    features: set[str] = []
+    features: set[str] = set([])
 
     if component_id in FILE_PATTERNS:
         for file_path in FILE_PATTERNS[component_id]:
