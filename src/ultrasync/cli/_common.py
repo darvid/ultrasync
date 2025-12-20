@@ -8,24 +8,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ultrasync.embeddings import EmbeddingProvider
+    from ultrasync.embeddings import SentenceTransformerProvider
 
 DEFAULT_DATA_DIR = Path(".ultrasync")
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
 
-# lazy import for EmbeddingProvider - pulls torch via sentence-transformers
-_EmbeddingProvider: type[EmbeddingProvider] | None = None
+# lazy import for embedding provider - pulls torch via sentence-transformers
+_EmbeddingProvider: type[SentenceTransformerProvider] | None = None
 
 
-def get_embedder_class() -> type[EmbeddingProvider]:
-    """Get the EmbeddingProvider class (lazy import)."""
+def get_embedder_class() -> type[SentenceTransformerProvider]:
+    """Get the default embedding provider class (lazy import)."""
     global _EmbeddingProvider
     if _EmbeddingProvider is None:
-        from ultrasync.embeddings import EmbeddingProvider as EP
+        from ultrasync.embeddings import SentenceTransformerProvider
 
-        _EmbeddingProvider = EP
+        _EmbeddingProvider = SentenceTransformerProvider
     return _EmbeddingProvider
 
 

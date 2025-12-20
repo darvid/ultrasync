@@ -24,6 +24,12 @@ cli = [
   "rich>=13.0",
   "textual>=0.50",
 ]
+infinity = [
+  "infinity-emb[torch]>=0.0.70",
+]
+infinity-api = [
+  "httpx>=0.27",
+]
 
 [dependency-groups]
 dev = [

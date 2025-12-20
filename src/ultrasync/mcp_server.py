@@ -390,9 +390,9 @@ class ServerState:
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
-            from ultrasync.embeddings import EmbeddingProvider
+            from ultrasync.embeddings import SentenceTransformerProvider
 
-            self._embedder = EmbeddingProvider(self._model_name)
+            self._embedder = SentenceTransformerProvider(self._model_name)
             self._thread_manager = ThreadManager(self._embedder)
             self._file_registry = FileRegistry(
                 root=self._root, embedder=self._embedder
@@ -1279,15 +1279,32 @@ Taxonomy:
         filtered queries with files_by_context.
 
         Context types include:
+
+        Application contexts:
         - context:auth - Authentication/authorization code
         - context:frontend - React/Vue/DOM client-side code
         - context:backend - Express/FastAPI/server-side code
         - context:api - API endpoints and routes
         - context:data - Database/ORM code
         - context:testing - Test files
-        - context:infra - Docker/K8s/DevOps code
         - context:ui - UI components
         - context:billing - Payment/subscription code
+
+        Infrastructure contexts:
+        - context:infra - Generic infrastructure (legacy catch-all)
+        - context:iac - Infrastructure as Code (Terraform, Pulumi, CDK)
+        - context:k8s - Kubernetes manifests, Helm, Kustomize
+        - context:cloud-aws - AWS-specific code
+        - context:cloud-azure - Azure-specific code
+        - context:cloud-gcp - GCP-specific code
+        - context:cicd - CI/CD pipelines (GitHub Actions, GitLab, Jenkins)
+        - context:containers - Docker, Compose, container configs
+        - context:gitops - ArgoCD, Flux
+        - context:observability - Prometheus, Grafana, OpenTelemetry
+        - context:service-mesh - Istio, Linkerd, Cilium
+        - context:secrets - Vault, External Secrets, SOPS
+        - context:serverless - SAM, SST, Serverless Framework
+        - context:config-mgmt - Ansible, Chef, Puppet, Packer
 
         Returns:
             Dictionary with available contexts and their file counts

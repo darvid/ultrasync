@@ -27,9 +27,9 @@ class QueryRouter:
         model_name: str = DEFAULT_EMBEDDING_MODEL,
     ) -> None:
         # lazy import to avoid pulling torch at module load time
-        from ultrasync.embeddings import EmbeddingProvider
+        from ultrasync.embeddings import SentenceTransformerProvider
 
-        self._embedder = EmbeddingProvider(model_name)
+        self._embedder = SentenceTransformerProvider(model_name)
         self._threads = ThreadManager(self._embedder)
 
         self._global_index: GlobalIndex | None = None

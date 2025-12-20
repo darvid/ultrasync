@@ -24,18 +24,42 @@ JS_EXTENSIONS = [
 ]
 PY_EXTENSIONS = ["py", "pyi", "pyw"]
 MARKUP_EXTENSIONS = ["html", "htm", "xml", "xhtml"]
+YAML_EXTENSIONS = ["yaml", "yml"]
+IAC_EXTENSIONS = ["tf", "tfvars", "hcl", "bicep"]
+DOCKERFILE_NAMES = ["Dockerfile", "dockerfile", "Containerfile"]
+GO_EXTENSIONS = ["go"]
+RUST_EXTENSIONS = ["rs"]
+JAVA_EXTENSIONS = ["java", "kt", "scala"]
+CSHARP_EXTENSIONS = ["cs", "fs"]
+SHELL_EXTENSIONS = ["sh", "bash", "zsh"]
+CONFIG_EXTENSIONS = YAML_EXTENSIONS + ["json", "toml", "ini"]
 
 # Context detection pattern set IDs - used for AOT context classification
 CONTEXT_PATTERN_IDS = [
+    # Application contexts
     "pat:ctx-auth",
     "pat:ctx-frontend",
     "pat:ctx-backend",
     "pat:ctx-api",
     "pat:ctx-data",
     "pat:ctx-testing",
-    "pat:ctx-infra",
     "pat:ctx-ui",
     "pat:ctx-billing",
+    # Infrastructure contexts
+    "pat:ctx-infra",  # Generic infra (legacy, catch-all)
+    "pat:ctx-iac",  # Infrastructure as Code (Terraform, Pulumi, CDK)
+    "pat:ctx-k8s",  # Kubernetes manifests, Helm, Kustomize
+    "pat:ctx-cloud-aws",  # AWS-specific
+    "pat:ctx-cloud-azure",  # Azure-specific
+    "pat:ctx-cloud-gcp",  # GCP-specific
+    "pat:ctx-cicd",  # CI/CD pipelines
+    "pat:ctx-containers",  # Docker, container configs
+    "pat:ctx-gitops",  # ArgoCD, Flux
+    "pat:ctx-observability",  # Prometheus, Grafana, OTEL
+    "pat:ctx-service-mesh",  # Istio, Linkerd, Cilium
+    "pat:ctx-secrets",  # Vault, External Secrets, SOPS
+    "pat:ctx-serverless",  # SAM, SST, Serverless Framework
+    "pat:ctx-config-mgmt",  # Ansible, Chef, Puppet
 ]
 
 # Semantic anchor pattern set IDs - entry points for tracing application logic
@@ -461,8 +485,562 @@ class PatternSetManager:
             }
         )
 
+        # Load infrastructure/devops context patterns
+        self._load_infra_context_patterns()
+
         # Load semantic anchor patterns
         self._load_anchor_patterns()
+
+    def _load_infra_context_patterns(self) -> None:
+        """Load infrastructure/devops context patterns.
+
+        These patterns detect infrastructure-as-code, cloud provider configs,
+        CI/CD pipelines, container configs, and other devops tooling.
+        """
+        # Infrastructure as Code (Terraform, Pulumi, CDK, Crossplane)
+        self.load(
+            {
+                "id": "pat:ctx-iac",
+                "description": "Detect IaC (Terraform, Pulumi, CDK)",
+                "patterns": [
+                    # Terraform/OpenTofu/HCL
+                    r'resource\s+"[^"]+"\s+"[^"]+"',
+                    r'module\s+"[^"]+"',
+                    r'provider\s+"[^"]+"',
+                    r'variable\s+"[^"]+"',
+                    r'output\s+"[^"]+"',
+                    r'data\s+"[^"]+"\s+"[^"]+"',
+                    r"terraform\s*\{",
+                    r"locals\s*\{",
+                    r"for_each\s*=",
+                    r'backend\s+"[^"]+"',
+                    r"\.tfstate",
+                    r"\.tfvars",
+                    # Pulumi
+                    r"pulumi\.",
+                    r"@pulumi/",
+                    r"from\s+pulumi",
+                    r"pulumi\.Config",
+                    r"pulumi\.Output",
+                    r"ComponentResource",
+                    r"Pulumi\.yaml",
+                    # AWS CDK
+                    r"from\s+aws_cdk",
+                    r"@aws-cdk/",
+                    r"aws-cdk-lib",
+                    r"cdk\.App",
+                    r"cdk\.Stack",
+                    r"cdk\.CfnOutput",
+                    r"cdk\s+synth",
+                    r"cdk\s+deploy",
+                    # Crossplane
+                    r"crossplane\.io",
+                    r"kind:\s*Composition",
+                    r"kind:\s*CompositeResourceDefinition",
+                    r"forProvider:",
+                    r"compositionRef:",
+                ],
+                "tags": ["context", "iac", "infrastructure"],
+                "extensions": IAC_EXTENSIONS
+                + YAML_EXTENSIONS
+                + JS_EXTENSIONS
+                + PY_EXTENSIONS,
+            }
+        )
+
+        # Kubernetes manifests, Helm, Kustomize
+        self.load(
+            {
+                "id": "pat:ctx-k8s",
+                "description": "Detect Kubernetes manifests, Helm, Kustomize",
+                "patterns": [
+                    # Core K8s manifest patterns
+                    r"apiVersion:\s*(v1|apps/v1|batch/v1)",
+                    r"apiVersion:\s*networking\.k8s\.io",
+                    r"apiVersion:\s*rbac\.authorization\.k8s\.io",
+                    r"kind:\s*(Pod|Deployment|Service|ConfigMap|Secret)",
+                    r"kind:\s*(StatefulSet|DaemonSet|Job|CronJob)",
+                    r"kind:\s*(Ingress|NetworkPolicy|ServiceAccount)",
+                    r"kind:\s*(Role|ClusterRole|RoleBinding)",
+                    r"kind:\s*(PersistentVolume|PersistentVolumeClaim)",
+                    r"kind:\s*(HorizontalPodAutoscaler|PodDisruptionBudget)",
+                    r"kind:\s*CustomResourceDefinition",
+                    r"metadata:\s*\n\s*name:",
+                    r"spec:\s*\n\s*containers:",
+                    r"spec:\s*\n\s*replicas:",
+                    r"spec:\s*\n\s*selector:",
+                    # kubectl
+                    r"kubectl\s+(apply|create|delete|get|describe)",
+                    r"kubectx",
+                    r"kubens",
+                    # Helm
+                    r"\{\{-?\s*(define|include|template)",
+                    r"\{\{\s*\.Values\.",
+                    r"\{\{\s*\.Release\.",
+                    r"\{\{\s*\.Chart\.",
+                    r"helm\s+(install|upgrade|template)",
+                    r"Chart\.yaml",
+                    r"_helpers\.tpl",
+                    # Kustomize
+                    r"kustomization\.yaml",
+                    r"patchesStrategicMerge:",
+                    r"configMapGenerator:",
+                    r"secretGenerator:",
+                    r"kustomize\s+build",
+                    # Operators
+                    r"operator-sdk",
+                    r"kubebuilder",
+                    r"controller-runtime",
+                    r"reconcile\.Result",
+                    r"sigs\.k8s\.io/controller-runtime",
+                ],
+                "tags": ["context", "k8s", "kubernetes", "infrastructure"],
+                "extensions": YAML_EXTENSIONS + GO_EXTENSIONS,
+            }
+        )
+
+        # AWS-specific patterns
+        self.load(
+            {
+                "id": "pat:ctx-cloud-aws",
+                "description": "Detect AWS-specific infrastructure code",
+                "patterns": [
+                    # SDKs
+                    r"@aws-sdk/",
+                    r"aws-sdk",
+                    r"boto3\.",
+                    r"botocore\.",
+                    r"import\s+boto3",
+                    r"from\s+boto3",
+                    # CloudFormation
+                    r"AWSTemplateFormatVersion",
+                    r"AWS::",
+                    r"!Ref\s",
+                    r"!Sub\s",
+                    r"!GetAtt\s",
+                    r"!Join\s",
+                    r"Fn::Ref",
+                    r"Fn::Sub",
+                    # SAM
+                    r"Transform:\s*AWS::Serverless",
+                    r"AWS::Serverless::",
+                    r"sam\s+(build|deploy|local)",
+                    # CDK constructs
+                    r"aws_lambda\.",
+                    r"aws_s3\.",
+                    r"aws_dynamodb\.",
+                    r"aws_apigateway\.",
+                    r"aws_ec2\.",
+                    r"aws_iam\.",
+                    r"aws_rds\.",
+                    r"aws_sqs\.",
+                    r"aws_sns\.",
+                    # CLI
+                    r"aws\s+(s3|ec2|lambda|iam|cloudformation)",
+                ],
+                "tags": ["context", "cloud", "aws", "infrastructure"],
+            }
+        )
+
+        # Azure-specific patterns
+        self.load(
+            {
+                "id": "pat:ctx-cloud-azure",
+                "description": "Detect Azure-specific infrastructure code",
+                "patterns": [
+                    # Bicep
+                    r"param\s+\w+\s+(string|int|bool|array|object)",
+                    r"resource\s+\w+\s+'.*@",
+                    r"module\s+\w+\s+'",
+                    r"output\s+\w+\s+(string|int|bool)",
+                    r"targetScope\s*=",
+                    r"\.bicep",
+                    # ARM Templates
+                    r'"schema":\s*".*deploymentTemplate',
+                    r'"contentVersion":',
+                    r"\[parameters\(",
+                    r"\[variables\(",
+                    r"\[resourceId\(",
+                    # SDKs
+                    r"@azure/",
+                    r"azure\.",
+                    r"Azure\.",
+                    r"Microsoft\.Azure",
+                    r"azure-mgmt-",
+                    # CLI/PowerShell
+                    r"az\s+(group|resource|vm|aks|acr)",
+                    r"New-AzResource",
+                    r"Get-AzResource",
+                    r"Set-AzResource",
+                    # Services
+                    r"azure\.storage",
+                    r"azure\.cosmos",
+                    r"azure\.keyvault",
+                ],
+                "tags": ["context", "cloud", "azure", "infrastructure"],
+            }
+        )
+
+        # GCP-specific patterns
+        self.load(
+            {
+                "id": "pat:ctx-cloud-gcp",
+                "description": "Detect GCP-specific infrastructure code",
+                "patterns": [
+                    # SDKs
+                    r"@google-cloud/",
+                    r"google\.cloud\.",
+                    r"cloud\.google\.com/go",
+                    r"from\s+google\.cloud",
+                    # Deployment Manager
+                    r"type:.*\.googleapis\.com",
+                    r"imports:.*\.jinja",
+                    # Config Connector
+                    r"cnrm\.cloud\.google\.com",
+                    r"kind:\s*(ComputeInstance|StorageBucket|SQLInstance)",
+                    # CLI
+                    r"gcloud\s+(compute|storage|iam|container|run)",
+                    # Services
+                    r"google\.cloud\.storage",
+                    r"google\.cloud\.bigquery",
+                    r"google\.cloud\.pubsub",
+                    r"google\.cloud\.firestore",
+                    r"container\.googleapis\.com",
+                    r"cloudfunctions\.googleapis\.com",
+                    r"run\.googleapis\.com",
+                ],
+                "tags": ["context", "cloud", "gcp", "infrastructure"],
+            }
+        )
+
+        # CI/CD Pipeline patterns
+        self.load(
+            {
+                "id": "pat:ctx-cicd",
+                "description": "Detect CI/CD pipeline configurations",
+                "patterns": [
+                    # GitHub Actions
+                    r"\.github/workflows/",
+                    r"on:\s*(push|pull_request|workflow_dispatch)",
+                    r"jobs:\s*\n\s*\w+:",
+                    r"runs-on:\s*(ubuntu|windows|macos)",
+                    r"steps:\s*\n\s*-\s*(uses|run):",
+                    r"uses:\s*actions/",
+                    r"\$\{\{\s*secrets\.",
+                    r"\$\{\{\s*github\.",
+                    # GitLab CI
+                    r"\.gitlab-ci\.yml",
+                    r"stages:\s*\n\s*-",
+                    r"script:\s*\n\s*-",
+                    r"before_script:",
+                    r"after_script:",
+                    r"artifacts:\s*\n",
+                    r"rules:\s*\n\s*-\s*if:",
+                    r"extends:\s*\.",
+                    # Jenkins
+                    r"pipeline\s*\{",
+                    r"Jenkinsfile",
+                    r"agent\s+(any|none|\{)",
+                    r"stages\s*\{",
+                    r"stage\s*\(\s*['\"]",
+                    r"steps\s*\{",
+                    r"post\s*\{",
+                    # Other CI/CD
+                    r"\.circleci/config\.yml",
+                    r"\.travis\.yml",
+                    r"azure-pipelines\.yml",
+                    r"buildspec\.yml",
+                    r"cloudbuild\.yaml",
+                    r"bitbucket-pipelines\.yml",
+                    r"\.drone\.yml",
+                ],
+                "tags": ["context", "cicd", "infrastructure"],
+                "extensions": YAML_EXTENSIONS + ["groovy"],
+            }
+        )
+
+        # Container patterns (Docker, Compose)
+        self.load(
+            {
+                "id": "pat:ctx-containers",
+                "description": "Detect Docker and container configurations",
+                "patterns": [
+                    # Dockerfile
+                    r"^FROM\s+",
+                    r"^RUN\s+",
+                    r"^COPY\s+",
+                    r"^ADD\s+",
+                    r"^WORKDIR\s+",
+                    r"^EXPOSE\s+",
+                    r"^ENV\s+",
+                    r"^ENTRYPOINT\s+",
+                    r"^CMD\s+",
+                    r"^ARG\s+",
+                    r"^LABEL\s+",
+                    r"^HEALTHCHECK\s+",
+                    r"^USER\s+",
+                    r"^VOLUME\s+",
+                    r"\.dockerignore",
+                    # Docker Compose
+                    r"docker-compose\.(yml|yaml)",
+                    r"compose\.(yml|yaml)",
+                    r"version:\s*['\"]?[23]",
+                    r"services:\s*\n\s*\w+:",
+                    r"build:\s*\n?\s*(context|dockerfile):",
+                    r"ports:\s*\n\s*-\s*['\"]?\d+",
+                    r"volumes:\s*\n\s*-",
+                    r"depends_on:\s*\n",
+                    r"networks:\s*\n",
+                    # Container registries
+                    r"(ecr|gcr|acr|ghcr)\.io/",
+                    r"docker\.io/",
+                    r"docker\s+(push|pull|build|tag)",
+                    # Podman/containerd
+                    r"podman\s+",
+                    r"containerd\.",
+                ],
+                "tags": ["context", "containers", "docker", "infrastructure"],
+            }
+        )
+
+        # GitOps patterns (ArgoCD, Flux)
+        self.load(
+            {
+                "id": "pat:ctx-gitops",
+                "description": "Detect GitOps configurations (ArgoCD, Flux)",
+                "patterns": [
+                    # ArgoCD
+                    r"argoproj\.io",
+                    r"kind:\s*Application$",
+                    r"kind:\s*ApplicationSet",
+                    r"kind:\s*AppProject",
+                    r"argocd\s+(app|cluster|repo)",
+                    r"syncPolicy:",
+                    r"source:\s*\n\s*repoURL:",
+                    r"destination:\s*\n\s*server:",
+                    r"automated:\s*\n",
+                    # Flux
+                    r"fluxcd\.io",
+                    r"kind:\s*GitRepository",
+                    r"kind:\s*HelmRelease",
+                    r"kind:\s*HelmRepository",
+                    r"kind:\s*Kustomization",
+                    r"flux\s+(bootstrap|reconcile|get)",
+                    r"sourceRef:\s*\n",
+                    r"interval:\s*\d+[mhs]",
+                ],
+                "tags": ["context", "gitops", "infrastructure"],
+                "extensions": YAML_EXTENSIONS,
+            }
+        )
+
+        # Observability patterns (Prometheus, Grafana, OTEL)
+        self.load(
+            {
+                "id": "pat:ctx-observability",
+                "description": "Detect observability/monitoring configurations",
+                "patterns": [
+                    # Prometheus
+                    r"prometheus\.io",
+                    r"scrape_configs:",
+                    r"job_name:",
+                    r"static_configs:",
+                    r"relabel_configs:",
+                    r"alerting_rules:",
+                    r"groups:\s*\n\s*-\s*name:",
+                    r"expr:\s*",
+                    r"for:\s*\d+[mhs]",
+                    r"kind:\s*ServiceMonitor",
+                    r"kind:\s*PodMonitor",
+                    r"kind:\s*PrometheusRule",
+                    # Grafana
+                    r"grafana\.com",
+                    r"dashboards:\s*\n",
+                    r"datasources:\s*\n",
+                    r'"type":\s*"(graph|stat|gauge|table|timeseries)"',
+                    r"kind:\s*GrafanaDashboard",
+                    # OpenTelemetry
+                    r"opentelemetry",
+                    r"@opentelemetry/",
+                    r"otel\.",
+                    r"OTEL_",
+                    r"receivers:\s*\n",
+                    r"processors:\s*\n",
+                    r"exporters:\s*\n",
+                    r"service:\s*\n\s*pipelines:",
+                    r"otlp",
+                    # Datadog
+                    r"datadoghq\.com",
+                    r"DD_API_KEY",
+                    r"DD_SITE",
+                    r"datadog-agent",
+                    r"datadog\.yaml",
+                ],
+                "tags": ["context", "observability", "monitoring"],
+                "extensions": YAML_EXTENSIONS + JS_EXTENSIONS + PY_EXTENSIONS,
+            }
+        )
+
+        # Service Mesh patterns (Istio, Linkerd, Cilium)
+        self.load(
+            {
+                "id": "pat:ctx-service-mesh",
+                "description": "Detect service mesh configurations",
+                "patterns": [
+                    # Istio
+                    r"istio\.io",
+                    r"kind:\s*VirtualService",
+                    r"kind:\s*DestinationRule",
+                    r"kind:\s*Gateway",
+                    r"kind:\s*ServiceEntry",
+                    r"kind:\s*PeerAuthentication",
+                    r"kind:\s*AuthorizationPolicy",
+                    r"istioctl",
+                    r"sidecar\.istio\.io",
+                    # Linkerd
+                    r"linkerd\.io",
+                    r"kind:\s*ServiceProfile",
+                    r"kind:\s*TrafficSplit",
+                    r"linkerd\s+(install|inject|check)",
+                    r"linkerd\.io/inject",
+                    # Cilium
+                    r"cilium\.io",
+                    r"kind:\s*CiliumNetworkPolicy",
+                    r"kind:\s*CiliumClusterwideNetworkPolicy",
+                    r"cilium\s+(install|status)",
+                    r"hubble",
+                    # Consul Connect
+                    r"consul\.hashicorp\.com",
+                    r"kind:\s*ServiceIntentions",
+                ],
+                "tags": ["context", "service-mesh", "infrastructure"],
+                "extensions": YAML_EXTENSIONS,
+            }
+        )
+
+        # Secrets management patterns (Vault, External Secrets, SOPS)
+        self.load(
+            {
+                "id": "pat:ctx-secrets",
+                "description": "Detect secrets management configurations",
+                "patterns": [
+                    # HashiCorp Vault
+                    r"vault\s+(kv|secret|auth)",
+                    r"VAULT_ADDR",
+                    r"VAULT_TOKEN",
+                    r"vault\.hashicorp\.com",
+                    r"vault-agent",
+                    r'path\s+"secret/',
+                    r"vault\.(read|write)",
+                    # External Secrets Operator
+                    r"kind:\s*ExternalSecret",
+                    r"kind:\s*SecretStore",
+                    r"kind:\s*ClusterSecretStore",
+                    r"external-secrets\.io",
+                    r"secretStoreRef:",
+                    # Sealed Secrets
+                    r"kind:\s*SealedSecret",
+                    r"bitnami\.com/v1alpha1",
+                    r"kubeseal",
+                    # SOPS
+                    r"sops:\s*\n",
+                    r"sops\.yaml",
+                    r"\.sops\.yaml",
+                    r"encrypted_regex:",
+                    r"creation_rules:",
+                    # CSI Driver
+                    r"secrets-store\.csi",
+                    r"SecretProviderClass",
+                ],
+                "tags": ["context", "secrets", "infrastructure"],
+                "extensions": YAML_EXTENSIONS,
+            }
+        )
+
+        # Serverless framework patterns
+        self.load(
+            {
+                "id": "pat:ctx-serverless",
+                "description": "Detect serverless framework configurations",
+                "patterns": [
+                    # Serverless Framework
+                    r"serverless\.(yml|yaml|ts|js)",
+                    r"functions:\s*\n\s*\w+:",
+                    r"provider:\s*\n\s*name:\s*(aws|azure|google)",
+                    r"sls\s+(deploy|invoke|remove)",
+                    r"serverless-offline",
+                    r"serverless-webpack",
+                    # SST
+                    r"sst\.config\.(ts|js)",
+                    r"sst\s+(dev|deploy|remove)",
+                    r"\$\.aws\.",
+                    r"new\s+sst\.",
+                    # SAM (additional patterns beyond AWS context)
+                    r"Globals:\s*\n\s*Function:",
+                    r"CodeUri:",
+                    r"Handler:",
+                    r"Runtime:\s*(python|nodejs|java|go|dotnet)",
+                    # Cloudflare Workers
+                    r"wrangler\.(toml|jsonc?)",
+                    r"addEventListener\s*\(\s*['\"]fetch['\"]",
+                    r"export\s+default\s*\{.*fetch",
+                    r"@cloudflare/workers-types",
+                ],
+                "tags": ["context", "serverless", "infrastructure"],
+                "extensions": YAML_EXTENSIONS
+                + JS_EXTENSIONS
+                + PY_EXTENSIONS
+                + ["toml"],
+            }
+        )
+
+        # Configuration management (Ansible, Chef, Puppet)
+        self.load(
+            {
+                "id": "pat:ctx-config-mgmt",
+                "description": "Detect configuration management tool code",
+                "patterns": [
+                    # Ansible
+                    r"- hosts:",
+                    r"- name:\s*\w",
+                    r"tasks:\s*\n\s*-",
+                    r"roles:\s*\n\s*-",
+                    r"handlers:\s*\n\s*-",
+                    r"ansible\.(builtin|posix)",
+                    r"become:\s*(yes|true)",
+                    r"register:\s*",
+                    r"when:\s*",
+                    r"with_items:",
+                    r"loop:\s*",
+                    r"notify:\s*",
+                    r"ansible-playbook",
+                    r"ansible-galaxy",
+                    r"\.ansible-lint",
+                    # Chef
+                    r"recipe\s*\[",
+                    r"include_recipe",
+                    r"cookbook_file",
+                    r"template\s+['\"]",
+                    r"node\[",
+                    r"chef-client",
+                    # Puppet
+                    r"class\s+\w+\s*\(?\s*\)?\s*\{",
+                    r"file\s*\{",
+                    r"package\s*\{",
+                    r"service\s*\{",
+                    r"exec\s*\{",
+                    r"puppet\s+apply",
+                    # Packer
+                    r"source\s+['\"].*['\"]",
+                    r"build\s*\{",
+                    r"provisioner\s+['\"]",
+                    r"\.pkr\.hcl",
+                    r"packer\s+(build|validate)",
+                ],
+                "tags": ["context", "config-mgmt", "infrastructure"],
+                "extensions": YAML_EXTENSIONS + ["pp", "rb"] + IAC_EXTENSIONS,
+            }
+        )
 
     def _load_anchor_patterns(self) -> None:
         """Load semantic anchor patternsets for tracing application logic.
