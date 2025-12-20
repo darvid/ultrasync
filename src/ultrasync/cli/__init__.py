@@ -11,6 +11,7 @@ import tyro
 
 from ultrasync.cli.commands.anchors import (
     AnchorsFind,
+    AnchorsFindAll,
     AnchorsList,
     AnchorsScan,
     AnchorsShow,
@@ -81,6 +82,9 @@ _AnchorsList = Annotated[AnchorsList, tyro.conf.subcommand("anchors:list")]
 _AnchorsShow = Annotated[AnchorsShow, tyro.conf.subcommand("anchors:show")]
 _AnchorsScan = Annotated[AnchorsScan, tyro.conf.subcommand("anchors:scan")]
 _AnchorsFind = Annotated[AnchorsFind, tyro.conf.subcommand("anchors:find")]
+_AnchorsFindAll = Annotated[
+    AnchorsFindAll, tyro.conf.subcommand("anchors:find-all")
+]
 
 # Threads subcommands
 _ThreadsList = Annotated[ThreadsList, tyro.conf.subcommand("threads:list")]
@@ -132,6 +136,7 @@ Command = (
     | _AnchorsShow
     | _AnchorsScan
     | _AnchorsFind
+    | _AnchorsFindAll
     | _ThreadsList
     | _ThreadsShow
     | _ThreadsStats

@@ -5,10 +5,23 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Annotated
 
-from ultrasync.cli._common import DEFAULT_DATA_DIR
+import tyro
+
+from ultrasync.cli._common import DEFAULT_DATA_DIR, compact_path
 from ultrasync.jit import FileTracker
 from ultrasync.jit.blob import BlobAppender
+
+
+def _has_rich() -> bool:
+    """Check if rich is available."""
+    try:
+        import rich  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
 
 
 @dataclass
@@ -29,20 +42,47 @@ class AnchorsList:
 
         manager = PatternSetManager(data_dir=data_dir)
 
-        print(f"{'Type':<25} {'Patterns':>8}  Description")
-        print("-" * 70)
-
+        rows: list[tuple[str, int, str, str]] = []
         for pattern_id in ANCHOR_PATTERN_IDS:
             ps = manager.get(pattern_id)
             if ps:
                 anchor_type = pattern_id.replace("pat:anchor-", "anchor:")
                 exts = ps.extensions
-                ext_str = f" [{','.join(exts)}]" if exts else ""
-                print(
-                    f"{anchor_type:<25} {len(ps.patterns):>8}  "
-                    f"{ps.description}{ext_str}"
+                ext_str = f"[{','.join(exts)}]" if exts else ""
+                rows.append(
+                    (anchor_type, len(ps.patterns), ps.description, ext_str)
                 )
+
+        if _has_rich():
+            self._print_rich(rows)
+        else:
+            self._print_plain(rows)
         return 0
+
+    def _print_rich(self, rows: list[tuple[str, int, str, str]]) -> None:
+        """Print with rich formatting."""
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+        table = Table(title=f"Anchor Types ({len(rows)})")
+        table.add_column("Type", style="cyan")
+        table.add_column("Patterns", justify="right", style="green")
+        table.add_column("Description", style="white")
+        table.add_column("Extensions", style="dim")
+
+        for anchor_type, count, desc, exts in rows:
+            table.add_row(anchor_type, str(count), desc, exts)
+
+        console.print(table)
+
+    def _print_plain(self, rows: list[tuple[str, int, str, str]]) -> None:
+        """Print with plain text formatting."""
+        print(f"{'Type':<25} {'Patterns':>8}  Description")
+        print("-" * 70)
+        for anchor_type, count, desc, exts in rows:
+            ext_str = f" {exts}" if exts else ""
+            print(f"{anchor_type:<25} {count:>8}  {desc}{ext_str}")
 
 
 @dataclass
@@ -81,6 +121,43 @@ class AnchorsShow:
             print("use 'ultrasync anchors list' to see available types")
             return 1
 
+        if _has_rich():
+            self._print_rich(anchor_type, ps)
+        else:
+            self._print_plain(anchor_type, ps)
+        return 0
+
+    def _print_rich(self, anchor_type: str, ps) -> None:
+        """Print with rich formatting."""
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+
+        console = Console()
+
+        # metadata panel
+        exts = ", ".join(ps.extensions) if ps.extensions else "all"
+        tags = ", ".join(ps.tags) if ps.tags else "none"
+        meta = (
+            f"[cyan]Type:[/] {anchor_type}\n"
+            f"[cyan]Description:[/] {ps.description}\n"
+            f"[cyan]Extensions:[/] {exts}\n"
+            f"[cyan]Tags:[/] {tags}"
+        )
+        console.print(Panel(meta, title="Anchor Info", border_style="dim"))
+
+        # patterns table
+        table = Table(title=f"Patterns ({len(ps.patterns)})")
+        table.add_column("#", justify="right", style="dim", width=4)
+        table.add_column("Pattern", style="green", overflow="fold")
+
+        for i, p in enumerate(ps.patterns, 1):
+            table.add_row(str(i), p)
+
+        console.print(table)
+
+    def _print_plain(self, anchor_type: str, ps) -> None:
+        """Print with plain text formatting."""
         print(f"Type:        {anchor_type}")
         print(f"Description: {ps.description}")
         exts = ", ".join(ps.extensions) if ps.extensions else "all"
@@ -90,7 +167,6 @@ class AnchorsShow:
         print(f"\nPatterns ({len(ps.patterns)}):")
         for i, p in enumerate(ps.patterns, 1):
             print(f"  {i:2}. {p}")
-        return 0
 
 
 @dataclass
@@ -103,7 +179,10 @@ class AnchorsScan:
             "help": "File to scan (if not provided, scans all indexed files)"
         },
     )
-    anchor_types: tuple[str, ...] = field(
+    anchor_types: Annotated[
+        tuple[str, ...],
+        tyro.conf.arg(aliases=("-t",)),
+    ] = field(
         default_factory=tuple,
         metadata={"help": "Filter to specific anchor type(s)"},
     )
@@ -135,12 +214,13 @@ class AnchorsScan:
             ]
 
         if self.file:
-            return self._scan_file(manager, type_filter)
+            return self._scan_file(root, manager, type_filter)
         else:
-            return self._scan_all(data_dir, manager, type_filter)
+            return self._scan_all(root, data_dir, manager, type_filter)
 
     def _scan_file(
         self,
+        root: Path,
         manager,
         type_filter: list[str] | None,
     ) -> int:
@@ -158,24 +238,63 @@ class AnchorsScan:
             ]
 
         if not anchors_found:
-            print(f"no anchors found in {self.file}")
+            display_path = compact_path(str(self.file), root)
+            print(f"no anchors found in {display_path}")
             return 0
 
-        print(f"\n{self.file}:")
-        for a in anchors_found:
-            if self.verbose:
-                text = a.text[:50] + "..." if len(a.text) > 50 else a.text
-                print(f"  L{a.line_number:<4} {a.anchor_type:<20} {text}")
-                print(f"         pattern: {a.pattern}")
-            else:
-                text = a.text[:50] + "..." if len(a.text) > 50 else a.text
-                print(f"  L{a.line_number:<4} {a.anchor_type:<20} {text}")
+        if _has_rich():
+            self._print_file_rich(root, str(self.file), anchors_found)
+        else:
+            self._print_file_plain(root, str(self.file), anchors_found)
 
         print(f"\n{len(anchors_found)} anchors found")
         return 0
 
+    def _print_file_rich(
+        self, root: Path, file_path: str, anchors: list
+    ) -> None:
+        """Print single file scan with rich."""
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+        display_path = compact_path(file_path, root)
+
+        table = Table(title=display_path)
+        table.add_column("Line", justify="right", style="dim", width=6)
+        table.add_column("Type", style="cyan", width=22)
+        table.add_column("Text", style="white", overflow="fold")
+        if self.verbose:
+            table.add_column("Pattern", style="dim", overflow="fold")
+
+        for a in anchors:
+            text = a.text[:50] + "…" if len(a.text) > 50 else a.text
+            if self.verbose:
+                table.add_row(
+                    str(a.line_number), a.anchor_type, text, a.pattern
+                )
+            else:
+                table.add_row(str(a.line_number), a.anchor_type, text)
+
+        console.print(table)
+
+    def _print_file_plain(
+        self, root: Path, file_path: str, anchors: list
+    ) -> None:
+        """Print single file scan with plain text."""
+        display_path = compact_path(file_path, root)
+        print(f"\n{display_path}:")
+        for a in anchors:
+            text = a.text[:50] + "..." if len(a.text) > 50 else a.text
+            if self.verbose:
+                print(f"  L{a.line_number:<4} {a.anchor_type:<20} {text}")
+                print(f"         pattern: {a.pattern}")
+            else:
+                print(f"  L{a.line_number:<4} {a.anchor_type:<20} {text}")
+
     def _scan_all(
         self,
+        root: Path,
         data_dir: Path,
         manager,
         type_filter: list[str] | None,
@@ -195,6 +314,7 @@ class AnchorsScan:
         total_anchors = 0
         files_with_anchors = 0
         by_type: dict[str, int] = {}
+        file_results: list[tuple[str, list]] = []
 
         for file_record in tracker.iter_files():
             content = blob.read(
@@ -210,29 +330,93 @@ class AnchorsScan:
             if anchors_found:
                 files_with_anchors += 1
                 total_anchors += len(anchors_found)
+                file_results.append((file_record.path, anchors_found))
 
                 for a in anchors_found:
                     by_type[a.anchor_type] = by_type.get(a.anchor_type, 0) + 1
 
-                if self.verbose:
-                    print(f"\n{file_record.path}:")
-                    for a in anchors_found:
-                        txt = a.text[:50]
-                        if len(a.text) > 50:
-                            txt += "..."
-                        print(
-                            f"  L{a.line_number:<4} {a.anchor_type:<20} {txt}"
-                        )
-                else:
-                    n = len(anchors_found)
-                    print(f"{file_record.path}: {n} anchors")
+        if _has_rich():
+            self._print_all_rich(
+                root, file_results, by_type, total_anchors, files_with_anchors
+            )
+        else:
+            self._print_all_plain(
+                root, file_results, by_type, total_anchors, files_with_anchors
+            )
+
+        return 0
+
+    def _print_all_rich(
+        self,
+        root: Path,
+        file_results: list[tuple[str, list]],
+        by_type: dict[str, int],
+        total_anchors: int,
+        files_with_anchors: int,
+    ) -> None:
+        """Print all files scan with rich."""
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+
+        console = Console()
+
+        if self.verbose:
+            for file_path, anchors in file_results:
+                self._print_file_rich(root, file_path, anchors)
+                console.print()
+        else:
+            table = Table(title=f"Files with Anchors ({files_with_anchors})")
+            table.add_column("Path", style="blue", overflow="fold")
+            table.add_column("Count", justify="right", style="green", width=6)
+
+            for file_path, anchors in file_results:
+                display_path = compact_path(file_path, root)
+                table.add_row(display_path, str(len(anchors)))
+
+            console.print(table)
+
+        # summary by type
+        if by_type:
+            console.print()
+            type_table = Table(title="By Type")
+            type_table.add_column("Anchor Type", style="cyan")
+            type_table.add_column("Count", justify="right", style="green")
+
+            for atype, count in sorted(by_type.items(), key=lambda x: -x[1]):
+                type_table.add_row(atype, str(count))
+
+            console.print(type_table)
+
+        console.print()
+        summary = (
+            f"[bold]{total_anchors}[/] anchors in "
+            f"[bold]{files_with_anchors}[/] files"
+        )
+        console.print(Panel(summary, border_style="dim"))
+
+    def _print_all_plain(
+        self,
+        root: Path,
+        file_results: list[tuple[str, list]],
+        by_type: dict[str, int],
+        total_anchors: int,
+        files_with_anchors: int,
+    ) -> None:
+        """Print all files scan with plain text."""
+        if self.verbose:
+            for file_path, anchors in file_results:
+                self._print_file_plain(root, file_path, anchors)
+        else:
+            for file_path, anchors in file_results:
+                display_path = compact_path(file_path, root)
+                print(f"{display_path}: {len(anchors)} anchors")
 
         print(f"\n{total_anchors} anchors in {files_with_anchors} files")
         if by_type:
             print("\nBy type:")
             for atype, count in sorted(by_type.items(), key=lambda x: -x[1]):
                 print(f"  {atype:<25} {count}")
-        return 0
 
 
 @dataclass
@@ -288,10 +472,9 @@ class AnchorsFind:
         tracker = FileTracker(tracker_db)
         blob = BlobAppender(blob_file)
 
-        results: list[tuple[str, int, list]] = []  # (path, count, anchors)
+        results: list[tuple[str, int, list]] = []
 
         for file_record in tracker.iter_files():
-            # extension filter
             ext = Path(file_record.path).suffix.lstrip(".").lower()
             if ps.extensions and ext not in ps.extensions:
                 continue
@@ -311,27 +494,248 @@ class AnchorsFind:
             if len(results) >= self.limit:
                 break
 
-        # sort by count descending
         results.sort(key=lambda x: -x[1])
 
         if not results:
             print(f"no files found with {anchor_type}")
             return 0
 
-        print(f"Files with {anchor_type}:\n")
+        if _has_rich():
+            self._print_rich(root, anchor_type, results)
+        else:
+            self._print_plain(root, anchor_type, results)
 
-        for path, count, file_anchors in results:
-            print(f"{path}: {count}")
-            if self.verbose:
-                for a in file_anchors[:5]:  # show first 5
-                    text = a.text[:60] + "..." if len(a.text) > 60 else a.text
-                    print(f"    L{a.line_number}: {text}")
-                if len(file_anchors) > 5:
-                    print(f"    ... and {len(file_anchors) - 5} more")
-
-        print(f"\n{len(results)} files found")
         return 0
 
+    def _print_rich(
+        self,
+        root: Path,
+        anchor_type: str,
+        results: list[tuple[str, int, list]],
+    ) -> None:
+        """Print with rich formatting."""
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
 
-# Union type for subcommands
-Anchors = AnchorsList | AnchorsShow | AnchorsScan | AnchorsFind
+        console = Console()
+
+        if self.verbose:
+            for file_path, count, anchors in results:
+                display_path = compact_path(file_path, root)
+                table = Table(title=f"{display_path} ({count})")
+                table.add_column("Line", justify="right", style="dim", width=6)
+                table.add_column("Text", style="white", overflow="fold")
+
+                for a in anchors[:5]:
+                    text = a.text[:60] + "…" if len(a.text) > 60 else a.text
+                    table.add_row(str(a.line_number), text)
+
+                if len(anchors) > 5:
+                    table.add_row("…", f"[dim]and {len(anchors) - 5} more[/]")
+
+                console.print(table)
+                console.print()
+        else:
+            table = Table(title=f"Files with {anchor_type} ({len(results)})")
+            table.add_column("Path", style="blue", overflow="fold")
+            table.add_column("Count", justify="right", style="green", width=6)
+
+            for file_path, count, _ in results:
+                display_path = compact_path(file_path, root)
+                table.add_row(display_path, str(count))
+
+            console.print(table)
+
+        console.print()
+        console.print(
+            Panel(f"[bold]{len(results)}[/] files found", border_style="dim")
+        )
+
+    def _print_plain(
+        self,
+        root: Path,
+        anchor_type: str,
+        results: list[tuple[str, int, list]],
+    ) -> None:
+        """Print with plain text formatting."""
+        print(f"Files with {anchor_type}:\n")
+
+        for file_path, count, anchors in results:
+            display_path = compact_path(file_path, root)
+            print(f"{display_path}: {count}")
+            if self.verbose:
+                for a in anchors[:5]:
+                    text = a.text[:60] + "..." if len(a.text) > 60 else a.text
+                    print(f"    L{a.line_number}: {text}")
+                if len(anchors) > 5:
+                    print(f"    ... and {len(anchors) - 5} more")
+
+        print(f"\n{len(results)} files found")
+
+
+@dataclass
+class AnchorsFindAll:
+    """Find all anchor types across indexed files."""
+
+    limit: int = field(
+        default=50,
+        metadata={"help": "Max files to return per anchor type"},
+    )
+    verbose: bool = field(
+        default=False,
+        metadata={"help": "Show anchor details"},
+    )
+    directory: Path | None = field(
+        default=None,
+        metadata={"help": "Directory with .ultrasync index"},
+    )
+
+    def run(self) -> int:
+        """Execute the anchors find-all command."""
+        from ultrasync.patterns import PatternSetManager
+
+        root = self.directory.resolve() if self.directory else Path.cwd()
+        data_dir = root / DEFAULT_DATA_DIR
+
+        tracker_db = data_dir / "tracker.db"
+        blob_file = data_dir / "blob.dat"
+
+        if not tracker_db.exists() or not blob_file.exists():
+            print("error: no index found", file=sys.stderr)
+            print("run 'ultrasync index <directory>' first", file=sys.stderr)
+            return 1
+
+        manager = PatternSetManager(data_dir=data_dir)
+        tracker = FileTracker(tracker_db)
+        blob = BlobAppender(blob_file)
+
+        # collect all anchors across all files
+        by_type: dict[str, list[tuple[str, int, list]]] = {}
+        total_files = 0
+        total_anchors = 0
+
+        for file_record in tracker.iter_files():
+            content = blob.read(
+                file_record.blob_offset, file_record.blob_length
+            )
+            anchors_found = manager.extract_anchors(content, file_record.path)
+
+            if anchors_found:
+                total_files += 1
+                # group by anchor type
+                file_by_type: dict[str, list] = {}
+                for a in anchors_found:
+                    file_by_type.setdefault(a.anchor_type, []).append(a)
+
+                for atype, type_anchors in file_by_type.items():
+                    if atype not in by_type:
+                        by_type[atype] = []
+                    if len(by_type[atype]) < self.limit:
+                        by_type[atype].append(
+                            (file_record.path, len(type_anchors), type_anchors)
+                        )
+                    total_anchors += len(type_anchors)
+
+        if not by_type:
+            print("no anchors found in any indexed files")
+            return 0
+
+        # sort each type's results by count descending
+        for atype in by_type:
+            by_type[atype].sort(key=lambda x: -x[1])
+
+        if _has_rich():
+            self._print_rich(root, by_type, total_files, total_anchors)
+        else:
+            self._print_plain(root, by_type, total_files, total_anchors)
+
+        return 0
+
+    def _print_rich(
+        self,
+        root: Path,
+        by_type: dict[str, list[tuple[str, int, list]]],
+        total_files: int,
+        total_anchors: int,
+    ) -> None:
+        """Print with rich formatting."""
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+
+        console = Console()
+
+        for atype in sorted(by_type.keys()):
+            results = by_type[atype]
+            if self.verbose:
+                for file_path, count, anchors in results:
+                    display_path = compact_path(file_path, root)
+                    table = Table(title=f"{display_path} ({count})")
+                    table.add_column(
+                        "Line", justify="right", style="dim", width=6
+                    )
+                    table.add_column("Text", style="white", overflow="fold")
+
+                    for a in anchors[:5]:
+                        text = a.text[:60] + "…" if len(a.text) > 60 else a.text
+                        table.add_row(str(a.line_number), text)
+
+                    if len(anchors) > 5:
+                        table.add_row(
+                            "…", f"[dim]and {len(anchors) - 5} more[/]"
+                        )
+
+                    console.print(table)
+                console.print()
+            else:
+                table = Table(title=f"{atype} ({len(results)} files)")
+                table.add_column("Path", style="blue", overflow="fold")
+                table.add_column(
+                    "Count", justify="right", style="green", width=6
+                )
+
+                for file_path, count, _ in results:
+                    display_path = compact_path(file_path, root)
+                    table.add_row(display_path, str(count))
+
+                console.print(table)
+                console.print()
+
+        summary = (
+            f"[bold]{total_anchors}[/] anchors across "
+            f"[bold]{len(by_type)}[/] types in "
+            f"[bold]{total_files}[/] files"
+        )
+        console.print(Panel(summary, border_style="dim"))
+
+    def _print_plain(
+        self,
+        root: Path,
+        by_type: dict[str, list[tuple[str, int, list]]],
+        total_files: int,
+        total_anchors: int,
+    ) -> None:
+        """Print with plain text formatting."""
+        for atype in sorted(by_type.keys()):
+            results = by_type[atype]
+            print(f"\n{atype} ({len(results)} files):")
+            print("-" * 50)
+
+            for file_path, count, anchors in results:
+                display_path = compact_path(file_path, root)
+                print(f"  {display_path}: {count}")
+                if self.verbose:
+                    for a in anchors[:5]:
+                        text = (
+                            a.text[:60] + "..." if len(a.text) > 60 else a.text
+                        )
+                        print(f"      L{a.line_number}: {text}")
+                    if len(anchors) > 5:
+                        print(f"      ... and {len(anchors) - 5} more")
+
+        print(f"\n{total_anchors} anchors across {len(by_type)} types")
+        print(f"in {total_files} files")
+
+
+Anchors = AnchorsList | AnchorsShow | AnchorsScan | AnchorsFind | AnchorsFindAll

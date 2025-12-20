@@ -16,6 +16,4 @@ target/
 **/*.rs.bk
 Cargo.lock
 
-# Galaxybrain
-.ultrasync_index.json
 .ultrasync/

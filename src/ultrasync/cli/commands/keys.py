@@ -6,7 +6,9 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+
+import tyro
 
 from ultrasync.cli._common import DEFAULT_DATA_DIR, compact_path
 from ultrasync.jit import FileTracker
@@ -20,8 +22,11 @@ class Keys:
         default=None,
         metadata={"help": "Directory with .ultrasync index"},
     )
-    key_type: Literal[
-        "all", "files", "symbols", "memories", "contexts", "grep-cache"
+    key_type: Annotated[
+        Literal[
+            "all", "files", "symbols", "memories", "contexts", "grep-cache"
+        ],
+        tyro.conf.arg(aliases=("-t",)),
     ] = field(
         default="all",
         metadata={"help": "Filter by key type"},

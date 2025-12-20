@@ -7,7 +7,9 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+
+import tyro
 
 from ultrasync import console
 from ultrasync.cli._common import (
@@ -44,7 +46,10 @@ class Query:
         default=None,
         metadata={"help": "Direct key lookup (e.g., 'file:src/foo.py')"},
     )
-    result_type: Literal["all", "file", "symbol", "grep-cache"] = field(
+    result_type: Annotated[
+        Literal["all", "file", "symbol", "grep-cache"],
+        tyro.conf.arg(aliases=("-t",)),
+    ] = field(
         default="all",
         metadata={"help": "Filter results by type"},
     )
