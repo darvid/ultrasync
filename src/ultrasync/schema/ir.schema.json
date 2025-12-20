@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ir_root",
+  "type": "object",
+  "required": [
+    "components",
+    "contracts",
+    "templates",
+    "stack_signatures",
+    "tests",
+    "agent_instructions"
+  ],
+  "properties": {
+    "version": { "type": "string" },
+    "components": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/component" }
+    },
+    "contracts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/contract" }
+    },
+    "templates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/template" }
+    },
+    "stack_signatures": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stack_signature" }
+    },
+    "tests": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/test" }
+    },
+    "agent_instructions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/agent_instructions" }
+    }
+  },
+
+  "$defs": {
+    "component": {
+      "type": "object",
+      "required": ["id", "version", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["library", "framework", "runtime", "adapter", "utility"]
+        },
+        "features": { "type": "array", "items": { "type": "string" } },
+        "compatibility": {
+          "type": "object",
+          "properties": {
+            "languages": { "type": "array", "items": { "type": "string" } },
+            "runtimes": { "type": "array", "items": { "type": "string" } },
+            "requires": { "type": "array", "items": { "type": "string" } },
+            "optional_with": { "type": "array", "items": { "type": "string" } },
+            "conflicts": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/file_entry" }
+        },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constraint" }
+        },
+        "caveats": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/caveat" }
+        },
+        "implications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/implication" }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "contract": {
+      "type": "object",
+      "required": ["id", "version", "components"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "components": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/contract_component" }
+        },
+        "conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition" }
+        },
+        "patches": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/patch" }
+        },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constraint" }
+        },
+        "caveats": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/caveat" }
+        },
+        "implications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/implication" }
+        },
+        "tests": { "type": "array", "items": { "type": "string" } },
+        "metadata": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+
+    "contract_component": {
+      "type": "object",
+      "required": ["component"],
+      "properties": {
+        "component": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "condition": {
+      "type": "object",
+      "properties": {
+        "if_feature": { "type": "string" },
+        "if_runtime": { "type": "string" },
+        "if_language": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "patch": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "file_diff",
+            "insert_env",
+            "insert_file",
+            "modify_json",
+            "append",
+            "remove"
+          ]
+        },
+        "target": { "type": "string" },
+        "diff_ref": { "type": "string" },
+        "keys": { "type": "array", "items": { "type": "string" } },
+        "data": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+
+    "template": {
+      "type": "object",
+      "required": ["id", "version", "components"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "inherits": { "type": "array", "items": { "type": "string" } },
+        "components": { "type": "array", "items": { "type": "string" } },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/file_entry" } },
+        "contracts_applied": { "type": "array", "items": { "type": "string" } },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/constraint" }
+        },
+        "caveats": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/caveat" }
+        },
+        "implications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/implication" }
+        },
+        "lockfile": {
+          "type": "object",
+          "properties": {
+            "bun_lock_hash": { "type": "string" },
+            "resolver_environment": { "$ref": "#/$defs/resolver_environment" },
+            "signature": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "tests": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    },
+
+    "file_entry": {
+      "type": "object",
+      "required": ["path", "type"],
+      "properties": {
+        "path": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["template", "generated", "blob", "diff"]
+        },
+        "source_ref": { "type": "string" },
+        "generator": { "type": "string" },
+        "inputs": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+
+    "resolver_environment": {
+      "type": "object",
+      "properties": {
+        "bun_version": { "type": "string" },
+        "os": { "type": "string" },
+        "arch": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "stack_signature": {
+      "type": "object",
+      "required": ["id", "components", "contracts", "hash"],
+      "properties": {
+        "id": { "type": "string" },
+        "components": { "type": "array", "items": { "type": "string" } },
+        "contracts": { "type": "array", "items": { "type": "string" } },
+        "template": { "type": "string" },
+        "hash": { "type": "string" },
+        "lockfile_hash": { "type": "string" },
+        "bun_version": { "type": "string" },
+        "passed_reproducibility": { "type": "boolean" },
+        "reproduced_on": { "type": "array", "items": { "type": "string" } },
+        "cached_artifacts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/artifact" }
+        },
+        "validity": {
+          "type": "object",
+          "properties": {
+            "created_at": { "type": "string", "format": "date-time" },
+            "created_by": { "type": "string" },
+            "approved_by": { "type": "string" },
+            "tests_passed": { "type": "integer" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "build_ref": { "type": "string" },
+        "logs_ref": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "constraint": {
+      "type": "object",
+      "required": ["id", "summary"],
+      "properties": {
+        "id": { "type": "string" },
+        "summary": { "type": "string" },
+        "applies_when": { "type": "object", "additionalProperties": true },
+        "severity": { "type": "string", "enum": ["error", "warning"] },
+        "link": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "caveat": {
+      "type": "object",
+      "required": ["id", "summary"],
+      "properties": {
+        "id": { "type": "string" },
+        "summary": { "type": "string" },
+        "environment": { "type": "object", "additionalProperties": true },
+        "severity": { "type": "string", "enum": ["info", "warning"] },
+        "link": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "implication": {
+      "type": "object",
+      "required": ["id", "summary"],
+      "properties": {
+        "id": { "type": "string" },
+        "summary": { "type": "string" },
+        "triggered_by": { "type": "object", "additionalProperties": true },
+        "effect": { "type": "object", "additionalProperties": true },
+        "severity": { "type": "string", "enum": ["notice", "info"] },
+        "link": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "test": {
+      "type": "object",
+      "required": ["id", "type", "script_ref"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": {
+          "type": "string",
+          "enum": ["runtime", "build", "lint", "integration"]
+        },
+        "runner": { "type": "string" },
+        "script_ref": { "type": "string" },
+        "timeout": { "type": "integer" }
+      },
+      "additionalProperties": false
+    },
+
+    "agent_instructions": {
+      "type": "object",
+      "required": ["id", "for", "version"],
+      "properties": {
+        "id": { "type": "string" },
+        "for": {
+          "type": "string",
+          "enum": ["template", "contract", "component"]
+        },
+        "version": { "type": "string" },
+        "goals": { "type": "array", "items": { "type": "string" } },
+        "constraints": { "type": "array", "items": { "type": "string" } },
+        "tools": { "type": "array", "items": { "type": "string" } },
+        "acceptance": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": false
+    }
+  }
+}

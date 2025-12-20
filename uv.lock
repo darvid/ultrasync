@@ -1678,6 +1678,9 @@ cli = [
 infinity = [
     { name = "infinity-emb", extra = ["torch"] },
 ]
+infinity-api = [
+    { name = "httpx" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1694,6 +1697,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", marker = "extra == 'infinity-api'", specifier = ">=0.27" },
     { name = "hyperscan", specifier = ">=0.8.0" },
     { name = "infinity-emb", extras = ["torch"], marker = "extra == 'infinity'", specifier = ">=0.0.70" },
     { name = "lmdb", specifier = ">=1.5.1" },
@@ -1707,7 +1711,7 @@ requires-dist = [
     { name = "tyro", specifier = ">=0.9" },
     { name = "ultrasync-index", editable = "crates/ultrasync_index" },
 ]
-provides-extras = ["cli", "infinity"]
+provides-extras = ["cli", "infinity", "infinity-api"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -172,7 +172,13 @@ class InfinityProvider:
         device: str | None = None,
         engine: str = "torch",
     ) -> None:
-        from infinity_emb import AsyncEmbeddingEngine, EngineArgs
+        try:
+            from infinity_emb import AsyncEmbeddingEngine, EngineArgs
+        except ImportError as e:
+            raise ImportError(
+                "infinity-emb required for InfinityProvider. "
+                "Install with: pip install 'ultrasync[infinity]'"
+            ) from e
 
         self._model_name = model
         self._max_chars = max_chars
@@ -363,7 +369,7 @@ class InfinityAPIProvider:
         except ImportError as e:
             raise ImportError(
                 "httpx required for InfinityAPIProvider. "
-                "Install with: pip install httpx"
+                "Install with: pip install 'ultrasync[infinity]'"
             ) from e
 
         self._base_url = base_url.rstrip("/")
@@ -375,8 +381,8 @@ class InfinityAPIProvider:
         self._dim: int | None = None
 
         # sync and async clients (lazy init)
-        self._sync_client: httpx.Client | None = None
-        self._async_client: httpx.AsyncClient | None = None
+        self._sync_client: "httpx.Client | None" = None  # noqa: UP037
+        self._async_client: "httpx.AsyncClient | None" = None  # noqa: UP037
 
     def _get_sync_client(self):
         """Get or create sync HTTP client."""

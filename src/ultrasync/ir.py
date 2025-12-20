@@ -2,6 +2,9 @@
 
 Extracts business logic, data models, and API surface from codebases
 into a portable format suitable for migration or LLM consumption.
+
+Also provides component/template IR for project scaffolding and
+reproducibility tracking.
 """
 
 from __future__ import annotations
@@ -12,10 +15,12 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
 
@@ -28,9 +33,43 @@ if TYPE_CHECKING:
 ProgressCallback = Callable[[int, int, str], None]
 
 
-# ---------------------------------------------------------------------------
-# IR Data Structures
-# ---------------------------------------------------------------------------
+class ComponentKind(str, Enum):
+    LIBRARY = "library"
+    FRAMEWORK = "framework"
+    RUNTIME = "runtime"
+    ADAPTER = "adapter"
+    UTILITY = "utility"
+
+
+class Compatibility(BaseModel):
+    languages: list[str] | None = None
+    runtimes: list[str] | None = None
+    requires: list[str] | None = None
+    conflicts: list[str] | None = None
+
+
+class Component(BaseModel):
+    id: str
+    version: str
+    kind: ComponentKind
+    features: list[str] | None = None
+    compatibility: Compatibility | None = None
+    sources: list[str] | None = None
+
+
+class ResolverEnvironment(BaseModel):
+    bun_version: str | None = None
+    os: str | None = None
+    arch: str | None = None
+
+
+class StackManifest(BaseModel):
+    id: str
+    components: list[Component] = Field(default_factory=list)
+    hash: str
+    lockfile_hash: str | None = None
+    resolver_environment: ResolverEnvironment | None = None
+    extracted_at: str | None = None
 
 
 @dataclass
