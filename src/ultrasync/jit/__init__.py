@@ -20,6 +20,23 @@ from ultrasync.jit.vector_store import (
     VectorStoreStats,
 )
 
+# Optional lexical index (requires tantivy)
+try:
+    from ultrasync.jit.lexical import (
+        LexicalIndex,
+        LexicalResult,
+        code_tokenize,
+        rrf_fuse,
+    )
+
+    _HAS_LEXICAL = True
+except ImportError:
+    LexicalIndex = None  # type: ignore
+    LexicalResult = None  # type: ignore
+    code_tokenize = None  # type: ignore
+    rrf_fuse = None  # type: ignore
+    _HAS_LEXICAL = False
+
 __all__ = [
     "FileTracker",
     "FileRecord",
@@ -41,4 +58,10 @@ __all__ = [
     "search",
     "SearchResult",
     "SearchStats",
+    # Lexical (optional)
+    "LexicalIndex",
+    "LexicalResult",
+    "code_tokenize",
+    "rrf_fuse",
+    "_HAS_LEXICAL",
 ]

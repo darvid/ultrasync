@@ -25,10 +25,20 @@ try:
 except ImportError:
     MutableGlobalIndex = None  # type: ignore
 
+# Optional lexical index (tantivy)
+try:
+    from ultrasync.jit.lexical import LexicalIndex
+
+    _HAS_LEXICAL = True
+except ImportError:
+    LexicalIndex = None  # type: ignore
+    _HAS_LEXICAL = False
+
 logger = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from ultrasync.embeddings import EmbeddingProvider
+    from ultrasync.jit.lexical import LexicalIndex as LexicalIndexType
 
 
 @dataclass
@@ -64,6 +74,11 @@ class IndexStats:
     # completeness
     aot_complete: bool = False
     vector_complete: bool = False
+    # lexical index stats
+    lexical_enabled: bool = False
+    lexical_doc_count: int = 0
+    lexical_file_count: int = 0
+    lexical_symbol_count: int = 0
 
 
 @dataclass
@@ -83,6 +98,7 @@ class JITIndexManager:
         embedding_provider: EmbeddingProvider,
         max_vector_cache_mb: int = 256,
         embed_batch_size: int = 32,
+        enable_lexical: bool = True,
     ):
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -120,6 +136,16 @@ class JITIndexManager:
                 self.aot_index = MutableGlobalIndex.create(str(aot_path), 4096)
                 logger.info("created new AOT index")
 
+        # Lexical (BM25) index - optional, enabled by default if available
+        self.lexical: LexicalIndexType | None = None
+        if enable_lexical and _HAS_LEXICAL and LexicalIndex is not None:
+            try:
+                self.lexical = LexicalIndex(data_dir)
+                logger.info("lexical index enabled (tantivy)")
+            except Exception as e:
+                logger.warning("failed to initialize lexical index: %s", e)
+                self.lexical = None
+
         self._started = False
 
     async def start(self) -> None:
@@ -132,6 +158,8 @@ class JITIndexManager:
         if not self._started:
             return
         await self.embed_queue.stop()
+        if self.lexical is not None:
+            self.lexical.close()
         self.tracker.close()
         self._started = False
 
@@ -282,12 +310,45 @@ class JITIndexManager:
 
         t_syms = time.perf_counter()
 
-        total_ms = (t_syms - t_start) * 1000
+        # Add to lexical index for BM25 search
+        if self.lexical is not None:
+            try:
+                content_str = content.decode("utf-8", errors="replace")
+                symbols_for_lex = [
+                    {
+                        "key_hash": hash64_sym_key(
+                            path_rel,
+                            s.name,
+                            s.kind,
+                            s.line,
+                            s.end_line or s.line,
+                        ),
+                        "name": s.name,
+                        "kind": s.kind,
+                        "line_start": s.line,
+                        "line_end": s.end_line,
+                        "content": self._extract_symbol_bytes(
+                            content, s.line, s.end_line
+                        ).decode("utf-8", errors="replace"),
+                    }
+                    for s in metadata.symbol_info
+                ]
+                self.lexical.add_file(
+                    key_hash=file_key,
+                    path=path_rel,
+                    content=content_str,
+                    symbols=symbols_for_lex,
+                )
+            except Exception as e:
+                logger.debug("failed to add to lexical index: %s", e)
+        t_lex = time.perf_counter()
+
+        total_ms = (t_lex - t_start) * 1000
         if total_ms > 50:  # log slow files (>50ms)
             logger.warning(
                 "slow file %s: %.1fms total "
                 "(needs=%.1f read=%.1f scan=%.1f hash=%.1f blob=%.1f "
-                "ctx=%.1f upsert=%.1f aot=%.1f syms[%d]=%.1f)",
+                "ctx=%.1f upsert=%.1f aot=%.1f syms[%d]=%.1f lex=%.1f)",
                 path.name,
                 total_ms,
                 (t_needs - t_check) * 1000,
@@ -300,6 +361,7 @@ class JITIndexManager:
                 (t_aot - t_upsert) * 1000,
                 sym_count,
                 (t_syms - t_aot) * 1000,
+                (t_lex - t_syms) * 1000,
             )
 
         return IndexResult(
@@ -688,6 +750,10 @@ class JITIndexManager:
         # evict pattern caches that reference this file
         self._evict_patterns_for_file(path)
 
+        # delete from lexical index
+        if self.lexical is not None:
+            self.lexical.delete_by_path(str(path))
+
         # delete symbols from tracker
         self.tracker.delete_symbols(path)
 
@@ -698,6 +764,10 @@ class JITIndexManager:
         """Delete a single symbol from the index by key hash."""
         # evict from cache
         self.vector_cache.evict(key_hash)
+
+        # delete from lexical index
+        if self.lexical is not None:
+            self.lexical.delete(key_hash)
 
         # delete from tracker
         return self.tracker.delete_symbol_by_key(key_hash)
@@ -1231,6 +1301,17 @@ class JITIndexManager:
         live_bytes, live_count = self.tracker.live_vector_stats()
         vector_stats = self.vector_store.compute_stats(live_bytes, live_count)
 
+        # Lexical index stats
+        lexical_enabled = self.lexical is not None
+        lexical_doc_count = 0
+        lexical_file_count = 0
+        lexical_symbol_count = 0
+        if self.lexical is not None:
+            lex_stats = self.lexical.stats()
+            lexical_doc_count = lex_stats.get("total_docs", 0)
+            lexical_file_count = lex_stats.get("file_count", 0)
+            lexical_symbol_count = lex_stats.get("symbol_count", 0)
+
         return IndexStats(
             file_count=file_count,
             symbol_count=symbol_count,
@@ -1251,6 +1332,10 @@ class JITIndexManager:
             vector_needs_compaction=vector_stats.needs_compaction,
             aot_complete=aot_complete,
             vector_complete=vector_complete,
+            lexical_enabled=lexical_enabled,
+            lexical_doc_count=lexical_doc_count,
+            lexical_file_count=lexical_file_count,
+            lexical_symbol_count=lexical_symbol_count,
         )
 
     def compact_vectors(self, force: bool = False) -> CompactionResult:
@@ -1695,3 +1780,111 @@ class JITIndexManager:
             path=None,
             bytes=blob_entry.length,
         )
+
+    def search_lexical(
+        self,
+        query: str,
+        top_k: int = 10,
+        doc_type: str | None = None,
+    ) -> list[tuple[int, float, str]]:
+        """Search the lexical (BM25) index.
+
+        Args:
+            query: Search query (natural language or code identifiers)
+            top_k: Maximum results to return
+            doc_type: Filter by type ("file" or "symbol")
+
+        Returns:
+            List of (key_hash, score, type) tuples sorted by score descending.
+            Returns empty list if lexical index is not enabled.
+        """
+        if self.lexical is None:
+            return []
+
+        results = self.lexical.search(query, top_k=top_k, doc_type=doc_type)
+
+        return [(r.key_hash, r.score, r.doc_type) for r in results]
+
+    def search_hybrid(
+        self,
+        query: str,
+        top_k: int = 10,
+        result_type: str = "all",
+        semantic_weight: float = 1.0,
+        lexical_weight: float = 1.0,
+        rrf_k: int = 60,
+    ) -> list[tuple[int, float, str, str]]:
+        """Hybrid search combining semantic and lexical results with RRF.
+
+        Uses Reciprocal Rank Fusion to combine results from both indices,
+        giving you the best of both worlds: semantic understanding for
+        conceptual queries and exact matching for identifiers.
+
+        Args:
+            query: Search query (natural language or code identifiers)
+            top_k: Maximum results to return
+            result_type: Filter by type ("all", "file", or "symbol")
+            semantic_weight: Weight for semantic results in RRF (default 1.0)
+            lexical_weight: Weight for lexical results in RRF (default 1.0)
+            rrf_k: RRF parameter (higher = more emphasis on top results)
+
+        Returns:
+            List of (key_hash, score, type, source) tuples where source is
+            "semantic", "lexical", or "both".
+        """
+        from ultrasync.jit.lexical import rrf_fuse
+
+        # Get semantic results
+        semantic_results: list[tuple[int, float]] = []
+        if self.provider is not None:
+            q_vec = self.provider.embed(query)
+            raw_results = self.search_vectors(q_vec, top_k * 2, result_type)
+            semantic_results = [(kh, score) for kh, score, _ in raw_results]
+
+        # Get lexical results
+        lexical_results = []
+        if self.lexical is not None:
+            doc_type = None if result_type == "all" else result_type
+            lexical_results = self.lexical.search(
+                query, top_k=top_k * 2, doc_type=doc_type
+            )
+
+        # If only one index has results, return those directly
+        if not semantic_results and not lexical_results:
+            return []
+
+        if not semantic_results:
+            return [
+                (r.key_hash, r.score, r.doc_type, "lexical")
+                for r in lexical_results[:top_k]
+            ]
+
+        if not lexical_results:
+            # Look up types from tracker
+            out = []
+            for key_hash, score in semantic_results[:top_k]:
+                item_type = "file"
+                if self.tracker.get_symbol_by_key(key_hash):
+                    item_type = "symbol"
+                out.append((key_hash, score, item_type, "semantic"))
+            return out
+
+        # Fuse results with RRF
+        fused = rrf_fuse(
+            semantic_results,
+            lexical_results,
+            k=rrf_k,
+            semantic_weight=semantic_weight,
+            lexical_weight=lexical_weight,
+        )
+
+        # Build output with type info
+        output: list[tuple[int, float, str, str]] = []
+        for key_hash, score, source in fused[:top_k]:
+            # Determine type from tracker
+            item_type = "file"
+            if self.tracker.get_symbol_by_key(key_hash):
+                item_type = "symbol"
+            output.append((key_hash, score, item_type, source))
+
+        return output

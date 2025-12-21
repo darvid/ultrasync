@@ -50,6 +50,9 @@ class SearchStats:
     aot_hit: bool = False
     semantic_checked: bool = False
     semantic_results: int = 0
+    lexical_checked: bool = False
+    lexical_results: int = 0
+    hybrid_fused: bool = False
     grep_fallback: bool = False
     grep_sources: list[str] | None = None
     files_indexed: int = 0
@@ -79,6 +82,7 @@ def search(
     fallback_glob: str | None = None,
     result_type: str = "all",
     include_source: bool = True,
+    search_mode: str = "hybrid",
 ) -> tuple[list[SearchResult], SearchStats]:
     """Multi-strategy search with automatic fallback.
 
@@ -91,6 +95,9 @@ def search(
         result_type: Filter by type - "all", "file", or "symbol"
         include_source: Include source code content for symbol results
             (default: True). This is cheap as it reads from the blob.
+        search_mode: Search strategy - "hybrid" (default, combines semantic
+            and lexical with RRF), "semantic" (vector only), or "lexical"
+            (BM25 only).
 
     Returns:
         Tuple of (results, stats) where stats tracks which strategies were used
@@ -157,78 +164,146 @@ def search(
                 )
             ], stats
 
-        logger.debug("search: no AOT hit, trying semantic search")
+        logger.debug("search: no AOT hit, trying %s search", search_mode)
 
-    # Priority 1: Semantic vector search (in-memory vector cache)
-    stats.semantic_checked = True
-    if manager.provider is None:
-        logger.warning(
-            "search: no embedding provider, skipping semantic search"
-        )
-    else:
-        q_vec = manager.provider.embed(query)
-        results = manager.search_vectors(q_vec, top_k, result_type=result_type)
-        stats.semantic_results = len(results)
+    # Helper to build SearchResult from key_hash
+    def _build_result(
+        key_hash: int,
+        score: float,
+        item_type: str,
+        source: str,
+    ) -> SearchResult:
+        path = None
+        name = None
+        kind = None
+        line_start = None
+        line_end = None
+        content = None
 
-        if results:
-            logger.info(
-                "search: semantic hit with %d results (top score: %.3f)",
-                len(results),
-                results[0][1] if results else 0,
-            )
-            output = []
-            for key_hash, score, item_type in results:
-                path = None
-                name = None
-                kind = None
-                line_start = None
-                line_end = None
-                content = None
-                if item_type == "file":
-                    file_record = manager.tracker.get_file_by_key(key_hash)
-                    if file_record:
-                        path = file_record.path
-                elif item_type == "symbol":
-                    sym_record = manager.tracker.get_symbol_by_key(key_hash)
-                    if sym_record:
-                        path = sym_record.file_path
-                        name = sym_record.name
-                        kind = sym_record.kind
-                        line_start = sym_record.line_start
-                        line_end = sym_record.line_end
-                        if include_source:
-                            content = _fetch_symbol_content(
-                                manager,
-                                sym_record.blob_offset,
-                                sym_record.blob_length,
-                            )
-                elif item_type == "pattern":
-                    pattern_record = manager.tracker.get_pattern_cache(key_hash)
-                    if pattern_record:
-                        name = pattern_record.pattern
-                        kind = pattern_record.tool_type
-                        # include matched files as content
-                        content = "\n".join(pattern_record.matched_files[:20])
-                        if len(pattern_record.matched_files) > 20:
-                            extra = len(pattern_record.matched_files) - 20
-                            content += f"\n... and {extra} more"
-                output.append(
-                    SearchResult(
-                        type=item_type,
-                        path=path,
-                        name=name,
-                        kind=kind,
-                        key_hash=key_hash,
-                        score=score,
-                        source="semantic",
-                        line_start=line_start,
-                        line_end=line_end,
-                        content=content,
+        if item_type == "file":
+            file_record = manager.tracker.get_file_by_key(key_hash)
+            if file_record:
+                path = file_record.path
+        elif item_type == "symbol":
+            sym_record = manager.tracker.get_symbol_by_key(key_hash)
+            if sym_record:
+                path = sym_record.file_path
+                name = sym_record.name
+                kind = sym_record.kind
+                line_start = sym_record.line_start
+                line_end = sym_record.line_end
+                if include_source:
+                    content = _fetch_symbol_content(
+                        manager,
+                        sym_record.blob_offset,
+                        sym_record.blob_length,
                     )
-                )
-            return output, stats
+        elif item_type == "pattern":
+            pattern_record = manager.tracker.get_pattern_cache(key_hash)
+            if pattern_record:
+                name = pattern_record.pattern
+                kind = pattern_record.tool_type
+                content = "\n".join(pattern_record.matched_files[:20])
+                if len(pattern_record.matched_files) > 20:
+                    extra = len(pattern_record.matched_files) - 20
+                    content += f"\n... and {extra} more"
 
-        logger.debug("search: no semantic results, falling back to grep")
+        return SearchResult(
+            type=item_type,
+            path=path,
+            name=name,
+            kind=kind,
+            key_hash=key_hash,
+            score=score,
+            source=source,
+            line_start=line_start,
+            line_end=line_end,
+            content=content,
+        )
+
+    # Priority 1: Lexical-only search (BM25)
+    if search_mode == "lexical":
+        stats.lexical_checked = True
+        if manager.lexical is None:
+            logger.warning(
+                "search: lexical mode requested but no lexical index"
+            )
+        else:
+            lex_results = manager.search_lexical(query, top_k, doc_type=None)
+            stats.lexical_results = len(lex_results)
+
+            if lex_results:
+                logger.info(
+                    "search: lexical hit with %d results (top score: %.3f)",
+                    len(lex_results),
+                    lex_results[0][1] if lex_results else 0,
+                )
+                output = [
+                    _build_result(kh, score, item_type, "lexical")
+                    for kh, score, item_type in lex_results
+                ]
+                return output, stats
+
+            logger.debug("search: no lexical results, falling back to grep")
+
+    # Priority 1: Hybrid search (RRF fusion of semantic + lexical)
+    elif search_mode == "hybrid":
+        stats.semantic_checked = True
+        stats.lexical_checked = manager.lexical is not None
+
+        if manager.provider is None and manager.lexical is None:
+            logger.warning(
+                "search: hybrid mode but no embedding provider or lexical index"
+            )
+        else:
+            hybrid_results = manager.search_hybrid(
+                query, top_k, result_type=result_type
+            )
+            stats.semantic_results = len(hybrid_results)
+            stats.lexical_results = len(hybrid_results)
+            stats.hybrid_fused = True
+
+            if hybrid_results:
+                logger.info(
+                    "search: hybrid hit with %d results (top score: %.3f)",
+                    len(hybrid_results),
+                    hybrid_results[0][1] if hybrid_results else 0,
+                )
+                output = [
+                    _build_result(kh, score, item_type, source)
+                    for kh, score, item_type, source in hybrid_results
+                ]
+                return output, stats
+
+            logger.debug("search: no hybrid results, falling back to grep")
+
+    # Priority 1: Semantic-only search (vector similarity)
+    else:  # search_mode == "semantic"
+        stats.semantic_checked = True
+        if manager.provider is None:
+            logger.warning(
+                "search: no embedding provider, skipping semantic search"
+            )
+        else:
+            q_vec = manager.provider.embed(query)
+            results = manager.search_vectors(
+                q_vec, top_k, result_type=result_type
+            )
+            stats.semantic_results = len(results)
+
+            if results:
+                logger.info(
+                    "search: semantic hit with %d results (top score: %.3f)",
+                    len(results),
+                    results[0][1] if results else 0,
+                )
+                output = [
+                    _build_result(kh, score, item_type, "semantic")
+                    for kh, score, item_type in results
+                ]
+                return output, stats
+
+            logger.debug("search: no semantic results, falling back to grep")
 
     # Priority 2+: Grep fallback with git-awareness
     stats.grep_fallback = True
@@ -262,57 +337,51 @@ def search(
         except Exception as e:
             logger.debug("search: failed to index %s: %s", file_path, e)
 
-    # Re-search with freshly indexed content
-    if manager.provider is not None and indexed_keys:
-        q_vec = manager.provider.embed(query)
-        results = manager.search_vectors(q_vec, top_k, result_type=result_type)
-
-        if results:
-            logger.info(
-                "search: post-index semantic search found %d results",
-                len(results),
+    # Re-search with freshly indexed content using the chosen mode
+    if indexed_keys:
+        if search_mode == "hybrid" and (
+            manager.provider is not None or manager.lexical is not None
+        ):
+            hybrid_results = manager.search_hybrid(
+                query, top_k, result_type=result_type
             )
-            output = []
-            for key_hash, score, item_type in results:
-                path = None
-                name = None
-                kind = None
-                line_start = None
-                line_end = None
-                content = None
-                if item_type == "file":
-                    file_record = manager.tracker.get_file_by_key(key_hash)
-                    if file_record:
-                        path = file_record.path
-                elif item_type == "symbol":
-                    sym_record = manager.tracker.get_symbol_by_key(key_hash)
-                    if sym_record:
-                        path = sym_record.file_path
-                        name = sym_record.name
-                        kind = sym_record.kind
-                        line_start = sym_record.line_start
-                        line_end = sym_record.line_end
-                        if include_source:
-                            content = _fetch_symbol_content(
-                                manager,
-                                sym_record.blob_offset,
-                                sym_record.blob_length,
-                            )
-                output.append(
-                    SearchResult(
-                        type=item_type,
-                        path=path,
-                        name=name,
-                        kind=kind,
-                        key_hash=key_hash,
-                        score=score,
-                        source="grep_then_indexed",
-                        line_start=line_start,
-                        line_end=line_end,
-                        content=content,
-                    )
+            if hybrid_results:
+                logger.info(
+                    "search: post-index hybrid search found %d results",
+                    len(hybrid_results),
                 )
-            return output, stats
+                output = [
+                    _build_result(kh, score, item_type, f"grep_then_{source}")
+                    for kh, score, item_type, source in hybrid_results
+                ]
+                return output, stats
+        elif search_mode == "lexical" and manager.lexical is not None:
+            lex_results = manager.search_lexical(query, top_k)
+            if lex_results:
+                logger.info(
+                    "search: post-index lexical search found %d results",
+                    len(lex_results),
+                )
+                output = [
+                    _build_result(kh, score, item_type, "grep_then_lexical")
+                    for kh, score, item_type in lex_results
+                ]
+                return output, stats
+        elif manager.provider is not None:
+            q_vec = manager.provider.embed(query)
+            results = manager.search_vectors(
+                q_vec, top_k, result_type=result_type
+            )
+            if results:
+                logger.info(
+                    "search: post-index semantic search found %d results",
+                    len(results),
+                )
+                output = [
+                    _build_result(kh, score, item_type, "grep_then_semantic")
+                    for kh, score, item_type in results
+                ]
+                return output, stats
 
     # Fall through: return ranked grep hits (already ranked above)
     # but only if not filtering for symbols (grep only finds files)

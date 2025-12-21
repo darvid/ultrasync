@@ -674,9 +674,9 @@ search("handleSubmit")        → finds cached grep results
 
 search() replaces grep→glob→read chains with one call.
 
-Fall back to Grep/Glob only when search() returns no results or
-scores below 0.3. After grep fallback, call index_file(path) so
-future searches succeed.
+Fall back to Grep/Glob only when search() returns no results.
+After grep fallback, call index_file(path) so future searches
+succeed.
 </tool_selection>
 
 <indexing>
@@ -1488,7 +1488,8 @@ Taxonomy:
         fallback_glob: str | None = None,
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
-        threshold: float = 0.5,
+        threshold: float | None = None,
+        search_mode: Literal["hybrid", "semantic", "lexical"] = "hybrid",
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -1502,8 +1503,8 @@ Taxonomy:
         - "auth handler" → search("authentication handler")
         - "grep cache" → search("handleSubmit", result_type="grep-cache")
 
-        ONLY fall back to Grep/Glob if search() returns no results or
-        scores below 0.3. After grep fallback, call index_file(path).
+        ONLY fall back to Grep/Glob if search() returns no results.
+        After grep fallback, call index_file(path).
 
         Args:
             query: Natural language search query (not regex!)
@@ -1518,9 +1519,19 @@ Taxonomy:
             include_source: Include source code for symbol results
                 (default: True). Set to False for lightweight metadata-only
                 queries.
-            threshold: Minimum confidence score for results (default: 0.5).
-                Results below this threshold are filtered out. Set to 0.0
-                to return all results regardless of score.
+            threshold: Minimum score for results. Mode-aware defaults:
+                - hybrid: 0.0 (RRF scores are 0.01-0.03, rely on ranking)
+                - semantic: 0.3 (cosine similarity 0.0-1.0)
+                - lexical: 0.0 (BM25 scores vary wildly, rely on ranking)
+                Set explicitly to override. Use 0.0 to return all results.
+            search_mode: Search strategy (default: "hybrid"):
+                - "hybrid": Best of both - combines semantic and lexical
+                  results using Reciprocal Rank Fusion (RRF). Best for most
+                  queries.
+                - "semantic": Vector similarity only. Best for conceptual
+                  queries like "authentication logic" or "error handling".
+                - "lexical": BM25 keyword matching only. Best for exact
+                  symbol names like "handleSubmit" or "JITIndexManager".
 
         Returns:
             TSV: Compact tab-separated format with header comments
@@ -1544,18 +1555,33 @@ Taxonomy:
             if result_type == "grep-cache"
             else result_type,
             include_source=include_source,
+            search_mode=search_mode,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         if stats.grep_sources:
             primary_source = stats.grep_sources[0]
+        elif stats.hybrid_fused:
+            primary_source = "hybrid"
+        elif stats.lexical_checked and stats.lexical_results > 0:
+            primary_source = "lexical"
         else:
             primary_source = "semantic"
 
+        # apply mode-aware threshold defaults
+        # RRF scores are rank-based (0.01-0.03), semantic is similarity (0-1)
+        if threshold is None:
+            if search_mode == "semantic":
+                threshold = 0.3
+            else:  # hybrid, lexical - trust the ranking
+                threshold = 0.0
+
         # compute hint based on original results BEFORE filtering
+        # use mode-aware thresholds for "weak match" detection
         hint = None
         top_score = results[0].score if results else 0
-        if not results or top_score < 0.7:
+        weak_threshold = 0.5 if search_mode == "semantic" else 0.02
+        if not results or top_score < weak_threshold:
             hint = (
                 "Weak/no matches. If you find the file via grep/read, "
                 "call index_file(path) so future searches find it."

@@ -29,6 +29,9 @@ infinity = [
   # infinity-emb excluded - pins numpy<2 which breaks Python 3.14t
   # install manually with: uv pip install infinity-emb --no-deps
 ]
+lexical = [
+  "tantivy>=0.22",  # BM25 lexical search via Rust bindings
+]
 
 [dependency-groups]
 dev = [

@@ -1440,6 +1440,19 @@ wheels = [
 ]
 
 [[package]]
+name = "tantivy"
+version = "0.25.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/f9/0cd3955d155d3e3ef74b864769514dd191e5dacba9f0beb7af2d914942ce/tantivy-0.25.1.tar.gz", hash = "sha256:68a3314699a7d18fcf338b52bae8ce46a97dde1128a3e47e33fa4db7f71f265e", size = 75120, upload-time = "2025-12-02T11:57:12.997Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/44/9f1d67aa5030f7eebc966c863d1316a510a971dd8bb45651df4acdfae9ed/tantivy-0.25.1-cp314-cp314-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:7f5d29ae85dd0f23df8d15b3e7b341d4f9eb5a446bbb9640df48ac1f6d9e0c6c", size = 7623723, upload-time = "2025-12-02T11:56:55.066Z" },
+    { url = "https://files.pythonhosted.org/packages/db/30/6e085bd3ed9d12da3c91c185854abd70f9dfd35fb36a75ea98428d42c30b/tantivy-0.25.1-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:f2d2938fb69a74fc1bb36edfaf7f0d1596fa1264db0f377bda2195c58bcb6245", size = 3926243, upload-time = "2025-12-02T11:56:57.058Z" },
+    { url = "https://files.pythonhosted.org/packages/32/f5/a00d65433430f51718e5cc6938df571765d7c4e03aedec5aef4ab567aa9b/tantivy-0.25.1-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4f5ff124c4802558e627091e780b362ca944169736caba5a372eef39a79d0ae0", size = 4207186, upload-time = "2025-12-02T11:56:58.803Z" },
+    { url = "https://files.pythonhosted.org/packages/19/63/61bdb12fc95f2a7f77bd419a5149bfa9f28caa76cb569bf2b6b06e1d033e/tantivy-0.25.1-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:43b80ef62a340416139c93d19264e5f808da48e04f9305f1092b8ed22be0a5be", size = 4187312, upload-time = "2025-12-02T11:57:00.595Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/de/e39c0b01d59019bf5c38face8b81defbc4a68cebf5e0c53bcb2cd715a449/tantivy-0.25.1-cp314-cp314-win_amd64.whl", hash = "sha256:286b654f40c70c1e6b64b9bc7031ed0bf5c440f5bffeaeeee21a0ee6cc39f0e2", size = 3436535, upload-time = "2025-12-02T11:57:02.267Z" },
+]
+
+[[package]]
 name = "textual"
 version = "6.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1683,6 +1696,9 @@ cli = [
 infinity = [
     { name = "httpx" },
 ]
+lexical = [
+    { name = "tantivy" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1708,11 +1724,12 @@ requires-dist = [
     { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0" },
     { name = "sentence-transformers", specifier = ">=3" },
     { name = "structlog", specifier = ">=24.0" },
+    { name = "tantivy", marker = "extra == 'lexical'", specifier = ">=0.22" },
     { name = "textual", marker = "extra == 'cli'", specifier = ">=0.50" },
     { name = "tyro", specifier = ">=0.9" },
     { name = "ultrasync-index", editable = "crates/ultrasync_index" },
 ]
-provides-extras = ["cli", "infinity"]
+provides-extras = ["cli", "infinity", "lexical"]
 
 [package.metadata.requires-dev]
 dev = [
