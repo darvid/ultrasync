@@ -150,24 +150,25 @@ INSIGHT_PATTERNS: list[tuple[re.Pattern, str, float]] = [
         "insight:tradeoff",
         0.2,
     ),
-    # Pitfalls/warnings
+    # Pitfalls/warnings - strong signals
     (
         re.compile(r"\b(be careful|watch out|gotcha|caveat)\b", re.I),
         "insight:pitfall",
         0.4,
     ),
     (
+        re.compile(r"\b(common mistake|easy to miss|subtle bug)\b", re.I),
+        "insight:pitfall",
+        0.3,
+    ),
+    # Pitfalls - weaker signals (require context)
+    (
         re.compile(
-            r"\b(don't forget|make sure|important to|note that)\b",
+            r"\b(don't forget to|important to note|note that .{0,30} must)\b",
             re.I,
         ),
         "insight:pitfall",
         0.2,
-    ),
-    (
-        re.compile(r"\b(common mistake|easy to miss|subtle)\b", re.I),
-        "insight:pitfall",
-        0.3,
     ),
     # Assumptions
     (

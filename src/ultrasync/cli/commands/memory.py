@@ -84,7 +84,6 @@ class MemoryList:
             text = text.replace("\n", " ")
             print(f"{mem.id:<16}  {task_short:<20}  {created:<19}  {text}")
 
-        manager.close()
         return 0
 
 
@@ -120,7 +119,6 @@ class MemoryShow:
         mem = manager.memory.get(self.memory_id)
         if not mem:
             console.error(f"memory {self.memory_id} not found")
-            manager.close()
             return 1
 
         console.header(f"Memory: {mem.id}")
@@ -157,7 +155,6 @@ class MemoryShow:
         console.subheader("\nText")
         print(f"  {mem.text}")
 
-        manager.close()
         return 0
 
 
@@ -227,7 +224,6 @@ class MemorySearch:
             text = text.replace("\n", " ")
             print(f"{r.score:>6.3f}  {mem.id:<16}  {task_short:<15}  {text}")
 
-        manager.close()
         return 0
 
 
@@ -289,7 +285,6 @@ class MemoryStats:
             )[:10]:
                 console.key_value(ctx, cnt, indent=2)
 
-        manager.close()
         return 0
 
 
@@ -355,7 +350,6 @@ class MemoryWrite:
         if entry.context:
             console.key_value("context", ", ".join(entry.context))
 
-        manager.close()
         return 0
 
 
@@ -393,10 +387,8 @@ class MemoryDelete:
             print(f"deleted memory: {self.memory_id}")
         else:
             console.error(f"memory {self.memory_id} not found")
-            manager.close()
             return 1
 
-        manager.close()
         return 0
 
 
