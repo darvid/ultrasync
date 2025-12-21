@@ -105,6 +105,11 @@ class Index:
 
         start_time = time.perf_counter()
 
+        # If both embed and enrich, run them in parallel after basic indexing
+        if self.embed and self.enrich:
+            return self._run_parallel(root, data_dir, manager, patterns, resume)
+
+        # Otherwise sequential
         async def run_index():
             async for _progress in manager.full_index(
                 root,
@@ -120,11 +125,94 @@ class Index:
         elapsed = time.perf_counter() - start_time
         console.success(f"indexing complete in {elapsed:.2f}s")
 
-        # Run enrichment if requested
+        # Run enrichment if requested (without embed)
         if self.enrich:
             return self._run_enrichment(root)
 
         return 0
+
+    def _run_parallel(
+        self,
+        root: Path,
+        data_dir: Path,
+        manager: JITIndexManager,
+        patterns: list[str] | None,
+        resume: bool,
+    ) -> int:
+        """Run indexing with embedding and enrichment in parallel."""
+        from ultrasync.enrich import enrich_codebase
+
+        console.info("running embedding + enrichment in parallel...")
+        start_time = time.perf_counter()
+
+        async def run_all():
+            # First do basic indexing (file discovery, no embedding yet)
+            console.info("  phase 1: file discovery...")
+            async for _progress in manager.full_index(
+                root,
+                patterns=patterns,
+                resume=resume,
+                embed=False,  # Skip embedding in first pass
+            ):
+                pass
+
+            # Now run embedding and enrichment in parallel
+            console.info("  phase 2: embedding + enrichment (parallel)...")
+
+            async def do_embedding():
+                """Compute embeddings for all indexed files."""
+                console.info("    [embed] computing embeddings...")
+                async for _progress in manager.full_index(
+                    root,
+                    patterns=patterns,
+                    resume=True,  # Resume from checkpoint
+                    embed=True,
+                ):
+                    pass
+                console.info("    [embed] done")
+
+            async def do_enrichment():
+                """Run LLM enrichment."""
+                console.info("    [enrich] starting LLM enrichment...")
+                result = await enrich_codebase(
+                    root=root,
+                    roles=[self.enrich_role],
+                    agent_command="claude",
+                    fast_mode=False,
+                    question_budget=self.enrich_budget,
+                    output=None,
+                    store_in_index=True,
+                    map_files=True,
+                    compact_after=False,  # Compact once at end
+                    progress_callback=lambda p: None,  # Quiet
+                )
+                console.info(
+                    f"    [enrich] done ({len(result.questions)} questions)"
+                )
+                return result
+
+            # Run both in parallel
+            embed_task = asyncio.create_task(do_embedding())
+            enrich_task = asyncio.create_task(do_enrichment())
+
+            await asyncio.gather(embed_task, enrich_task)
+
+            # Compact once at the end
+            console.info("  phase 3: compacting...")
+            manager.compact_vectors(force=False)
+
+        try:
+            asyncio.run(run_all())
+            elapsed = time.perf_counter() - start_time
+            console.success(f"index + enrich complete in {elapsed:.1f}s")
+            return 0
+        except FileNotFoundError as e:
+            console.error(f"agent not found: {e}")
+            console.info("make sure 'claude' is installed and in PATH")
+            return 1
+        except Exception as e:
+            console.error(f"failed: {e}")
+            return 1
 
     def _run_enrichment(self, root: Path) -> int:
         """Run LLM enrichment after indexing."""
