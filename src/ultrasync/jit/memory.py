@@ -35,6 +35,9 @@ class MemoryEntry:
     tags: list[str]
     created_at: str
     updated_at: str | None = None
+    # Usage tracking
+    access_count: int = 0
+    last_accessed: str | None = None
 
 
 @dataclass
@@ -103,10 +106,52 @@ class MemoryManager:
                 if record.updated_at
                 else None
             ),
+            access_count=record.access_count,
+            last_accessed=(
+                datetime.fromtimestamp(
+                    record.last_accessed, tz=timezone.utc
+                ).isoformat()
+                if record.last_accessed
+                else None
+            ),
         )
 
-    def _evict_oldest(self, count: int = 1) -> int:
-        """Evict the oldest memories (LRU).
+    def _compute_eviction_score(self, mem: MemoryRecord) -> float:
+        """Compute eviction priority score (lower = evict first).
+
+        Scoring combines:
+        - access_count: frequently accessed memories are valuable
+        - recency: recently accessed/created memories are valuable
+        - age penalty: very old never-accessed memories should go
+
+        Returns score where lower values = higher eviction priority.
+        """
+        import time
+
+        now = time.time()
+
+        # Base score from access count (0 if never accessed)
+        access_score = mem.access_count * 10.0
+
+        # Recency score: when was it last useful?
+        # Use last_accessed if available, else created_at
+        last_active = mem.last_accessed or mem.created_at
+        age_hours = (now - last_active) / 3600.0
+
+        # Decay: older = lower score
+        # Half-life of ~7 days (168 hours)
+        recency_score = 100.0 / (1.0 + age_hours / 168.0)
+
+        # Combine: access count matters most, recency is tiebreaker
+        return access_score + recency_score
+
+    def _evict_coldest(self, count: int = 1) -> int:
+        """Evict least-used memories (usage-based eviction).
+
+        Prefers to evict memories that:
+        - Have never been accessed (access_count = 0)
+        - Haven't been accessed recently
+        - Are old and forgotten
 
         Args:
             count: Number of memories to evict
@@ -114,13 +159,12 @@ class MemoryManager:
         Returns:
             Number of memories actually evicted
         """
-        # Get oldest memories
         all_memories = list(self.tracker.iter_memories())
         if not all_memories:
             return 0
 
-        # Sort by created_at ascending (oldest first)
-        all_memories.sort(key=lambda m: m.created_at)
+        # Sort by eviction score ascending (lowest score = evict first)
+        all_memories.sort(key=self._compute_eviction_score)
 
         evicted = 0
         for mem in all_memories[:count]:
@@ -130,9 +174,10 @@ class MemoryManager:
             if self.tracker.delete_memory(mem.id):
                 evicted += 1
                 logger.debug(
-                    "evicted old memory",
+                    "evicted cold memory",
                     memory_id=mem.id,
-                    created_at=mem.created_at,
+                    access_count=mem.access_count,
+                    last_accessed=mem.last_accessed,
                 )
 
         return evicted
@@ -148,16 +193,16 @@ class MemoryManager:
     ) -> MemoryEntry:
         """Write a structured memory entry to the JIT index.
 
-        Automatically evicts oldest memories if over max_memories limit.
+        Automatically evicts cold (unused) memories if over max_memories limit.
         """
         # Check if we need to evict before adding
         current_count = self.count()
         if current_count >= self.max_memories:
-            # Evict enough to make room
+            # Evict enough to make room (prefer cold/unused memories)
             to_evict = current_count - self.max_memories + 1
-            evicted = self._evict_oldest(to_evict)
+            evicted = self._evict_coldest(to_evict)
             logger.info(
-                "evicted memories to stay under limit",
+                "evicted cold memories to stay under limit",
                 evicted=evicted,
                 max_memories=self.max_memories,
             )
@@ -228,8 +273,14 @@ class MemoryManager:
         insight_filter: list[str] | None = None,
         tags: list[str] | None = None,
         top_k: int = 10,
+        record_access: bool = True,
     ) -> list[MemorySearchResult]:
-        """Search memories with semantic and structured filters."""
+        """Search memories with semantic and structured filters.
+
+        Args:
+            record_access: If True, record access for returned memories
+                (used for usage-based eviction). Default: True.
+        """
         candidates = self.tracker.query_memories(
             task=task,
             context_filter=context_filter,
@@ -240,6 +291,8 @@ class MemoryManager:
 
         if not candidates:
             return []
+
+        results: list[MemorySearchResult] = []
 
         if query:
             q_vec = self.provider.embed(query)
@@ -266,17 +319,24 @@ class MemoryManager:
                     scored.append((mem, score))
 
             scored.sort(key=lambda x: x[1], reverse=True)
-            return [
+            results = [
                 MemorySearchResult(
                     entry=self._record_to_entry(mem), score=score
                 )
                 for mem, score in scored[:top_k]
             ]
+        else:
+            results = [
+                MemorySearchResult(entry=self._record_to_entry(mem), score=1.0)
+                for mem in candidates[:top_k]
+            ]
 
-        return [
-            MemorySearchResult(entry=self._record_to_entry(mem), score=1.0)
-            for mem in candidates[:top_k]
-        ]
+        # Record access for returned memories (for usage-based eviction)
+        if record_access:
+            for r in results:
+                self.tracker.record_memory_access(r.entry.id)
+
+        return results
 
     def list(
         self,

@@ -130,6 +130,12 @@ class MemoryShow:
         if mem.updated_at:
             console.key_value("updated", mem.updated_at, indent=2)
 
+        console.subheader("\nUsage")
+        console.key_value("access_count", mem.access_count, indent=2)
+        console.key_value(
+            "last_accessed", mem.last_accessed or "never", indent=2
+        )
+
         if mem.insights:
             console.subheader("\nInsights")
             for insight in mem.insights:

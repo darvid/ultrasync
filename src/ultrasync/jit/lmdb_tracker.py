@@ -67,6 +67,9 @@ class MemoryRecord:
     updated_at: float | None
     vector_offset: int | None = None
     vector_length: int | None = None
+    # Usage tracking for smart eviction
+    access_count: int = 0
+    last_accessed: float | None = None
 
 
 @dataclass
@@ -1207,6 +1210,8 @@ class FileTracker:
             updated_at=r.get("updated_at"),
             vector_offset=r.get("vector_offset"),
             vector_length=r.get("vector_length"),
+            access_count=r.get("access_count", 0),
+            last_accessed=r.get("last_accessed"),
         )
 
     def query_memories(
@@ -1298,6 +1303,25 @@ class FileTracker:
             record["vector_offset"] = vector_offset
             record["vector_length"] = vector_length
             txn.put(id_data, msgpack.packb(record), db=memories_db)
+            return True
+
+    def record_memory_access(self, memory_id: str) -> bool:
+        """Record that a memory was accessed (for usage-based eviction).
+
+        Increments access_count and updates last_accessed timestamp.
+        """
+        memories_db = self._db(b"memories")
+        id_key = memory_id.encode("utf-8")
+
+        with self.env.begin(write=True) as txn:
+            data = txn.get(id_key, db=memories_db)
+            if data is None:
+                return False
+
+            record = msgpack.unpackb(data)
+            record["access_count"] = record.get("access_count", 0) + 1
+            record["last_accessed"] = time.time()
+            txn.put(id_key, msgpack.packb(record), db=memories_db)
             return True
 
     def get_recent_memories(self, limit: int = 10) -> list[MemoryRecord]:
