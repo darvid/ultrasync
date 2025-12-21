@@ -13,6 +13,11 @@ from ultrasync.jit.memory import (
     MemoryManager,
     MemorySearchResult,
 )
+from ultrasync.jit.memory_extractor import (
+    ExtractionResult,
+    MemoryExtractionConfig,
+    MemoryExtractor,
+)
 from ultrasync.jit.recency import (
     RecencyConfig,
     apply_recency_bias,
@@ -51,6 +56,10 @@ __all__ = [
     "MemoryEntry",
     "MemoryManager",
     "MemorySearchResult",
+    # Memory extraction
+    "MemoryExtractor",
+    "MemoryExtractionConfig",
+    "ExtractionResult",
     "BlobAppender",
     "BlobEntry",
     "VectorCache",

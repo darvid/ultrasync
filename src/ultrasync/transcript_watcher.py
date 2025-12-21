@@ -26,6 +26,10 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ultrasync.git import should_ignore_path
+from ultrasync.jit.memory_extractor import (
+    MemoryExtractionConfig,
+    MemoryExtractor,
+)
 from ultrasync.search_learner import ToolCallEvent
 
 if TYPE_CHECKING:
@@ -90,6 +94,10 @@ class WatcherStats:
     queries_captured: int = 0
     current_thread_id: int | None = None
     current_session_id: str | None = None
+    # memory extraction stats
+    memory_extraction_enabled: bool = False
+    memories_created: int = 0
+    memories_skipped: int = 0
 
 
 class TranscriptParser(ABC):
@@ -194,6 +202,33 @@ class TranscriptParser(ABC):
             The user's query text, or None if not a user message
         """
         return None  # default: no query extraction
+
+    def is_assistant_message(self, line: str) -> bool:
+        """Check if line is an assistant message.
+
+        Override this to enable assistant response extraction.
+
+        Args:
+            line: A single line from the transcript file
+
+        Returns:
+            True if this line represents an assistant message
+        """
+        return False  # default: no assistant detection
+
+    def extract_assistant_text(self, line: str) -> str | None:
+        """Extract assistant text from an assistant message line.
+
+        Override this to enable memory extraction from assistant responses.
+        Should extract text blocks and skip tool_use blocks.
+
+        Args:
+            line: A single line from the transcript file
+
+        Returns:
+            The assistant's text content, or None if not an assistant message
+        """
+        return None  # default: no assistant text extraction
 
     def parse_pattern_results(
         self, line: str, project_root: Path
@@ -572,6 +607,46 @@ class ClaudeCodeParser(TranscriptParser):
                     text = item.get("text", "")
                     if text:
                         text_parts.append(text)
+
+            combined = " ".join(text_parts).strip()
+            return combined if combined else None
+
+        except json.JSONDecodeError:
+            return None
+
+    def is_assistant_message(self, line: str) -> bool:
+        """Check if line is an assistant message."""
+        try:
+            entry = json.loads(line)
+            return entry.get("type") == "assistant"
+        except json.JSONDecodeError:
+            return False
+
+    def extract_assistant_text(self, line: str) -> str | None:
+        """Extract assistant text from an assistant message line."""
+        try:
+            entry = json.loads(line)
+            if entry.get("type") != "assistant":
+                return None
+
+            message = entry.get("message", {})
+            content = message.get("content", [])
+
+            # content can be a string or list of content blocks
+            if isinstance(content, str):
+                return content.strip() if content.strip() else None
+
+            # extract text blocks, skip tool_use blocks
+            text_parts = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict):
+                    if item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    # Skip tool_use, tool_result, etc.
 
             combined = " ".join(text_parts).strip()
             return combined if combined else None
@@ -991,6 +1066,55 @@ class CodexParser(TranscriptParser):
         except json.JSONDecodeError:
             return None
 
+    def is_assistant_message(self, line: str) -> bool:
+        """Check if line is an assistant message."""
+        try:
+            entry = json.loads(line)
+            # Codex uses type: "message" with role: "assistant"
+            if entry.get("type") == "message":
+                return entry.get("role") == "assistant"
+            return False
+        except json.JSONDecodeError:
+            return False
+
+    def extract_assistant_text(self, line: str) -> str | None:
+        """Extract assistant text from an assistant message line."""
+        try:
+            entry = json.loads(line)
+            is_assistant = (
+                entry.get("type") == "message"
+                and entry.get("role") == "assistant"
+            )
+            if not is_assistant:
+                return None
+
+            content = entry.get("content", [])
+
+            # content can be a list of content blocks
+            if isinstance(content, str):
+                return content.strip() if content.strip() else None
+
+            text_parts = []
+            for item in content:
+                if isinstance(item, str):
+                    text_parts.append(item)
+                elif isinstance(item, dict):
+                    # Extract text type blocks, skip function_call, etc.
+                    if item.get("type") == "output_text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    elif item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+
+            combined = " ".join(text_parts).strip()
+            return combined if combined else None
+
+        except json.JSONDecodeError:
+            return None
+
 
 class TranscriptWatcher:
     """Watch coding agent transcripts and auto-index accessed files.
@@ -1010,6 +1134,7 @@ class TranscriptWatcher:
         debounce_seconds: float = 2.0,
         enable_learning: bool | None = None,
         thread_manager: PersistentThreadManager | None = None,
+        memory_extraction_config: MemoryExtractionConfig | None = None,
     ):
         """Initialize the transcript watcher.
 
@@ -1022,6 +1147,8 @@ class TranscriptWatcher:
             enable_learning: Enable search learning (default: from env var)
             thread_manager: Optional PersistentThreadManager for session
                 thread tracking
+            memory_extraction_config: Config for auto-memory extraction
+                (default: load from env vars)
         """
         self.project_root = project_root.resolve()
         self.parser = parser or ClaudeCodeParser()
@@ -1062,14 +1189,33 @@ class TranscriptWatcher:
         self._thread_manager: PersistentThreadManager | None = thread_manager
         self._current_transcript: Path | None = None
 
+        # memory extraction (optional)
+        self._memory_extractor: MemoryExtractor | None = None
+        self._memory_config = (
+            memory_extraction_config or MemoryExtractionConfig.from_env()
+        )
+        if self._memory_config.enabled:
+            self._memory_extractor = MemoryExtractor(self._memory_config)
+            self.stats.memory_extraction_enabled = True
+            logger.info(
+                "memory extraction enabled: aggressiveness=%s",
+                self._memory_config.aggressiveness,
+            )
+
+        # turn state buffers for memory extraction
+        self._turn_assistant_text: list[str] = []
+        self._turn_tools_used: list[str] = []
+        self._turn_files_accessed: list[str] = []
+
         logger.info(
             "transcript watcher initialized: agent=%s project=%s "
-            "watch_dir=%s learning=%s threads=%s",
+            "watch_dir=%s learning=%s threads=%s memory=%s",
             self.parser.agent_name,
             self.project_root,
             self.watch_dir,
             enable_learning,
             thread_manager is not None,
+            self._memory_config.enabled,
         )
 
     def _init_learner(self) -> None:
@@ -1442,6 +1588,91 @@ class TranscriptWatcher:
         if self._thread_manager and tool_calls:
             for tc in tool_calls:
                 self._thread_manager.record_tool_use(tc.tool_name)
+
+        # memory extraction: accumulate assistant text and context
+        if self._memory_extractor:
+            # accumulate assistant text
+            assistant_text = self.parser.extract_assistant_text(line)
+            if assistant_text:
+                self._turn_assistant_text.append(assistant_text)
+                logger.debug(
+                    "accumulated assistant text: %d chars (total %d parts)",
+                    len(assistant_text),
+                    len(self._turn_assistant_text),
+                )
+
+            # accumulate tools used
+            for tc in tool_calls:
+                if tc.tool_name not in self._turn_tools_used:
+                    self._turn_tools_used.append(tc.tool_name)
+
+            # accumulate files accessed
+            for event in events:
+                path_str = str(event.path)
+                if path_str not in self._turn_files_accessed:
+                    self._turn_files_accessed.append(path_str)
+
+            # at turn boundary (user message), create memory
+            if self.parser.is_user_message(line):
+                await self._create_turn_memory()
+
+    async def _create_turn_memory(self) -> None:
+        """Create memory from accumulated assistant turn content."""
+        if not self._memory_extractor:
+            return
+
+        if not self._turn_assistant_text:
+            logger.debug("no assistant text to create memory from")
+            self._clear_turn_buffers()
+            return
+
+        # combine all text parts from this turn
+        combined_text = "\n\n".join(self._turn_assistant_text)
+
+        # extract memory
+        result = self._memory_extractor.extract(
+            text=combined_text,
+            tools_used=self._turn_tools_used,
+            files_accessed=self._turn_files_accessed,
+        )
+
+        if not result.should_create:
+            logger.debug(
+                "memory extraction skipped: %s",
+                result.skip_reason,
+            )
+            self.stats.memories_skipped += 1
+            self._clear_turn_buffers()
+            return
+
+        # write memory via JIT manager
+        try:
+            entry = self.jit_manager.memory.write(
+                text=result.text,
+                task=result.task,
+                insights=result.insights or None,
+                context=result.context or None,
+                symbol_keys=result.symbol_keys or None,
+                tags=result.tags or None,
+            )
+            self.stats.memories_created += 1
+            logger.info(
+                "auto-created memory %s: task=%s insights=%s context=%s",
+                entry.id,
+                result.task,
+                result.insights,
+                result.context,
+            )
+        except Exception as e:
+            logger.warning("failed to create auto-memory: %s", e)
+
+        self._clear_turn_buffers()
+
+    def _clear_turn_buffers(self) -> None:
+        """Clear turn-level buffers."""
+        self._turn_assistant_text.clear()
+        self._turn_tools_used.clear()
+        self._turn_files_accessed.clear()
 
     async def _index_file_full(self, path: Path) -> bool:
         """Full index with embeddings (for grep/glob results).
