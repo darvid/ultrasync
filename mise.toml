@@ -3,8 +3,8 @@ experimental = true
 
 [tools]
 python = "latest"
-uv = "latest"
 rust = "latest"
+uv = "latest"
 
 [tasks.sync]
 description = "Sync all dependencies including extras"

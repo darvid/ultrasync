@@ -31,6 +31,10 @@ class IrExtract:
         default=False,
         metadata={"help": "Include test files"},
     )
+    include_stack: bool = field(
+        default=False,
+        metadata={"help": "Include StackManifest (dependencies, versions)"},
+    )
     relative_paths: bool = field(
         default=True,
         metadata={"help": "Use relative paths in source references"},
@@ -86,6 +90,7 @@ class IrExtract:
             app_ir = extractor.extract(
                 skip_tests=not self.include_tests,
                 relative_paths=self.relative_paths,
+                include_stack=self.include_stack,
                 progress_callback=on_progress,
             )
 
@@ -419,6 +424,26 @@ def _format_ir_summary(app_ir) -> str:
         for svc in app_ir.external_services:
             usage = ", ".join(svc.usage)
             lines.append(f"- **{svc.name}**: {usage}")
+        lines.append("")
+
+    # Stack Manifest
+    if app_ir.stack:
+        lines.append("## Stack Manifest\n")
+        lines.append(f"**Project**: {app_ir.stack.id}")
+        lines.append(f"**Hash**: `{app_ir.stack.hash}`\n")
+        if app_ir.stack.components:
+            lines.append("| Package | Version | Kind |")
+            lines.append("|---------|---------|------|")
+            for comp in app_ir.stack.components[:20]:
+                kind = (
+                    comp.kind.value
+                    if hasattr(comp.kind, "value")
+                    else comp.kind
+                )
+                lines.append(f"| {comp.id} | {comp.version} | {kind} |")
+            if len(app_ir.stack.components) > 20:
+                remaining = len(app_ir.stack.components) - 20
+                lines.append(f"\n*... and {remaining} more components*")
         lines.append("")
 
     return "\n".join(lines)

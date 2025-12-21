@@ -209,6 +209,7 @@ class AppIR:
     flows: list[FeatureFlow] = field(default_factory=list)
     jobs: list[JobDef] = field(default_factory=list)
     external_services: list[ExternalService] = field(default_factory=list)
+    stack: StackManifest | None = None
 
     def _sort_items(
         self,
@@ -332,6 +333,7 @@ class AppIR:
                 }
                 for svc in services
             ],
+            **({"stack": self.stack.model_dump()} if self.stack else {}),
         }
 
     def to_markdown(
@@ -354,13 +356,13 @@ class AppIR:
 
         lines: list[str] = []
         app_name = self.meta.get("name", "Application")
-        stack = self.meta.get("detected_stack", [])
+        detected_stack = self.meta.get("detected_stack", [])
 
         # Header
         lines.append(f"# {app_name} - Application Specification")
         lines.append("")
-        if stack:
-            lines.append(f"**Stack**: {', '.join(stack)}")
+        if detected_stack:
+            lines.append(f"**Stack**: {', '.join(detected_stack)}")
             lines.append("")
 
         # Data Model section
@@ -505,6 +507,41 @@ class AppIR:
                         lines.append(f"- ... and {len(svc.sources) - 5} more")
                     lines.append("")
 
+        # Stack Manifest section
+        if self.stack:
+            lines.append("## Stack Manifest")
+            lines.append("")
+            lines.append(f"**Project**: {self.stack.id}")
+            lines.append(f"**Hash**: `{self.stack.hash}`")
+            if self.stack.lockfile_hash:
+                lines.append(f"**Lockfile Hash**: `{self.stack.lockfile_hash}`")
+            if self.stack.resolver_environment:
+                env = self.stack.resolver_environment
+                env_parts = []
+                if env.os:
+                    env_parts.append(env.os)
+                if env.arch:
+                    env_parts.append(env.arch)
+                if env.bun_version:
+                    env_parts.append(f"bun {env.bun_version}")
+                if env_parts:
+                    lines.append(f"**Environment**: {' / '.join(env_parts)}")
+            lines.append("")
+
+            if self.stack.components:
+                lines.append("### Components")
+                lines.append("")
+                lines.append("| Package | Version | Kind |")
+                lines.append("|---------|---------|------|")
+                for comp in self.stack.components:
+                    kind = (
+                        comp.kind.value
+                        if hasattr(comp.kind, "value")
+                        else comp.kind
+                    )
+                    lines.append(f"| {comp.id} | {comp.version} | {kind} |")
+                lines.append("")
+
         # Summary stats
         lines.append("---")
         lines.append("")
@@ -515,6 +552,9 @@ class AppIR:
         lines.append(f"- **Feature flows**: {len(self.flows)}")
         lines.append(f"- **Background jobs**: {len(self.jobs)}")
         lines.append(f"- **External services**: {len(self.external_services)}")
+        if self.stack:
+            comp_count = len(self.stack.components)
+            lines.append(f"- **Stack components**: {comp_count}")
 
         return "\n".join(lines)
 
@@ -1556,6 +1596,7 @@ class AppIRExtractor:
         trace_flows: bool = True,
         skip_tests: bool = True,
         relative_paths: bool = True,
+        include_stack: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> AppIR:
         """Extract full App IR from the codebase.
@@ -1564,6 +1605,7 @@ class AppIRExtractor:
             trace_flows: If True and call graph available, trace flows
             skip_tests: If True, skip test files from extraction
             relative_paths: If True, use relative paths in source refs
+            include_stack: If True, run StackDetector and include manifest
             progress_callback: Optional callback(current, total, file) for
                                progress updates during file extraction
         """
@@ -1578,7 +1620,7 @@ class AppIRExtractor:
         t0 = time.perf_counter()
         ir.meta = self._detect_meta()
         logger.debug(
-            "phase 1/5 meta detection",
+            "phase 1/4 meta detection",
             elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
             detected_stack=ir.meta.get("detected_stack", []),
         )
@@ -1590,7 +1632,7 @@ class AppIRExtractor:
             self._extract_all_single_pass(progress_callback=progress_callback)
         )
         logger.debug(
-            "phase 2/4 single-pass extraction",
+            "phase 2/4 extraction",
             elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
             entity_count=len(ir.entities),
             endpoint_count=len(ir.endpoints),
@@ -1621,6 +1663,22 @@ class AppIRExtractor:
                 endpoint_count=len(ir.endpoints),
             )
 
+        # Phase 4: Stack detection (optional)
+        t0 = time.perf_counter()
+        if include_stack:
+            from ultrasync.stack import StackDetector
+
+            detector = StackDetector(self.root)
+            ir.stack = detector.extract()
+            logger.debug(
+                "phase 4/4 stack detection",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000, 1),
+                component_count=len(ir.stack.components),
+                stack_hash=ir.stack.hash,
+            )
+        else:
+            logger.debug("phase 4/4 stack detection skipped")
+
         logger.debug(
             "IR extraction complete",
             total_elapsed_ms=(
@@ -1630,6 +1688,7 @@ class AppIRExtractor:
             endpoint_count=len(ir.endpoints),
             flow_count=len(ir.flows),
             service_count=len(ir.external_services),
+            stack_components=(len(ir.stack.components) if ir.stack else 0),
         )
 
         return ir
