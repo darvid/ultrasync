@@ -31,6 +31,14 @@ from ultrasync.cli.commands.ir import (
 )
 from ultrasync.cli.commands.keys import Keys
 from ultrasync.cli.commands.mcp import Mcp
+from ultrasync.cli.commands.memory import (
+    MemoryDelete,
+    MemoryList,
+    MemorySearch,
+    MemoryShow,
+    MemoryStats,
+    MemoryWrite,
+)
 from ultrasync.cli.commands.patterns import (
     PatternsList,
     PatternsLoad,
@@ -98,6 +106,14 @@ _ThreadsSearch = Annotated[
     ThreadsSearch, tyro.conf.subcommand("threads:search")
 ]
 
+# Memory subcommands
+_MemoryList = Annotated[MemoryList, tyro.conf.subcommand("memory:list")]
+_MemoryShow = Annotated[MemoryShow, tyro.conf.subcommand("memory:show")]
+_MemorySearch = Annotated[MemorySearch, tyro.conf.subcommand("memory:search")]
+_MemoryStats = Annotated[MemoryStats, tyro.conf.subcommand("memory:stats")]
+_MemoryWrite = Annotated[MemoryWrite, tyro.conf.subcommand("memory:write")]
+_MemoryDelete = Annotated[MemoryDelete, tyro.conf.subcommand("memory:delete")]
+
 # IR subcommands
 _IrExtract = Annotated[IrExtract, tyro.conf.subcommand("ir:extract")]
 _IrEntities = Annotated[IrEntities, tyro.conf.subcommand("ir:entities")]
@@ -150,6 +166,12 @@ Command = (
     | _ThreadsStats
     | _ThreadsForFile
     | _ThreadsSearch
+    | _MemoryList
+    | _MemoryShow
+    | _MemorySearch
+    | _MemoryStats
+    | _MemoryWrite
+    | _MemoryDelete
     | _IrExtract
     | _IrEntities
     | _IrEndpoints
