@@ -13,6 +13,12 @@ from ultrasync.jit.memory import (
     MemoryManager,
     MemorySearchResult,
 )
+from ultrasync.jit.recency import (
+    RecencyConfig,
+    apply_recency_bias,
+    compute_recency_weight,
+    get_bucket_weight,
+)
 from ultrasync.jit.search import SearchResult, SearchStats, search
 from ultrasync.jit.vector_store import (
     CompactionResult,
@@ -58,6 +64,11 @@ __all__ = [
     "search",
     "SearchResult",
     "SearchStats",
+    # Recency bias
+    "RecencyConfig",
+    "apply_recency_bias",
+    "compute_recency_weight",
+    "get_bucket_weight",
     # Lexical (optional)
     "LexicalIndex",
     "LexicalResult",

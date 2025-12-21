@@ -1490,6 +1490,8 @@ Taxonomy:
         include_source: bool = True,
         threshold: float | None = None,
         search_mode: Literal["hybrid", "semantic", "lexical"] = "hybrid",
+        recency_bias: bool = False,
+        recency_config: Literal["default", "aggressive", "mild"] | None = None,
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -1532,6 +1534,12 @@ Taxonomy:
                   queries like "authentication logic" or "error handling".
                 - "lexical": BM25 keyword matching only. Best for exact
                   symbol names like "handleSubmit" or "JITIndexManager".
+            recency_bias: If True, apply recency weighting to favor newer
+                files. Only applies to hybrid search mode. Default: False.
+            recency_config: Recency preset (requires recency_bias=True):
+                - "default": 1h=1.0, 24h=0.9, 1w=0.8, 4w=0.7, older=0.6
+                - "aggressive": 1h=1.0, 24h=0.7, 1w=0.4, older=0.2
+                - "mild": 1w=1.0, 4w=0.95, 90d=0.9, older=0.85
 
         Returns:
             TSV: Compact tab-separated format with header comments
@@ -1556,6 +1564,8 @@ Taxonomy:
             else result_type,
             include_source=include_source,
             search_mode=search_mode,
+            recency_bias=recency_bias,
+            recency_config=recency_config,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000
 

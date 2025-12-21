@@ -83,6 +83,8 @@ def search(
     result_type: str = "all",
     include_source: bool = True,
     search_mode: str = "hybrid",
+    recency_bias: bool = False,
+    recency_config: str | None = None,
 ) -> tuple[list[SearchResult], SearchStats]:
     """Multi-strategy search with automatic fallback.
 
@@ -98,6 +100,10 @@ def search(
         search_mode: Search strategy - "hybrid" (default, combines semantic
             and lexical with RRF), "semantic" (vector only), or "lexical"
             (BM25 only).
+        recency_bias: If True, apply recency weighting to favor newer files.
+            Only applies to hybrid search mode.
+        recency_config: Recency preset - "default", "aggressive", or "mild".
+            Default: 1h=1.0, 24h=0.9, 1w=0.8, 4w=0.7, older=0.6
 
     Returns:
         Tuple of (results, stats) where stats tracks which strategies were used
@@ -257,7 +263,11 @@ def search(
             )
         else:
             hybrid_results = manager.search_hybrid(
-                query, top_k, result_type=result_type
+                query,
+                top_k,
+                result_type=result_type,
+                recency_bias=recency_bias,
+                recency_config=recency_config,
             )
             stats.semantic_results = len(hybrid_results)
             stats.lexical_results = len(hybrid_results)
@@ -343,7 +353,11 @@ def search(
             manager.provider is not None or manager.lexical is not None
         ):
             hybrid_results = manager.search_hybrid(
-                query, top_k, result_type=result_type
+                query,
+                top_k,
+                result_type=result_type,
+                recency_bias=recency_bias,
+                recency_config=recency_config,
             )
             if hybrid_results:
                 logger.info(

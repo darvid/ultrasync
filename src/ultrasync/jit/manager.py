@@ -1813,6 +1813,8 @@ class JITIndexManager:
         semantic_weight: float = 1.0,
         lexical_weight: float = 1.0,
         rrf_k: int = 60,
+        recency_bias: bool = False,
+        recency_config: str | None = None,
     ) -> list[tuple[int, float, str, str]]:
         """Hybrid search combining semantic and lexical results with RRF.
 
@@ -1827,6 +1829,8 @@ class JITIndexManager:
             semantic_weight: Weight for semantic results in RRF (default 1.0)
             lexical_weight: Weight for lexical results in RRF (default 1.0)
             rrf_k: RRF parameter (higher = more emphasis on top results)
+            recency_bias: If True, apply recency weighting to favor newer files
+            recency_config: Recency preset - "default", "aggressive", or "mild"
 
         Returns:
             List of (key_hash, score, type, source) tuples where source is
@@ -1887,4 +1891,50 @@ class JITIndexManager:
                 item_type = "symbol"
             output.append((key_hash, score, item_type, source))
 
+        # Apply recency bias if requested
+        if recency_bias and output:
+            output = self._apply_recency_bias(output, recency_config)
+
         return output
+
+    def _apply_recency_bias(
+        self,
+        results: list[tuple[int, float, str, str]],
+        config_name: str | None = None,
+    ) -> list[tuple[int, float, str, str]]:
+        """Apply recency weighting to search results.
+
+        Args:
+            results: Search results (key_hash, score, type, source)
+            config_name: Preset name - "default", "aggressive", or "mild"
+
+        Returns:
+            Re-weighted and re-sorted results
+        """
+        from ultrasync.jit.recency import RecencyConfig, apply_recency_bias
+
+        # Select config preset
+        if config_name == "aggressive":
+            config = RecencyConfig.aggressive()
+        elif config_name == "mild":
+            config = RecencyConfig.mild()
+        else:
+            config = RecencyConfig.default()
+
+        # Build mtime lookup function
+        def get_mtime(key_hash: int) -> float | None:
+            # Try file first
+            file_record = self.tracker.get_file_by_key(key_hash)
+            if file_record:
+                return file_record.mtime
+
+            # For symbols, look up parent file
+            sym_record = self.tracker.get_symbol_by_key(key_hash)
+            if sym_record:
+                file_record = self.tracker.get_file(sym_record.file_path)
+                if file_record:
+                    return file_record.mtime
+
+            return None
+
+        return apply_recency_bias(results, get_mtime, config)
