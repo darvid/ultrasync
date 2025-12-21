@@ -1,10 +1,12 @@
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import numpy as np
+import structlog
 
 from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
@@ -13,6 +15,12 @@ from ultrasync.keys import hash64, mem_key
 
 if TYPE_CHECKING:
     from ultrasync.embeddings import EmbeddingProvider
+
+logger = structlog.get_logger(__name__)
+
+# Environment variable for max memory count
+ENV_MAX_MEMORIES = "ULTRASYNC_MAX_MEMORIES"
+DEFAULT_MAX_MEMORIES = 1000
 
 
 @dataclass
@@ -44,7 +52,11 @@ def create_memory_key() -> tuple[str, int]:
 
 
 class MemoryManager:
-    """Manages structured memory storage with JIT infrastructure."""
+    """Manages structured memory storage with JIT infrastructure.
+
+    Supports LRU eviction when memory count exceeds max_memories.
+    Configure via ULTRASYNC_MAX_MEMORIES env var (default: 1000).
+    """
 
     def __init__(
         self,
@@ -52,11 +64,21 @@ class MemoryManager:
         blob: BlobAppender,
         vector_cache: VectorCache,
         embedding_provider: EmbeddingProvider,
+        max_memories: int | None = None,
     ):
         self.tracker = tracker
         self.blob = blob
         self.vector_cache = vector_cache
         self.provider = embedding_provider
+
+        # Load max from env, fallback to param, fallback to default
+        env_max = os.environ.get(ENV_MAX_MEMORIES)
+        if env_max:
+            self.max_memories = int(env_max)
+        elif max_memories is not None:
+            self.max_memories = max_memories
+        else:
+            self.max_memories = DEFAULT_MAX_MEMORIES
 
     def _record_to_entry(self, record: MemoryRecord) -> MemoryEntry:
         """Convert a MemoryRecord to a MemoryEntry."""
@@ -83,6 +105,38 @@ class MemoryManager:
             ),
         )
 
+    def _evict_oldest(self, count: int = 1) -> int:
+        """Evict the oldest memories (LRU).
+
+        Args:
+            count: Number of memories to evict
+
+        Returns:
+            Number of memories actually evicted
+        """
+        # Get oldest memories
+        all_memories = list(self.tracker.iter_memories())
+        if not all_memories:
+            return 0
+
+        # Sort by created_at ascending (oldest first)
+        all_memories.sort(key=lambda m: m.created_at)
+
+        evicted = 0
+        for mem in all_memories[:count]:
+            # Evict from vector cache
+            self.vector_cache.evict(mem.key_hash)
+            # Delete from tracker (blob space not reclaimed until compact)
+            if self.tracker.delete_memory(mem.id):
+                evicted += 1
+                logger.debug(
+                    "evicted old memory",
+                    memory_id=mem.id,
+                    created_at=mem.created_at,
+                )
+
+        return evicted
+
     def write(
         self,
         text: str,
@@ -92,7 +146,22 @@ class MemoryManager:
         symbol_keys: list[int] | None = None,
         tags: list[str] | None = None,
     ) -> MemoryEntry:
-        """Write a structured memory entry to the JIT index."""
+        """Write a structured memory entry to the JIT index.
+
+        Automatically evicts oldest memories if over max_memories limit.
+        """
+        # Check if we need to evict before adding
+        current_count = self.count()
+        if current_count >= self.max_memories:
+            # Evict enough to make room
+            to_evict = current_count - self.max_memories + 1
+            evicted = self._evict_oldest(to_evict)
+            logger.info(
+                "evicted memories to stay under limit",
+                evicted=evicted,
+                max_memories=self.max_memories,
+            )
+
         mem_id, key_hash = create_memory_key()
 
         entry_data = {

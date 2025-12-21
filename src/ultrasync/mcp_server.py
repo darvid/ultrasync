@@ -46,6 +46,7 @@ def _format_search_results_tsv(
     elapsed_ms: float,
     source: str,
     hint: str | None = None,
+    memories: list[dict] | None = None,
 ) -> str:
     """Format search results as compact TSV for reduced token usage.
 
@@ -55,6 +56,8 @@ def _format_search_results_tsv(
         # type  path  name  kind  lines  score  key_hash
         F  src/foo.py  -  -  -  0.92  0x1234
         S  src/foo.py  login  func  10-25  0.89  0x5678
+        # memories (if present):
+        M  mem:abc123  task:debug  0.85  <truncated text>
 
     ~3-4x fewer tokens than JSON format.
     """
@@ -79,6 +82,16 @@ def _format_search_results_tsv(
             f"{typ}\t{r.path}\t{name}\t{kind}\t{line_range}\t{score}\t{key_hex}"
         )
 
+    # add memories section if present
+    if memories:
+        lines.append("# memories (prior context):")
+        lines.append("# id\ttask\tscore\ttext")
+        for m in memories:
+            text = m.get("text", "")[:100].replace("\n", " ")
+            task = m.get("task") or "-"
+            score = m.get("score", 0)
+            lines.append(f"M\t{m['id']}\t{task}\t{score:.2f}\t{text}")
+
     return "\n".join(lines)
 
 
@@ -88,6 +101,10 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
 
 # env var for enabling transcript watching
 ENV_WATCH_TRANSCRIPTS = "GALAXYBRAIN_WATCH_TRANSCRIPTS"
+
+# memory relevance threshold for inclusion in search results
+# memories with score below this are filtered out
+MEMORY_RELEVANCE_THRESHOLD = 0.3
 
 logger = get_logger("mcp_server")
 
@@ -685,11 +702,25 @@ After editing files, call reindex_file(path) to keep index fresh.
 </indexing>
 
 <memory>
-Write memories when: design decisions made, constraints identified,
-tradeoffs accepted, debug sessions completed, important context shared.
+Memory builds context across sessions. Prior decisions, constraints,
+and debugging findings can inform your approach before you start
+exploring or implementing.
 
-Search memories when: starting debug sessions, user references prior
-decisions, working on previously-touched files.
+Check memory_search_structured when:
+- Starting a new task (query: describe the goal briefly)
+- Beginning debug sessions (query: the error or symptom)
+- Working on files you've touched before
+- User references prior work ("remember", "we discussed", "earlier")
+- Before making architectural or design decisions
+
+This helps avoid repeating work or missing context from prior sessions.
+
+Write memories (memory_write_structured) when:
+- Making design decisions
+- Identifying constraints or limitations
+- Finding bug root causes
+- Discovering pitfalls or gotchas
+- Accepting tradeoffs
 
 Taxonomy:
 - Tasks: task:debug, task:refactor, task:implement_feature
@@ -1492,6 +1523,7 @@ Taxonomy:
         search_mode: Literal["hybrid", "semantic", "lexical"] = "hybrid",
         recency_bias: bool = False,
         recency_config: Literal["default", "aggressive", "mild"] | None = None,
+        include_memories: bool = True,
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -1499,6 +1531,8 @@ Taxonomy:
         One search() call replaces entire grep → glob → read chains.
 
         Returns ranked results WITH source code included - no Read needed.
+        Also includes relevant memories from prior sessions (decisions,
+        constraints, debugging findings) to provide context.
 
         Examples:
         - "find login component" → search("login component")
@@ -1540,11 +1574,13 @@ Taxonomy:
                 - "default": 1h=1.0, 24h=0.9, 1w=0.8, 4w=0.7, older=0.6
                 - "aggressive": 1h=1.0, 24h=0.7, 1w=0.4, older=0.2
                 - "mild": 1w=1.0, 4w=0.95, 90d=0.9, older=0.85
+            include_memories: Include relevant memories (prior decisions,
+                constraints, debugging findings) in results. Default: True.
 
         Returns:
             TSV: Compact tab-separated format with header comments
             JSON: Full results with timing, paths, symbol names, scores,
-                and source code for symbols
+                source code for symbols, and relevant memories
         """
         import time
 
@@ -1600,10 +1636,37 @@ Taxonomy:
         # apply confidence threshold - filter out low-score results
         filtered_results = [r for r in results if r.score >= threshold]
 
-        # return compact TSV format by default (3-4x fewer tokens)
+        # search memories for relevant context (shared by both formats)
+        memories_data: list[dict[str, Any]] = []
+        if include_memories:
+            try:
+                mem_results = state.jit_manager.memory.search(
+                    query=query,
+                    top_k=3,  # limit to top 3 most relevant memories
+                )
+                memories_data = [
+                    {
+                        "id": m.entry.id,
+                        "task": m.entry.task,
+                        "insights": m.entry.insights,
+                        "context": m.entry.context,
+                        "text": m.entry.text[:300],  # truncate for display
+                        "score": round(m.score, 3),
+                    }
+                    for m in mem_results
+                    if m.score >= MEMORY_RELEVANCE_THRESHOLD
+                ]
+            except Exception:
+                pass  # gracefully ignore memory search errors
+
+        # return compact TSV format (3-4x fewer tokens)
         if format == "tsv":
             return _format_search_results_tsv(
-                filtered_results, elapsed_ms, primary_source, hint
+                filtered_results,
+                elapsed_ms,
+                primary_source,
+                hint,
+                memories_data,
             )
 
         # verbose JSON format
@@ -1626,6 +1689,8 @@ Taxonomy:
                 for r in filtered_results
             ],
         }
+        if memories_data:
+            response["memories"] = memories_data
         if hint:
             response["hint"] = hint
         return response
@@ -1705,12 +1770,13 @@ Taxonomy:
         Creates a memory entry with optional taxonomy classification.
         The entry is embedded for semantic search and stored persistently.
 
-        Use automatically when:
-        - User provides reasoning about a design decision
-        - A significant constraint or limitation is identified
-        - An assumption is being made that affects implementation
-        - A tradeoff is being accepted
-        - Context is provided that may be relevant later
+        Use when:
+        - Making a design decision (insight:decision)
+        - Identifying a constraint or limitation (insight:constraint)
+        - Accepting a tradeoff (insight:tradeoff)
+        - Finding a bug root cause (task:debug + insight:decision)
+        - Discovering a pitfall or gotcha (insight:pitfall)
+        - Making an assumption that affects implementation (insight:assumption)
         - Completing a debugging session with findings
 
         Args:
@@ -1757,12 +1823,14 @@ Taxonomy:
         Combines semantic similarity with taxonomy-based filtering
         for precise memory retrieval.
 
-        Use automatically when:
-        - User begins a new debugging session
+        Use when:
+        - Starting a new task (query: describe the goal)
+        - Beginning debug sessions (query: the error/symptom)
         - User asks about prior decisions or context
         - User initiates architectural discussion
         - User references "what we discussed" or "remember when"
-        - Starting work on a file that has associated memories
+        - Working on files that may have associated memories
+        - Before making significant implementation choices
 
         Args:
             query: Natural language search query (optional)
