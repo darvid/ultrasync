@@ -1,0 +1,60 @@
+{
+  "test_case_id": "find_mcp_search",
+  "test_case_name": "Find MCP search implementation",
+  "config_name": "with-ultrasync",
+  "success": true,
+  "error": null,
+  "start_time": "2025-12-22T12:54:51.015954",
+  "end_time": "2025-12-22T12:55:13.417805",
+  "elapsed_seconds": 22.401858480996452,
+  "exit_code": 0,
+  "metrics": {
+    "tool_calls": {
+      "mcp__ultrasync__search": 1,
+      "Grep": 2,
+      "Read": 1
+    },
+    "files_accessed": [
+      "/home/david/dev/ultrasync/src/ultrasync/jit/search.py",
+      "src/ultrasync/cli/commands/memory.py",
+      "src/ultrasync/cli/commands/threads.py",
+      "src/ultrasync/hyperscan_search.py",
+      "src/ultrasync/jit/lexical.py",
+      "src/ultrasync/jit/lmdb_tracker.py",
+      "src/ultrasync/jit/manager.py",
+      "src/ultrasync/jit/memory.py",
+      "src/ultrasync/jit/search.py",
+      "src/ultrasync/jit/session_threads.py",
+      "src/ultrasync/mcp_server.py",
+      "src/ultrasync/regex_safety.py",
+      "src/ultrasync/search_learner.py",
+      "src/ultrasync/voyager.py",
+      "src/ultrasync_index.pyi",
+      "tests/test_jit_manager.py",
+      "tests/test_search_learner.py"
+    ],
+    "files_accessed_count": 17,
+    "search_queries": [
+      "[semantic] main search function handler",
+      "[grep] def search",
+      "[grep] class.*Search|def.*search.*query"
+    ],
+    "turn_count": 11,
+    "assistant_messages": 7,
+    "input_tokens": 39,
+    "output_tokens": 31,
+    "ultrasync_search_count": 1,
+    "grep_count": 2,
+    "glob_count": 0,
+    "read_count": 1,
+    "memory_reads": 0,
+    "memory_writes": 0,
+    "tool_efficiency": {
+      "total_tool_calls": 4,
+      "semantic_vs_traditional": 0.5,
+      "files_per_search": 5.666666666666667
+    }
+  },
+  "stdout_length": 67181,
+  "stderr_length": 0
+}

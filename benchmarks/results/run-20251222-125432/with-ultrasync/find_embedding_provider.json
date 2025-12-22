@@ -1,0 +1,69 @@
+{
+  "test_case_id": "find_embedding_provider",
+  "test_case_name": "Find embedding provider",
+  "config_name": "with-ultrasync",
+  "success": true,
+  "error": null,
+  "start_time": "2025-12-22T12:55:42.445292",
+  "end_time": "2025-12-22T12:56:10.284613",
+  "elapsed_seconds": 24.9068738410715,
+  "exit_code": 0,
+  "metrics": {
+    "tool_calls": {
+      "Grep": 2,
+      "Read": 1
+    },
+    "files_accessed": [
+      "/home/david/dev/ultrasync/src/ultrasync/embeddings.py",
+      "src/ultrasync/__init__.py",
+      "src/ultrasync/cli/_common.py",
+      "src/ultrasync/cli/commands/callgraph.py",
+      "src/ultrasync/cli/commands/compact.py",
+      "src/ultrasync/cli/commands/delete.py",
+      "src/ultrasync/cli/commands/grep.py",
+      "src/ultrasync/cli/commands/index.py",
+      "src/ultrasync/cli/commands/query.py",
+      "src/ultrasync/cli/commands/repl.py",
+      "src/ultrasync/cli/commands/voyager.py",
+      "src/ultrasync/cli/commands/warm.py",
+      "src/ultrasync/embeddings.py",
+      "src/ultrasync/enrich.py",
+      "src/ultrasync/file_registry.py",
+      "src/ultrasync/jit/embed_queue.py",
+      "src/ultrasync/jit/lmdb_tracker.py",
+      "src/ultrasync/jit/manager.py",
+      "src/ultrasync/jit/memory.py",
+      "src/ultrasync/jit/search.py",
+      "src/ultrasync/jit/session_threads.py",
+      "src/ultrasync/mcp_server.py",
+      "src/ultrasync/router.py",
+      "src/ultrasync/taxonomy.py",
+      "src/ultrasync/threads.py",
+      "tests/test_jit_embed_queue.py",
+      "tests/test_jit_manager.py",
+      "tests/test_taxonomy.py"
+    ],
+    "files_accessed_count": 28,
+    "search_queries": [
+      "[grep] class.*Embedding|EmbeddingProvider",
+      "[grep] def embed|\\.embed\\("
+    ],
+    "turn_count": 7,
+    "assistant_messages": 4,
+    "input_tokens": 18,
+    "output_tokens": 261,
+    "ultrasync_search_count": 0,
+    "grep_count": 2,
+    "glob_count": 0,
+    "read_count": 1,
+    "memory_reads": 0,
+    "memory_writes": 0,
+    "tool_efficiency": {
+      "total_tool_calls": 3,
+      "semantic_vs_traditional": 0.0,
+      "files_per_search": 14.0
+    }
+  },
+  "stdout_length": 61159,
+  "stderr_length": 0
+}

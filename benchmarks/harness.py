@@ -185,8 +185,17 @@ class BenchmarkHarness:
         self,
         test_case: TestCase,
         config: RunConfig,
+        session_id: str | None = None,
+        resume: bool = False,
     ) -> BenchmarkResult:
-        """Run a single test case with a specific config."""
+        """Run a single test case with a specific config.
+
+        Args:
+            test_case: The test case to run
+            config: The run configuration
+            session_id: Optional session ID for session persistence
+            resume: If True, resume existing session (keeps MCP warm)
+        """
         result = BenchmarkResult(
             test_case=test_case,
             config_name=config.name,
@@ -212,9 +221,16 @@ class BenchmarkHarness:
             str(config.max_turns),
             "--model",
             config.model,
-            "-p",
-            test_case.prompt,
         ]
+
+        # add session management flags
+        if session_id:
+            if resume:
+                cmd.extend(["--resume", session_id])
+            else:
+                cmd.extend(["--session-id", session_id])
+
+        cmd.extend(["-p", test_case.prompt])
 
         # run with timeout
         start_time = time.perf_counter()
@@ -291,8 +307,19 @@ class BenchmarkHarness:
         test_cases: list[TestCase] | None = None,
         configs: tuple[RunConfig, RunConfig] | None = None,
         parallel: bool = False,
+        use_session_resumption: bool = True,
     ) -> dict[str, list[BenchmarkResult]]:
-        """Run all test cases with both configs and return results."""
+        """Run all test cases with both configs and return results.
+
+        Args:
+            test_cases: Test cases to run (loads from cases/ if None)
+            configs: Tuple of (with-ultrasync, baseline) configs
+            parallel: Not yet implemented
+            use_session_resumption: If True, reuse sessions to avoid
+                MCP cold start on every test (fairer comparison)
+        """
+        import uuid
+
         if test_cases is None:
             test_cases = self.load_test_cases()
 
@@ -309,20 +336,55 @@ class BenchmarkHarness:
         run_dir = self.output_dir / f"run-{run_id}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        # generate session IDs for each config (for session resumption)
+        session_ids: dict[str, str] = {}
+        if use_session_resumption:
+            for config in configs:
+                session_ids[config.name] = str(uuid.uuid4())
+
         print(f"🚀 Starting benchmark run: {run_id}")
         print(f"   Project: {self.project_path}")
         print(f"   Test cases: {len(test_cases)}")
         print(f"   Configs: {configs[0].name}, {configs[1].name}")
+        if use_session_resumption:
+            print("   Session resumption: enabled (MCP stays warm)")
         print()
-        print("⚠️  Note: Each test spawns fresh claude process (MCP cold start)")
-        print()
+
+        # warmup phase if using session resumption
+        if use_session_resumption:
+            print("⏳ Warming up sessions (one-time MCP cold start)...")
+            for config in configs:
+                print(f"  → {config.name}...", end=" ", flush=True)
+                warmup_case = TestCase(
+                    id="warmup",
+                    name="Warmup",
+                    prompt="Say 'ready' in one word.",
+                    category="warmup",
+                )
+                warmup_result = await self.run_single(
+                    warmup_case,
+                    config,
+                    session_id=session_ids[config.name],
+                    resume=False,  # first run creates session
+                )
+                status = "✓" if warmup_result.success else "✗"
+                print(f"{status} ({warmup_result.elapsed_seconds:.1f}s)")
+            print()
 
         for i, test_case in enumerate(test_cases, 1):
             print(f"[{i}/{len(test_cases)}] {test_case.name}")
 
             for config in configs:
                 print(f"  → {config.name}...", end=" ", flush=True)
-                result = await self.run_single(test_case, config)
+
+                # use session resumption if enabled
+                session_id = session_ids.get(config.name)
+                result = await self.run_single(
+                    test_case,
+                    config,
+                    session_id=session_id,
+                    resume=use_session_resumption,  # resume after warmup
+                )
                 results[config.name].append(result)
 
                 status = "✓" if result.success else "✗"
