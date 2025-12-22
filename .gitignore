@@ -18,3 +18,4 @@ Cargo.lock
 
 .ultrasync/
 .infinity_cache/
+benchmarks/results/
