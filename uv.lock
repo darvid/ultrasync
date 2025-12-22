@@ -1689,6 +1689,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+benchmark = [
+    { name = "pyyaml" },
+]
 cli = [
     { name = "rich" },
     { name = "textual" },
@@ -1721,6 +1724,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "msgpack", specifier = ">=1.1.0" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "pyyaml", marker = "extra == 'benchmark'", specifier = ">=6.0" },
     { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0" },
     { name = "sentence-transformers", specifier = ">=3" },
     { name = "structlog", specifier = ">=24.0" },
@@ -1729,7 +1733,7 @@ requires-dist = [
     { name = "tyro", specifier = ">=0.9" },
     { name = "ultrasync-index", editable = "crates/ultrasync_index" },
 ]
-provides-extras = ["cli", "infinity", "lexical"]
+provides-extras = ["benchmark", "cli", "infinity", "lexical"]
 
 [package.metadata.requires-dev]
 dev = [

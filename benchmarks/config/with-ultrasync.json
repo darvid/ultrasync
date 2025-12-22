@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ultrasync": {
+      "command": "uv",
+      "args": ["run", "--directory", "${ULTRASYNC_DIR}", "ultrasync"],
+      "env": {
+        "ULTRASYNC_PROJECT_ROOT": "${PROJECT_ROOT}"
+      }
+    }
+  }
+}

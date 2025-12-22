@@ -5,8 +5,6 @@ readme = "README.md"
 requires-python = ">=3.14"
 authors = [{ name = "David Gidwani", email = "david.gidwani@gmail.com" }]
 dependencies = [
-  "tyro>=0.9",
-  "ultrasync-index",
   "hyperscan>=0.8.0",
   "lmdb>=1.5.1",
   "mcp>=1.2.0",
@@ -14,12 +12,17 @@ dependencies = [
   "numpy>=1.24",
   "sentence-transformers>=3",
   "structlog>=24.0",
+  "tyro>=0.9",
+  "ultrasync-index",
 ]
 
 [project.scripts]
 ultrasync = "ultrasync._entry:main"
 
 [project.optional-dependencies]
+benchmark = [
+  "pyyaml>=6.0",  # for loading test cases
+]
 cli = [
   "rich>=13.0",
   "textual>=0.50",
