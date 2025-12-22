@@ -198,10 +198,12 @@ class BenchmarkHarness:
 
         # build claude command
         # use stream-json + verbose to get full transcript with tool calls
+        # strict-mcp-config ignores user-level MCP servers for clean comparison
         cmd = [
             "claude",
             "--mcp-config",
             str(mcp_config),
+            "--strict-mcp-config",
             "--print",
             "--output-format",
             "stream-json",
