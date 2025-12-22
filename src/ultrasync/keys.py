@@ -124,3 +124,16 @@ def pattern_key(slug: str) -> str:
 def hash64_mem_key(uuid8: str) -> int:
     """Hash a memory key to 64-bit integer."""
     return hash64(mem_key(uuid8))
+
+
+def conv_key(uuid8: str) -> str:
+    """Construct a convention key string.
+
+    Format: conv:{uuid8}
+    """
+    return f"conv:{uuid8}"
+
+
+def hash64_conv_key(uuid8: str) -> int:
+    """Hash a convention key to 64-bit integer."""
+    return hash64(conv_key(uuid8))

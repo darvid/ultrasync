@@ -18,6 +18,19 @@ from ultrasync.cli.commands.anchors import (
 )
 from ultrasync.cli.commands.callgraph import Callgraph
 from ultrasync.cli.commands.compact import Compact
+from ultrasync.cli.commands.conventions import (
+    ConventionsAdd,
+    ConventionsCheck,
+    ConventionsDelete,
+    ConventionsDiscover,
+    ConventionsExport,
+    ConventionsGeneratePrompt,
+    ConventionsImport,
+    ConventionsList,
+    ConventionsSearch,
+    ConventionsShow,
+    ConventionsStats,
+)
 from ultrasync.cli.commands.delete import Delete
 from ultrasync.cli.commands.enrich import Enrich, EnrichClear, EnrichList
 from ultrasync.cli.commands.grep import Grep, Sgrep
@@ -133,6 +146,42 @@ _Enrich = Annotated[Enrich, tyro.conf.subcommand("enrich")]
 _EnrichList = Annotated[EnrichList, tyro.conf.subcommand("enrich:list")]
 _EnrichClear = Annotated[EnrichClear, tyro.conf.subcommand("enrich:clear")]
 
+# Conventions subcommands
+_ConventionsList = Annotated[
+    ConventionsList, tyro.conf.subcommand("conventions:list")
+]
+_ConventionsShow = Annotated[
+    ConventionsShow, tyro.conf.subcommand("conventions:show")
+]
+_ConventionsSearch = Annotated[
+    ConventionsSearch, tyro.conf.subcommand("conventions:search")
+]
+_ConventionsAdd = Annotated[
+    ConventionsAdd, tyro.conf.subcommand("conventions:add")
+]
+_ConventionsDelete = Annotated[
+    ConventionsDelete, tyro.conf.subcommand("conventions:delete")
+]
+_ConventionsStats = Annotated[
+    ConventionsStats, tyro.conf.subcommand("conventions:stats")
+]
+_ConventionsDiscover = Annotated[
+    ConventionsDiscover, tyro.conf.subcommand("conventions:discover")
+]
+_ConventionsCheck = Annotated[
+    ConventionsCheck, tyro.conf.subcommand("conventions:check")
+]
+_ConventionsExport = Annotated[
+    ConventionsExport, tyro.conf.subcommand("conventions:export")
+]
+_ConventionsImport = Annotated[
+    ConventionsImport, tyro.conf.subcommand("conventions:import")
+]
+_ConventionsGeneratePrompt = Annotated[
+    ConventionsGeneratePrompt,
+    tyro.conf.subcommand("conventions:generate-prompt"),
+]
+
 # Top-level commands using pipe syntax
 Command = (
     _Index
@@ -183,6 +232,17 @@ Command = (
     | _Enrich
     | _EnrichList
     | _EnrichClear
+    | _ConventionsList
+    | _ConventionsShow
+    | _ConventionsSearch
+    | _ConventionsAdd
+    | _ConventionsDelete
+    | _ConventionsStats
+    | _ConventionsDiscover
+    | _ConventionsCheck
+    | _ConventionsExport
+    | _ConventionsImport
+    | _ConventionsGeneratePrompt
 )
 
 

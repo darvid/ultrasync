@@ -13,6 +13,7 @@ from ultrasync.git import get_tracked_files, should_ignore_path
 from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
 from ultrasync.jit.embed_queue import EmbedQueue
+from ultrasync.jit.conventions import ConventionManager
 from ultrasync.jit.lmdb_tracker import FileTracker
 from ultrasync.jit.memory import MemoryManager
 from ultrasync.jit.progress import IndexingProgress
@@ -55,6 +56,7 @@ class IndexStats:
     file_count: int
     symbol_count: int
     memory_count: int
+    convention_count: int
     blob_size_bytes: int
     vector_cache_bytes: int
     vector_cache_count: int
@@ -111,6 +113,12 @@ class JITIndexManager:
         self.scanner = FileScanner()
         self.provider = embedding_provider
         self.memory = MemoryManager(
+            tracker=self.tracker,
+            blob=self.blob,
+            vector_cache=self.vector_cache,
+            embedding_provider=embedding_provider,
+        )
+        self.conventions = ConventionManager(
             tracker=self.tracker,
             blob=self.blob,
             vector_cache=self.vector_cache,
@@ -1320,6 +1328,7 @@ class JITIndexManager:
             file_count=file_count,
             symbol_count=symbol_count,
             memory_count=self.tracker.memory_count(),
+            convention_count=self.tracker.convention_count(),
             blob_size_bytes=self.blob.size_bytes,
             vector_cache_bytes=self.vector_cache.current_bytes,
             vector_cache_count=self.vector_cache.count,

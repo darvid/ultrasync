@@ -137,6 +137,32 @@ class ThreadToolRecord:
     last_used: float
 
 
+@dataclass
+class ConventionRecord:
+    """A coding convention/standard rule."""
+
+    id: str  # conv:a1b2c3d4
+    name: str  # short identifier
+    description: str
+    category: str  # convention:naming, convention:style, etc.
+    scope: str  # JSON array of contexts
+    priority: str  # required, recommended, optional
+    good_examples: str  # JSON array
+    bad_examples: str  # JSON array
+    pattern: str | None  # optional regex for auto-detection
+    tags: str  # JSON array
+    org_id: str | None
+    blob_offset: int
+    blob_length: int
+    key_hash: int
+    created_at: float
+    updated_at: float | None
+    vector_offset: int | None = None
+    vector_length: int | None = None
+    times_applied: int = 0
+    last_applied: float | None = None
+
+
 def _pack_u64(val: int) -> bytes:
     """Pack u64 as big-endian for lexicographic ordering."""
     return struct.pack(">Q", val)
@@ -222,6 +248,11 @@ class FileTracker:
         b"thread_tools",  # thread_id|tool_name -> ThreadToolRecord
         b"counters",  # counter_name -> u64
         b"context_index",  # context|path -> ""
+        b"conventions",  # conv_id -> ConventionRecord
+        b"conventions_by_key",  # key_hash(u64) -> conv_id
+        b"conventions_by_scope",  # context|conv_id -> ""
+        b"conventions_by_cat",  # category|conv_id -> ""
+        b"conventions_by_org",  # org_id|conv_id -> ""
     ]
 
     def __init__(
@@ -2280,6 +2311,353 @@ class FileTracker:
 
         results.sort(key=lambda t: t.tool_count, reverse=True)
         return results
+
+    def upsert_convention(
+        self,
+        id: str,
+        name: str,
+        description: str,
+        category: str,
+        scope: str,
+        priority: str,
+        good_examples: str,
+        bad_examples: str,
+        pattern: str | None,
+        tags: str,
+        org_id: str | None,
+        blob_offset: int,
+        blob_length: int,
+        key_hash: int,
+    ) -> None:
+        """Insert or update a convention record."""
+        now = time.time()
+        id_key = id.encode("utf-8")
+
+        conv_db = self._db(b"conventions")
+        conv_by_key_db = self._db(b"conventions_by_key")
+        conv_by_scope_db = self._db(b"conventions_by_scope")
+        conv_by_cat_db = self._db(b"conventions_by_cat")
+        conv_by_org_db = self._db(b"conventions_by_org")
+
+        with self.env.begin(write=True) as txn:
+            # check for existing to clean up old indexes
+            existing = txn.get(id_key, db=conv_db)
+            created_at = now
+            times_applied = 0
+            last_applied = None
+
+            if existing:
+                old_record = msgpack.unpackb(existing)
+                created_at = old_record.get("created_at", now)
+                times_applied = old_record.get("times_applied", 0)
+                last_applied = old_record.get("last_applied")
+
+                # clean up old key_hash index if changed
+                old_key = old_record.get("key_hash")
+                if old_key and old_key != key_hash:
+                    txn.delete(_pack_u64(old_key), db=conv_by_key_db)
+
+                # clean up old scope indexes
+                old_scope = old_record.get("scope")
+                if old_scope:
+                    for ctx in json.loads(old_scope):
+                        ctx_key = _composite_key(ctx, id)
+                        txn.delete(ctx_key, db=conv_by_scope_db)
+
+                # clean up old category index
+                old_cat = old_record.get("category")
+                if old_cat:
+                    cat_key = _composite_key(old_cat, id)
+                    txn.delete(cat_key, db=conv_by_cat_db)
+
+                # clean up old org index
+                old_org = old_record.get("org_id")
+                if old_org:
+                    org_key = _composite_key(old_org, id)
+                    txn.delete(org_key, db=conv_by_org_db)
+
+            record = {
+                "id": id,
+                "name": name,
+                "description": description,
+                "category": category,
+                "scope": scope,
+                "priority": priority,
+                "good_examples": good_examples,
+                "bad_examples": bad_examples,
+                "pattern": pattern,
+                "tags": tags,
+                "org_id": org_id,
+                "blob_offset": blob_offset,
+                "blob_length": blob_length,
+                "key_hash": key_hash,
+                "created_at": created_at,
+                "updated_at": now if existing else None,
+                "vector_offset": None,
+                "vector_length": None,
+                "times_applied": times_applied,
+                "last_applied": last_applied,
+            }
+
+            # write primary record
+            txn.put(id_key, msgpack.packb(record), db=conv_db)
+
+            # write key_hash index
+            txn.put(_pack_u64(key_hash), id_key, db=conv_by_key_db)
+
+            # write scope indexes
+            scope_list = json.loads(scope) if scope else []
+            for ctx in scope_list:
+                ctx_key = _composite_key(ctx, id)
+                txn.put(ctx_key, b"", db=conv_by_scope_db)
+
+            # write category index
+            cat_key = _composite_key(category, id)
+            txn.put(cat_key, b"", db=conv_by_cat_db)
+
+            # write org index
+            if org_id:
+                org_key = _composite_key(org_id, id)
+                txn.put(org_key, b"", db=conv_by_org_db)
+
+    def get_convention(self, conv_id: str) -> ConventionRecord | None:
+        """Get convention record by ID."""
+        with self.env.begin(db=self._db(b"conventions")) as txn:
+            data = txn.get(conv_id.encode("utf-8"))
+            if data is None:
+                return None
+            return self._unpack_convention_record(data)
+
+    def get_convention_by_key(self, key_hash: int) -> ConventionRecord | None:
+        """Get convention record by key hash."""
+        with self.env.begin() as txn:
+            conv_key_db = self._db(b"conventions_by_key")
+            id_data = txn.get(_pack_u64(key_hash), db=conv_key_db)
+            if id_data is None:
+                return None
+            data = txn.get(id_data, db=self._db(b"conventions"))
+            if data is None:
+                return None
+            return self._unpack_convention_record(data)
+
+    def _unpack_convention_record(self, data: bytes) -> ConventionRecord:
+        """Unpack msgpack data to ConventionRecord."""
+        r = msgpack.unpackb(data)
+        return ConventionRecord(
+            id=r["id"],
+            name=r["name"],
+            description=r["description"],
+            category=r["category"],
+            scope=r["scope"],
+            priority=r["priority"],
+            good_examples=r["good_examples"],
+            bad_examples=r["bad_examples"],
+            pattern=r.get("pattern"),
+            tags=r["tags"],
+            org_id=r.get("org_id"),
+            blob_offset=r["blob_offset"],
+            blob_length=r["blob_length"],
+            key_hash=r["key_hash"],
+            created_at=r["created_at"],
+            updated_at=r.get("updated_at"),
+            vector_offset=r.get("vector_offset"),
+            vector_length=r.get("vector_length"),
+            times_applied=r.get("times_applied", 0),
+            last_applied=r.get("last_applied"),
+        )
+
+    def query_conventions(
+        self,
+        category: str | None = None,
+        scope_filter: list[str] | None = None,
+        priority: str | None = None,
+        org_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ConventionRecord]:
+        """Query conventions with filters."""
+        results: list[ConventionRecord] = []
+
+        with self.env.begin(db=self._db(b"conventions")) as txn:
+            cursor = txn.cursor()
+            for _, value in cursor:
+                record = self._unpack_convention_record(value)
+
+                # apply filters
+                if category and record.category != category:
+                    continue
+                if priority and record.priority != priority:
+                    continue
+                if org_id and record.org_id != org_id:
+                    continue
+                if scope_filter:
+                    scope_list = (
+                        json.loads(record.scope) if record.scope else []
+                    )
+                    # convention applies if it has empty scope (global) or
+                    # any of its scopes match the filter
+                    if scope_list and not any(
+                        s in scope_filter for s in scope_list
+                    ):
+                        continue
+
+                results.append(record)
+
+        # sort by priority then name
+        priority_order = {"required": 0, "recommended": 1, "optional": 2}
+        results.sort(key=lambda c: (priority_order.get(c.priority, 3), c.name))
+        return results[offset : offset + limit]
+
+    def iter_conventions_by_scope(
+        self,
+        context: str,
+    ) -> Iterator[ConventionRecord]:
+        """Iterate over conventions applicable to a context."""
+        prefix = context.encode("utf-8") + b"\x00"
+        conv_db = self._db(b"conventions")
+        conv_by_scope_db = self._db(b"conventions_by_scope")
+
+        with self.env.begin() as txn:
+            cursor = txn.cursor(db=conv_by_scope_db)
+            if not cursor.set_range(prefix):
+                return
+
+            for key, _ in cursor:
+                if not key.startswith(prefix):
+                    break
+                # extract conv_id from composite key
+                conv_id = key[len(prefix) :]
+                record_data = txn.get(conv_id, db=conv_db)
+                if record_data:
+                    yield self._unpack_convention_record(record_data)
+
+    def iter_conventions_by_category(
+        self,
+        category: str,
+    ) -> Iterator[ConventionRecord]:
+        """Iterate over conventions in a category."""
+        prefix = category.encode("utf-8") + b"\x00"
+        conv_db = self._db(b"conventions")
+        conv_by_cat_db = self._db(b"conventions_by_cat")
+
+        with self.env.begin() as txn:
+            cursor = txn.cursor(db=conv_by_cat_db)
+            if not cursor.set_range(prefix):
+                return
+
+            for key, _ in cursor:
+                if not key.startswith(prefix):
+                    break
+                conv_id = key[len(prefix) :]
+                record_data = txn.get(conv_id, db=conv_db)
+                if record_data:
+                    yield self._unpack_convention_record(record_data)
+
+    def delete_convention(self, conv_id: str) -> bool:
+        """Delete a convention record."""
+        id_key = conv_id.encode("utf-8")
+        conv_db = self._db(b"conventions")
+        conv_by_key_db = self._db(b"conventions_by_key")
+        conv_by_scope_db = self._db(b"conventions_by_scope")
+        conv_by_cat_db = self._db(b"conventions_by_cat")
+        conv_by_org_db = self._db(b"conventions_by_org")
+
+        with self.env.begin(write=True) as txn:
+            data = txn.get(id_key, db=conv_db)
+            if data is None:
+                return False
+
+            record = msgpack.unpackb(data)
+
+            # clean up key_hash index
+            txn.delete(_pack_u64(record["key_hash"]), db=conv_by_key_db)
+
+            # clean up scope indexes
+            scope = record.get("scope")
+            if scope:
+                for ctx in json.loads(scope):
+                    ctx_key = _composite_key(ctx, conv_id)
+                    txn.delete(ctx_key, db=conv_by_scope_db)
+
+            # clean up category index
+            cat = record.get("category")
+            if cat:
+                cat_key = _composite_key(cat, conv_id)
+                txn.delete(cat_key, db=conv_by_cat_db)
+
+            # clean up org index
+            org = record.get("org_id")
+            if org:
+                org_key = _composite_key(org, conv_id)
+                txn.delete(org_key, db=conv_by_org_db)
+
+            # delete primary record
+            txn.delete(id_key, db=conv_db)
+            return True
+
+    def convention_count(self) -> int:
+        """Count total conventions."""
+        with self.env.begin(db=self._db(b"conventions")) as txn:
+            return txn.stat()["entries"]
+
+    def iter_conventions(self) -> Iterator[ConventionRecord]:
+        """Iterate over all conventions."""
+        with self.env.begin(db=self._db(b"conventions")) as txn:
+            cursor = txn.cursor()
+            for _, value in cursor:
+                yield self._unpack_convention_record(value)
+
+    def update_convention_vector(
+        self,
+        key_hash: int,
+        vector_offset: int,
+        vector_length: int,
+    ) -> bool:
+        """Update vector location for a convention."""
+        conv_db = self._db(b"conventions")
+        conv_by_key_db = self._db(b"conventions_by_key")
+
+        with self.env.begin(write=True) as txn:
+            id_data = txn.get(_pack_u64(key_hash), db=conv_by_key_db)
+            if id_data is None:
+                return False
+
+            data = txn.get(id_data, db=conv_db)
+            if data is None:
+                return False
+
+            record = msgpack.unpackb(data)
+            record["vector_offset"] = vector_offset
+            record["vector_length"] = vector_length
+            txn.put(id_data, msgpack.packb(record), db=conv_db)
+            return True
+
+    def record_convention_applied(self, conv_id: str) -> bool:
+        """Record that a convention was surfaced/applied."""
+        conv_db = self._db(b"conventions")
+        id_key = conv_id.encode("utf-8")
+
+        with self.env.begin(write=True) as txn:
+            data = txn.get(id_key, db=conv_db)
+            if data is None:
+                return False
+
+            record = msgpack.unpackb(data)
+            record["times_applied"] = record.get("times_applied", 0) + 1
+            record["last_applied"] = time.time()
+            txn.put(id_key, msgpack.packb(record), db=conv_db)
+            return True
+
+    def get_convention_stats(self) -> dict[str, int]:
+        """Get count of conventions by category."""
+        counts: dict[str, int] = {}
+        with self.env.begin(db=self._db(b"conventions")) as txn:
+            cursor = txn.cursor()
+            for _, value in cursor:
+                record = msgpack.unpackb(value)
+                cat = record["category"]
+                counts[cat] = counts.get(cat, 0) + 1
+        return counts
 
     def get_db_stats(self) -> dict[str, Any]:
         """Get LMDB database statistics.

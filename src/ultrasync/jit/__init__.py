@@ -1,7 +1,21 @@
 from ultrasync.jit.blob import BlobAppender, BlobEntry
 from ultrasync.jit.cache import VectorCache
+from ultrasync.jit.convention_discovery import (
+    ConventionDiscovery,
+    DiscoveredRule,
+    DiscoveryResult,
+    discover_and_import,
+)
+from ultrasync.jit.conventions import (
+    CONVENTION_CATEGORIES,
+    ConventionEntry,
+    ConventionManager,
+    ConventionSearchResult,
+    ConventionViolation,
+)
 from ultrasync.jit.embed_queue import EmbedQueue
 from ultrasync.jit.lmdb_tracker import (
+    ConventionRecord,
     FileRecord,
     FileTracker,
     MemoryRecord,
@@ -53,6 +67,16 @@ __all__ = [
     "FileRecord",
     "SymbolRecord",
     "MemoryRecord",
+    "ConventionRecord",
+    "ConventionEntry",
+    "ConventionManager",
+    "ConventionSearchResult",
+    "ConventionViolation",
+    "CONVENTION_CATEGORIES",
+    "ConventionDiscovery",
+    "DiscoveredRule",
+    "DiscoveryResult",
+    "discover_and_import",
     "MemoryEntry",
     "MemoryManager",
     "MemorySearchResult",
