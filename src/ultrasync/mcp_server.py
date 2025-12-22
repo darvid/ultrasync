@@ -375,6 +375,42 @@ class AnchorMatchInfo(BaseModel):
     pattern: str = Field(description="The pattern that matched")
 
 
+class ConventionInfo(BaseModel):
+    """Convention entry for API responses."""
+
+    id: str = Field(description="Convention ID (e.g., conv:a1b2c3d4)")
+    key_hash: str = Field(description="Hex key hash for lookups")
+    name: str = Field(description="Short identifier")
+    description: str = Field(description="Full explanation")
+    category: str = Field(description="Category (convention:naming, etc.)")
+    scope: list[str] = Field(description="Contexts this applies to")
+    priority: str = Field(description="Enforcement level")
+    good_examples: list[str] = Field(description="Correct usage examples")
+    bad_examples: list[str] = Field(description="Violation examples")
+    pattern: str | None = Field(description="Regex for auto-detection")
+    tags: list[str] = Field(description="Free-form tags")
+    org_id: str | None = Field(description="Organization ID")
+    times_applied: int = Field(description="Usage count")
+
+
+class ConventionSearchResultItem(BaseModel):
+    """A convention search result."""
+
+    convention: ConventionInfo
+    score: float = Field(description="Relevance score")
+
+
+class ConventionViolationInfo(BaseModel):
+    """A convention violation found in code."""
+
+    convention_id: str
+    convention_name: str
+    priority: str
+    matches: list[list[Any]] = Field(
+        description="Matches as [start, end, matched_text]"
+    )
+
+
 class WatcherStatsInfo(BaseModel):
     """Statistics about transcript watcher activity."""
 
@@ -881,6 +917,20 @@ Taxonomy:
 - Insights: insight:decision, insight:constraint, insight:pitfall
 - Context: context:frontend, context:backend, context:auth, context:api
 </memory>
+
+<conventions>
+Conventions are coding standards extracted from linter configs (eslint,
+ruff, biome, etc.) that should guide code generation.
+
+When starting work on a new project:
+1. Run convention_discover() to import conventions from linter configs
+2. If conventions are found, suggest running
+   `ultrasync conventions:generate-prompt --output CLAUDE.md --append`
+   to add them to the project's CLAUDE.md for persistent awareness
+
+search() automatically surfaces applicable conventions based on the
+contexts detected in search results.
+</conventions>
 """,
     )
 
@@ -1823,6 +1873,43 @@ Taxonomy:
             except Exception:
                 pass  # gracefully ignore memory search errors
 
+        # auto-surface applicable conventions based on detected contexts
+        applicable_conventions: list[dict[str, Any]] = []
+        try:
+            # collect unique contexts from results
+            contexts: set[str] = set()
+            for r in filtered_results:
+                if r.path:
+                    file_record = jit_manager.tracker.get_file_by_key(
+                        r.key_hash
+                    )
+                    if file_record and file_record.detected_contexts:
+                        import json
+
+                        ctx_list = json.loads(file_record.detected_contexts)
+                        contexts.update(ctx_list)
+
+            if contexts:
+                conv_manager = jit_manager.conventions
+                conventions = conv_manager.get_for_contexts(
+                    list(contexts), include_global=True
+                )
+                # limit to top 5 required/recommended conventions
+                for conv in conventions[:5]:
+                    if conv.priority in ("required", "recommended"):
+                        applicable_conventions.append(
+                            {
+                                "id": conv.id,
+                                "name": conv.name,
+                                "priority": conv.priority,
+                                "description": conv.description[:200],
+                            }
+                        )
+                        # record that convention was surfaced
+                        conv_manager.record_applied(conv.id)
+        except Exception:
+            pass  # gracefully ignore convention lookup errors
+
         # return compact TSV format (3-4x fewer tokens)
         if format == "tsv":
             return _format_search_results_tsv(
@@ -1864,6 +1951,11 @@ Taxonomy:
         # related memories (medium relevance) - supplementary
         if related_memories:
             response["related_memories"] = related_memories
+
+        # applicable conventions based on detected contexts
+        if applicable_conventions:
+            response["applicable_conventions"] = applicable_conventions
+
         if hint:
             response["hint"] = hint
         return response
@@ -2636,6 +2728,321 @@ Taxonomy:
             "count": len(results),
         }
 
+    def _entry_to_convention_info(entry) -> ConventionInfo:
+        """Convert ConventionEntry to ConventionInfo for API."""
+        return ConventionInfo(
+            id=entry.id,
+            key_hash=_key_to_hex(entry.key_hash) or "",
+            name=entry.name,
+            description=entry.description,
+            category=entry.category,
+            scope=entry.scope,
+            priority=entry.priority,
+            good_examples=entry.good_examples,
+            bad_examples=entry.bad_examples,
+            pattern=entry.pattern,
+            tags=entry.tags,
+            org_id=entry.org_id,
+            times_applied=entry.times_applied,
+        )
+
+    @mcp.tool()
+    def convention_add(
+        name: str,
+        description: str,
+        category: str = "convention:style",
+        scope: list[str] | None = None,
+        priority: Literal[
+            "required", "recommended", "optional"
+        ] = "recommended",
+        good_examples: list[str] | None = None,
+        bad_examples: list[str] | None = None,
+        pattern: str | None = None,
+        tags: list[str] | None = None,
+        org_id: str | None = None,
+    ) -> ConventionInfo:
+        """Add a new coding convention to the index.
+
+        Conventions are prescriptive rules for code quality that persist
+        across sessions. Use them to encode team/org standards.
+
+        Args:
+            name: Short identifier (e.g., "use-absolute-imports")
+            description: Full explanation of the convention
+            category: Type of convention (convention:naming, convention:style,
+                convention:pattern, convention:security, convention:performance,
+                convention:testing, convention:architecture)
+            scope: Contexts this applies to (e.g., ["context:frontend"])
+            priority: How strictly to enforce (required/recommended/optional)
+            good_examples: Code snippets showing correct usage
+            bad_examples: Code snippets showing violations
+            pattern: Optional regex for auto-detection of violations
+            tags: Free-form tags for filtering
+            org_id: Organization ID for sharing
+
+        Returns:
+            Created convention entry
+        """
+        manager = state.jit_manager.conventions
+        entry = manager.add(
+            name=name,
+            description=description,
+            category=category,
+            scope=scope,
+            priority=priority,
+            good_examples=good_examples,
+            bad_examples=bad_examples,
+            pattern=pattern,
+            tags=tags,
+            org_id=org_id,
+        )
+        return _entry_to_convention_info(entry)
+
+    @mcp.tool()
+    def convention_list(
+        category: str | None = None,
+        scope: list[str] | None = None,
+        org_id: str | None = None,
+        limit: int = 50,
+    ) -> list[ConventionInfo]:
+        """List conventions with optional filters.
+
+        Args:
+            category: Filter by category (e.g., "convention:naming")
+            scope: Filter by applicable contexts
+            org_id: Filter by organization
+            limit: Maximum results
+
+        Returns:
+            List of matching conventions
+        """
+        manager = state.jit_manager.conventions
+        entries = manager.list(
+            category=category,
+            scope=scope,
+            org_id=org_id,
+            limit=limit,
+        )
+        return [_entry_to_convention_info(e) for e in entries]
+
+    @mcp.tool()
+    def convention_search(
+        query: str,
+        scope: list[str] | None = None,
+        top_k: int = 10,
+    ) -> list[ConventionSearchResultItem]:
+        """Semantic search for relevant conventions.
+
+        Args:
+            query: Natural language query
+            scope: Filter by applicable contexts
+            top_k: Maximum results
+
+        Returns:
+            Ranked list of matching conventions
+        """
+        manager = state.jit_manager.conventions
+        results = manager.search(
+            query=query,
+            scope=scope,
+            top_k=top_k,
+        )
+        return [
+            ConventionSearchResultItem(
+                convention=_entry_to_convention_info(r.entry),
+                score=r.score,
+            )
+            for r in results
+        ]
+
+    @mcp.tool()
+    def convention_get(conv_id: str) -> ConventionInfo | None:
+        """Get a convention by ID.
+
+        Args:
+            conv_id: Convention ID (e.g., "conv:a1b2c3d4")
+
+        Returns:
+            Convention entry or None if not found
+        """
+        manager = state.jit_manager.conventions
+        entry = manager.get(conv_id)
+        if entry is None:
+            return None
+        return _entry_to_convention_info(entry)
+
+    @mcp.tool()
+    def convention_delete(conv_id: str) -> dict[str, Any]:
+        """Delete a convention by ID.
+
+        Args:
+            conv_id: Convention ID (e.g., "conv:a1b2c3d4")
+
+        Returns:
+            Status indicating success or failure
+        """
+        manager = state.jit_manager.conventions
+        deleted = manager.delete(conv_id)
+        return {"deleted": deleted, "conv_id": conv_id}
+
+    @mcp.tool()
+    def convention_for_context(
+        context: str,
+        include_global: bool = True,
+    ) -> list[ConventionInfo]:
+        """Get all conventions applicable to a context.
+
+        Use this before writing code to know what rules apply.
+
+        Args:
+            context: Context type (e.g., "context:frontend")
+            include_global: Include conventions with no scope restriction
+
+        Returns:
+            List of applicable conventions sorted by priority
+        """
+        manager = state.jit_manager.conventions
+        entries = manager.get_for_context(
+            context, include_global=include_global
+        )
+        return [_entry_to_convention_info(e) for e in entries]
+
+    @mcp.tool()
+    def convention_check(
+        key_hash: str,
+        context: str | None = None,
+    ) -> list[ConventionViolationInfo]:
+        """Check indexed code against applicable conventions.
+
+        Scans the code for pattern-based convention violations.
+
+        Args:
+            key_hash: Key hash of indexed code to check
+            context: Override context detection
+
+        Returns:
+            List of violations found
+        """
+        jit = state.jit_manager
+
+        # get source content
+        key = _hex_to_key(key_hash)
+        record = jit.tracker.get_file_by_key(key)
+        if record is None:
+            sym = jit.tracker.get_symbol_by_key(key)
+            if sym is None:
+                return []
+            # get symbol content from blob
+            content = jit.blob.read(sym.blob_offset, sym.blob_length)
+            code = content.decode("utf-8", errors="replace")
+        else:
+            # get file content
+            content = jit.blob.read(record.blob_offset, record.blob_length)
+            code = content.decode("utf-8", errors="replace")
+
+        manager = state.jit_manager.conventions
+        violations = manager.check_code(code, context=context)
+
+        return [
+            ConventionViolationInfo(
+                convention_id=v.convention.id,
+                convention_name=v.convention.name,
+                priority=v.convention.priority,
+                matches=[[m[0], m[1], m[2]] for m in v.matches],
+            )
+            for v in violations
+        ]
+
+    @mcp.tool()
+    def convention_stats() -> dict[str, Any]:
+        """Get convention statistics.
+
+        Returns:
+            Dict with total count and counts by category
+        """
+        manager = state.jit_manager.conventions
+        return {
+            "total": manager.count(),
+            "by_category": manager.get_stats(),
+        }
+
+    @mcp.tool()
+    def convention_export(
+        org_id: str | None = None,
+        format: Literal["yaml", "json"] = "yaml",
+    ) -> str:
+        """Export conventions for sharing across projects/teams.
+
+        Args:
+            org_id: Filter to specific organization
+            format: Output format (yaml or json)
+
+        Returns:
+            Serialized conventions
+        """
+        manager = state.jit_manager.conventions
+        if format == "yaml":
+            return manager.export_yaml(org_id=org_id)
+        return manager.export_json(org_id=org_id)
+
+    @mcp.tool()
+    def convention_import(
+        source: str,
+        org_id: str | None = None,
+        merge: bool = True,
+    ) -> dict[str, int]:
+        """Import conventions from YAML or JSON.
+
+        Args:
+            source: YAML or JSON string of conventions
+            org_id: Set org_id for all imported conventions
+            merge: Merge with existing (True) or replace (False)
+
+        Returns:
+            Import stats (added, updated, skipped)
+        """
+        manager = state.jit_manager.conventions
+        return manager.import_conventions(source, org_id=org_id, merge=merge)
+
+    @mcp.tool()
+    def convention_discover(
+        org_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Auto-discover conventions from linter configuration files.
+
+        Parses common linting tool configs (eslint, biome, ruff, prettier,
+        oxlint, etc.) and generates conventions from enabled rules.
+
+        Args:
+            org_id: Optional org ID for discovered conventions
+
+        Returns:
+            Discovery stats with counts per linter
+        """
+        from ultrasync.jit.convention_discovery import discover_and_import
+
+        root = state.root or Path(os.getcwd())
+        manager = state.jit_manager.conventions
+
+        stats = discover_and_import(root, manager, org_id=org_id)
+
+        total = sum(stats.values())
+        result: dict[str, Any] = {
+            "discovered": stats,
+            "total": total,
+            "linters_found": list(stats.keys()),
+        }
+
+        # hint to sync conventions to CLAUDE.md
+        if total > 0:
+            result["hint"] = (
+                "Conventions discovered! To make Claude aware of these during "
+                "code generation, run `ultrasync conventions:generate-prompt` "
+                "and append the output to your project's CLAUDE.md file."
+            )
+
+        return result
+
     @mcp.tool()
     def watcher_stats() -> WatcherStatsInfo | None:
         """Get transcript watcher statistics.
@@ -2739,6 +3146,221 @@ Taxonomy:
             "positions_cleared": cleared,
             "message": f"Cleared {cleared} position(s), watcher restarted",
         }
+
+    # -------------------------------------------------------------------------
+    # IR Extraction Tools
+    # -------------------------------------------------------------------------
+
+    @mcp.tool()
+    def ir_extract(
+        include: list[str] | None = None,
+        skip_tests: bool = True,
+        trace_flows: bool = True,
+        include_stack: bool = False,
+    ) -> dict[str, Any]:
+        """Extract stack-agnostic IR from the indexed codebase.
+
+        Returns entities, endpoints, flows, jobs, and external services
+        detected via pattern matching and call graph analysis.
+
+        Use this for:
+        - Understanding application structure before migration
+        - Documenting data models and API surface
+        - Identifying business logic and side effects
+
+        Args:
+            include: Components to include - "entities", "endpoints",
+                "flows", "jobs", "services". If None, includes all.
+            skip_tests: Skip test files during extraction (default: True)
+            trace_flows: Trace feature flows through call graph if available
+            include_stack: Include stack manifest (dependencies/versions)
+
+        Returns:
+            Dictionary with meta, entities, endpoints, flows, jobs,
+            and external_services
+        """
+        from ultrasync.ir import AppIRExtractor
+
+        if state.root is None:
+            raise ValueError("No project root configured")
+
+        extractor = AppIRExtractor(
+            root=state.root,
+            pattern_manager=state.pattern_manager,
+        )
+        extractor.load_call_graph()
+
+        app_ir = extractor.extract(
+            trace_flows=trace_flows,
+            skip_tests=skip_tests,
+            relative_paths=True,
+            include_stack=include_stack,
+        )
+
+        result = app_ir.to_dict(include_sources=True)
+
+        # filter components if requested
+        if include:
+            include_set = set(include)
+            filtered = {"meta": result.get("meta", {})}
+            if "entities" in include_set:
+                filtered["entities"] = result.get("entities", [])
+            if "endpoints" in include_set:
+                filtered["endpoints"] = result.get("endpoints", [])
+            if "flows" in include_set:
+                filtered["flows"] = result.get("flows", [])
+            if "jobs" in include_set:
+                filtered["jobs"] = result.get("jobs", [])
+            if "services" in include_set:
+                filtered["external_services"] = result.get(
+                    "external_services", []
+                )
+            return filtered
+
+        return result
+
+    @mcp.tool()
+    def ir_trace_endpoint(
+        method: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """Trace the implementation flow for a specific endpoint.
+
+        Returns the call chain from route handler through services
+        to data layer, with detected business rules.
+
+        Use this to understand:
+        - How a specific API endpoint is implemented
+        - What services and repositories it touches
+        - Which entities/models are accessed
+        - Business rules applied in the flow
+
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE, PATCH)
+            path: Route path (e.g., "/api/users/:id")
+
+        Returns:
+            Flow trace with call chain, touched entities,
+            and business rules
+        """
+        from ultrasync.ir import AppIRExtractor
+
+        if state.root is None:
+            raise ValueError("No project root configured")
+
+        extractor = AppIRExtractor(
+            root=state.root,
+            pattern_manager=state.pattern_manager,
+        )
+
+        if not extractor.load_call_graph():
+            return {
+                "error": "No call graph. Run 'ultrasync callgraph' first.",
+                "method": method,
+                "path": path,
+            }
+
+        # extract with flow tracing
+        app_ir = extractor.extract(
+            trace_flows=True,
+            skip_tests=True,
+            relative_paths=True,
+        )
+
+        # find matching endpoint/flow
+        method_upper = method.upper()
+
+        # normalize path for comparison (remove trailing slash)
+        path_normalized = path.rstrip("/") or "/"
+
+        # search in flows first (more detailed)
+        for flow in app_ir.flows:
+            flow_path = flow.path.rstrip("/") or "/"
+            if flow.method == method_upper and flow_path == path_normalized:
+                return {
+                    "method": flow.method,
+                    "path": flow.path,
+                    "entry_point": flow.entry_point,
+                    "entry_file": flow.entry_file,
+                    "depth": flow.depth,
+                    "touched_entities": flow.touched_entities,
+                    "nodes": [
+                        {
+                            "symbol": n.symbol,
+                            "kind": n.kind,
+                            "file": n.file,
+                            "line": n.line,
+                            "anchor_type": n.anchor_type,
+                        }
+                        for n in flow.nodes
+                    ],
+                }
+
+        # fallback: search endpoints
+        for ep in app_ir.endpoints:
+            ep_path = ep.path.rstrip("/") or "/"
+            if ep.method == method_upper and ep_path == path_normalized:
+                return {
+                    "method": ep.method,
+                    "path": ep.path,
+                    "source": ep.source,
+                    "auth": ep.auth,
+                    "flow": ep.flow,
+                    "business_rules": ep.business_rules,
+                    "side_effects": [
+                        {"type": se.type, "service": se.service}
+                        for se in ep.side_effects
+                    ],
+                }
+
+        return {
+            "error": f"Endpoint not found: {method} {path}",
+            "available_endpoints": [
+                f"{ep.method} {ep.path}" for ep in app_ir.endpoints[:20]
+            ],
+        }
+
+    @mcp.tool()
+    def ir_summarize(
+        include_flows: bool = False,
+        sort_by: Literal["none", "name", "source"] = "name",
+    ) -> str:
+        """Generate a natural language summary of the application.
+
+        Returns markdown-formatted specification suitable for
+        LLM consumption during migration tasks or documentation.
+
+        The output includes:
+        - Data model (entities, fields, relationships)
+        - API endpoints with business rules
+        - External service integrations
+        - Optionally: feature flows
+
+        Args:
+            include_flows: Include feature flow details (verbose)
+            sort_by: Sort order - "none", "name", or "source"
+
+        Returns:
+            Markdown-formatted application specification
+        """
+        from ultrasync.ir import AppIRExtractor
+
+        if state.root is None:
+            raise ValueError("No project root configured")
+
+        extractor = AppIRExtractor(
+            root=state.root,
+            pattern_manager=state.pattern_manager,
+        )
+        extractor.load_call_graph()
+
+        app_ir = extractor.extract(
+            trace_flows=include_flows,
+            skip_tests=True,
+            relative_paths=True,
+        )
+
+        return app_ir.to_markdown(include_sources=True, sort_by=sort_by)
 
     return mcp
 
