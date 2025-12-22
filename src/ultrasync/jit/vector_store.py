@@ -7,6 +7,8 @@ Stores embedding vectors in a simple binary format:
 Vectors are appended and their (offset, length) stored in the tracker.
 """
 
+import fcntl
+import os
 import shutil
 import struct
 import tempfile
@@ -79,7 +81,11 @@ class VectorStore:
         return self._size
 
     def append(self, vector: np.ndarray) -> VectorEntry:
-        """Append a vector and return its location."""
+        """Append a vector and return its location.
+
+        Uses file locking to ensure safe concurrent access from multiple
+        MCP server instances.
+        """
         if vector.dtype != np.float32:
             vector = vector.astype(np.float32)
 
@@ -88,17 +94,23 @@ class VectorStore:
         data = vector.tobytes()
         length = len(header) + len(data)
 
-        # Refresh size from actual file before appending
-        # This handles cases where another process/instance wrote to the file
-        self._size = self.path.stat().st_size
-        offset = self._size
+        # Use r+b mode with flock for atomic append
+        # This prevents race conditions when multiple processes append
+        with open(self.path, "r+b") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                # Get actual offset under lock (another process may have
+                # written since we last checked)
+                f.seek(0, os.SEEK_END)
+                offset = f.tell()
+                f.write(header)
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
-        with open(self.path, "ab") as f:
-            f.write(header)
-            f.write(data)
-            f.flush()  # ensure data hits OS buffer before returning
-
-        self._size += length
+        self._size = offset + length
         return VectorEntry(offset=offset, length=length, dim=dim)
 
     def read(self, offset: int, length: int) -> np.ndarray | None:
@@ -170,6 +182,9 @@ class VectorStore:
     ) -> tuple[CompactionResult, dict[int, tuple[int, int]]]:
         """Compact the vector store by copying only live vectors.
 
+        Uses exclusive file locking to prevent concurrent appends during
+        compaction. This is a stop-the-world operation.
+
         Args:
             live_vectors: Iterator of (key_hash, offset, length) for live
                 vectors. Must include ALL live vectors from tracker.
@@ -184,64 +199,69 @@ class VectorStore:
 
         live_list = list(live_vectors)
 
-        if not live_list:
-            self.path.write_bytes(b"")
-            self._size = 0
-            return CompactionResult(
-                bytes_before=bytes_before,
-                bytes_after=0,
-                bytes_reclaimed=bytes_before,
-                vectors_copied=0,
-                success=True,
-            ), {}
-
-        try:
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix=".dat",
-                prefix="vectors_compact_",
-                dir=self.path.parent,
-            )
-
-            new_offset = 0
-            with open(temp_fd, "wb") as temp_f:
-                with open(self.path, "rb") as src_f:
-                    for _key_hash, old_offset, length in live_list:
-                        src_f.seek(old_offset)
-                        data = src_f.read(length)
-
-                        if len(data) != length:
-                            raise ValueError(
-                                f"short read at {old_offset}: "
-                                f"expected {length}, got {len(data)}"
-                            )
-
-                        temp_f.write(data)
-                        offset_map[old_offset] = (new_offset, length)
-                        new_offset += length
-                        vectors_copied += 1
-
-            shutil.move(temp_path, self.path)
-            self._size = new_offset
-
-            return CompactionResult(
-                bytes_before=bytes_before,
-                bytes_after=new_offset,
-                bytes_reclaimed=bytes_before - new_offset,
-                vectors_copied=vectors_copied,
-                success=True,
-            ), offset_map
-
-        except Exception as e:
+        # Hold exclusive lock for entire compaction to block appends
+        with open(self.path, "r+b") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+                if not live_list:
+                    self.path.write_bytes(b"")
+                    self._size = 0
+                    return CompactionResult(
+                        bytes_before=bytes_before,
+                        bytes_after=0,
+                        bytes_reclaimed=bytes_before,
+                        vectors_copied=0,
+                        success=True,
+                    ), {}
 
-            return CompactionResult(
-                bytes_before=bytes_before,
-                bytes_after=bytes_before,
-                bytes_reclaimed=0,
-                vectors_copied=0,
-                success=False,
-                error=str(e),
-            ), {}
+                temp_fd, temp_path = tempfile.mkstemp(
+                    suffix=".dat",
+                    prefix="vectors_compact_",
+                    dir=self.path.parent,
+                )
+
+                new_offset = 0
+                with open(temp_fd, "wb") as temp_f:
+                    with open(self.path, "rb") as src_f:
+                        for _key_hash, old_offset, length in live_list:
+                            src_f.seek(old_offset)
+                            data = src_f.read(length)
+
+                            if len(data) != length:
+                                raise ValueError(
+                                    f"short read at {old_offset}: "
+                                    f"expected {length}, got {len(data)}"
+                                )
+
+                            temp_f.write(data)
+                            offset_map[old_offset] = (new_offset, length)
+                            new_offset += length
+                            vectors_copied += 1
+
+                shutil.move(temp_path, self.path)
+                self._size = new_offset
+
+                return CompactionResult(
+                    bytes_before=bytes_before,
+                    bytes_after=new_offset,
+                    bytes_reclaimed=bytes_before - new_offset,
+                    vectors_copied=vectors_copied,
+                    success=True,
+                ), offset_map
+
+            except Exception as e:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+                return CompactionResult(
+                    bytes_before=bytes_before,
+                    bytes_after=bytes_before,
+                    bytes_reclaimed=0,
+                    vectors_copied=0,
+                    success=False,
+                    error=str(e),
+                ), {}
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)

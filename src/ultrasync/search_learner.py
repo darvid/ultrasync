@@ -49,7 +49,7 @@ class ToolCallEvent:
     tool_name: str
     tool_input: dict[str, Any]
     tool_result: dict[str, Any] | list | None = None
-    timestamp: float | None = None
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass

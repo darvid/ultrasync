@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import IO, TYPE_CHECKING, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
@@ -403,6 +404,7 @@ class ServerState:
         self._enable_learning = enable_learning
         self._watcher: TranscriptWatcher | None = None
         self._watcher_started = False
+        self._watcher_lock_fd: IO[bytes] | None = None  # leader election lock
         self._persistent_thread_manager: "PersistentThreadManager | None" = None  # noqa: F821, UP037
 
     def _ensure_initialized(self) -> None:
@@ -512,8 +514,69 @@ class ServerState:
     def root(self) -> Path | None:
         return self._root
 
+    def _try_acquire_watcher_lock(self) -> bool:
+        """Try to acquire exclusive lock for transcript watching.
+
+        Uses a lock file in the data directory to ensure only one MCP server
+        instance per project runs the transcript watcher. This prevents
+        duplicate indexing and wasted compute.
+
+        Returns:
+            True if lock acquired (we're the leader), False otherwise.
+        """
+        lock_path = self._jit_data_dir / "watcher.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            # Open lock file (create if needed)
+            self._watcher_lock_fd = open(lock_path, "wb")
+
+            # Try non-blocking exclusive lock
+            fd = self._watcher_lock_fd.fileno()
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # Write our PID so it's easy to debug
+            self._watcher_lock_fd.write(f"{os.getpid()}\n".encode())
+            self._watcher_lock_fd.flush()
+
+            logger.info(
+                "acquired watcher lock (leader): pid=%d path=%s",
+                os.getpid(),
+                lock_path,
+            )
+            return True
+
+        except OSError:
+            # Lock held by another process
+            if self._watcher_lock_fd:
+                self._watcher_lock_fd.close()
+                self._watcher_lock_fd = None
+
+            logger.info(
+                "watcher lock held by another process, skipping transcript "
+                "watching (follower mode): path=%s",
+                lock_path,
+            )
+            return False
+
+    def _release_watcher_lock(self) -> None:
+        """Release the watcher lock if we hold it."""
+        if self._watcher_lock_fd:
+            try:
+                fcntl.flock(self._watcher_lock_fd.fileno(), fcntl.LOCK_UN)
+                self._watcher_lock_fd.close()
+            except OSError:
+                pass
+            self._watcher_lock_fd = None
+            logger.info("released watcher lock")
+
     async def start_watcher(self) -> None:
-        """Start the transcript watcher if configured."""
+        """Start the transcript watcher if configured.
+
+        Uses leader election to ensure only one MCP server instance per
+        project runs the transcript watcher. Other instances will skip
+        watching and just serve tool requests.
+        """
         if not self._watch_transcripts or self._watcher_started:
             return
 
@@ -528,6 +591,11 @@ class ServerState:
                 self._agent,
                 detected,
             )
+            return
+
+        # Try to become the leader (only leader runs transcript watcher)
+        if not self._try_acquire_watcher_lock():
+            # Another instance is already watching, we're in follower mode
             return
 
         await self._init_index_manager_async()
@@ -560,11 +628,14 @@ class ServerState:
         )
 
     async def stop_watcher(self) -> None:
-        """Stop the transcript watcher if running."""
+        """Stop the transcript watcher if running and release leader lock."""
         if self._watcher:
             await self._watcher.stop()
             self._watcher = None
             self._watcher_started = False
+
+        # Release leader lock so another instance can take over
+        self._release_watcher_lock()
 
     @property
     def watcher(self) -> TranscriptWatcher | None:
