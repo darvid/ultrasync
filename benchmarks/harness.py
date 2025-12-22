@@ -314,6 +314,8 @@ class BenchmarkHarness:
         print(f"   Test cases: {len(test_cases)}")
         print(f"   Configs: {configs[0].name}, {configs[1].name}")
         print()
+        print("⚠️  Note: Each test spawns fresh claude process (MCP cold start)")
+        print()
 
         for i, test_case in enumerate(test_cases, 1):
             print(f"[{i}/{len(test_cases)}] {test_case.name}")

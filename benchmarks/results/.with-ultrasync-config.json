@@ -2,9 +2,9 @@
   "mcpServers": {
     "ultrasync": {
       "command": "uv",
-      "args": ["run", "--directory", "/home/david/dev/ultrasync", "ultrasync"],
+      "args": ["run", "--directory", "/home/david/dev/ultrasync", "ultrasync", "mcp"],
       "env": {
-        "ULTRASYNC_PROJECT_ROOT": "${PROJECT_ROOT}"
+        "ULTRASYNC_PROJECT_ROOT": "/home/david/dev/ultrasync"
       }
     }
   }
