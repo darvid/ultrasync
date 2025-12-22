@@ -4,7 +4,7 @@
       "command": "uv",
       "args": ["run", "--directory", "${ULTRASYNC_DIR}", "ultrasync"],
       "env": {
-        "ULTRASYNC_PROJECT_ROOT": "${PROJECT_ROOT}"
+        "ULTRASYNC_PROJECT_ROOT": "${ULTRASYNC_PROJECT_ROOT}"
       }
     }
   }
