@@ -311,7 +311,7 @@ class EnrichList:
         for i, (question, files) in enumerate(
             list(questions.items())[: self.limit], 1
         ):
-            print(f"  {i:2}. {question[:80]}")
+            print(f"  {i:2}. {question}")
             display_files = files[:3]
             has_more = len(files) > 3
             for j, f in enumerate(display_files):
