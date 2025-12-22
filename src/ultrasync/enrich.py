@@ -189,8 +189,11 @@ class AgentConfig:
     """Configuration for LLM agent spawning."""
 
     command: str = "claude"  # claude, codex, etc.
-    args: list[str] = field(default_factory=lambda: ["-p"])
-    timeout: int = 60  # seconds per call (keep short for speed)
+    # --strict-mcp-config disables MCP servers for faster subprocess spawns
+    args: list[str] = field(
+        default_factory=lambda: ["--strict-mcp-config", "-p"]
+    )
+    timeout: int = 30  # seconds per call (faster without MCP)
     max_parallel: int = 8  # more parallel = faster
 
 
@@ -491,47 +494,83 @@ class FileMapper:
     MAPPING_PROMPT_TEMPLATE = """Given these questions about a codebase:
 {questions}
 
-And this file/symbol information:
+And these source files:
 {file_info}
 
-For each question, identify which files or symbols would help answer it.
+For each question, identify which files would help answer it.
 Output JSON format:
-{{"mappings": [{{"question": "...", "files": ["path/file.py"], "symbols": ["Cls"]}}]}}
+{{"mappings": [{{"question": "...", "files": ["path/to/file.py"]}}]}}
 
-Be specific - only include files/symbols that directly relate to the question.
-If unsure, include fewer rather than more."""
+Be specific - only include files that directly relate to the question.
+Use the exact file paths shown above."""
     # fmt: on
 
-    def __init__(self, agent: AgentSpawner, root: Path):
+    def __init__(
+        self,
+        agent: AgentSpawner,
+        root: Path,
+        jit: JITIndexManager | None = None,
+    ):
         self.agent = agent
         self.root = root
+        self.jit = jit
 
-    def _summarize_files(self, ir: AppIR, max_items: int = 100) -> str:
-        """Create file/symbol summary for mapping prompt."""
-        lines = []
+    def _summarize_files(self, ir: AppIR, max_items: int = 150) -> str:
+        """Create file summary for mapping prompt."""
+        files_with_info: dict[str, list[str]] = {}
+        root_str = str(self.root.resolve())
 
-        # Collect unique files from entities, endpoints, services
-        files_seen = set()
+        def to_relative(abs_path: str) -> str | None:
+            """Convert absolute path to relative, filtering internal files."""
+            if abs_path.startswith(root_str):
+                rel = abs_path[len(root_str) + 1 :]
+            else:
+                rel = abs_path
+            # Skip .ultrasync internal files
+            if rel.startswith(".ultrasync"):
+                return None
+            return rel
 
+        # Get all indexed files from JIT if available
+        if self.jit:
+            for file_rec in self.jit.tracker.iter_files():
+                rel_path = to_relative(file_rec.path)
+                if rel_path and rel_path not in files_with_info:
+                    files_with_info[rel_path] = []
+
+            # Add symbol info for richer context
+            for sym_rec in self.jit.tracker.iter_all_symbols():
+                rel_path = to_relative(sym_rec.file_path)
+                if rel_path and rel_path in files_with_info:
+                    # Add symbol name for context
+                    files_with_info[rel_path].append(sym_rec.name)
+
+        # Also include IR info as fallback
         for entity in ir.entities[:30]:
             source = entity.source.split(":")[0]
-            if source not in files_seen:
-                files_seen.add(source)
-                lines.append(f"- {source}: entity {entity.name}")
+            if source not in files_with_info:
+                files_with_info[source] = []
+            files_with_info[source].append(f"entity:{entity.name}")
 
         for ep in ir.endpoints[:30]:
             source = ep.source.split(":")[0]
-            if source not in files_seen:
-                files_seen.add(source)
-                lines.append(f"- {source}: endpoint {ep.method} {ep.path}")
+            if source not in files_with_info:
+                files_with_info[source] = []
+            files_with_info[source].append(f"{ep.method} {ep.path}")
 
-        for svc in ir.external_services:
-            for source in svc.sources[:3]:
-                if source not in files_seen:
-                    files_seen.add(source)
-                    lines.append(f"- {source}: uses {svc.name}")
+        # Format output
+        lines = []
+        for path, symbols in sorted(files_with_info.items())[:max_items]:
+            if symbols:
+                # Show up to 3 symbols for context
+                sym_str = ", ".join(symbols[:3])
+                if len(symbols) > 3:
+                    sym_str += f" (+{len(symbols) - 3} more)"
+                lines.append(f"- {path}: {sym_str}")
+            else:
+                lines.append(f"- {path}")
 
-        return "\n".join(lines[:max_items])
+        return "\n".join(lines)
 
     async def map_questions(
         self,
@@ -542,6 +581,16 @@ If unsure, include fewer rather than more."""
     ) -> dict[str, list[str]]:
         """Map questions to files, returning {question: [files]}."""
         file_info = self._summarize_files(ir)
+        file_count = len(file_info.split("\n")) if file_info else 0
+        logger.debug(
+            "file summary for mapping",
+            file_count=file_count,
+            jit_available=self.jit is not None,
+        )
+        if file_count == 0:
+            logger.warning(
+                "no files available for mapping - questions will be unmapped"
+            )
         mappings: dict[str, list[str]] = {}
 
         # Process in batches
@@ -560,6 +609,9 @@ If unsure, include fewer rather than more."""
 
             response = await self.agent.call(prompt)
             if not response:
+                logger.debug(
+                    "empty response from agent for batch", batch_num=batch_num
+                )
                 continue
 
             # Parse JSON from response
@@ -571,15 +623,38 @@ If unsure, include fewer rather than more."""
                     for item in data.get("mappings", []):
                         q = item.get("question", "")
                         files = item.get("files", [])
-                        # Validate files exist
+                        # Validate files exist (with path normalization)
                         valid_files = []
                         for f in files:
-                            if (self.root / f).exists():
-                                valid_files.append(f)
+                            # Clean up path (remove leading ./ or /)
+                            clean_path = f.lstrip("./").lstrip("/")
+                            file_path = self.root / clean_path
+                            if file_path.exists():
+                                valid_files.append(clean_path)
+                            else:
+                                logger.debug(
+                                    "mapped file not found",
+                                    path=clean_path,
+                                    question=q[:50],
+                                )
                         if valid_files:
                             mappings[q] = valid_files
-            except json.JSONDecodeError:
-                logger.warning("failed to parse mapping response as JSON")
+                        else:
+                            logger.debug(
+                                "no valid files for question",
+                                question=q[:50],
+                                attempted=files,
+                            )
+                else:
+                    logger.debug(
+                        "no JSON found in response", response=response[:200]
+                    )
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    "failed to parse mapping response as JSON",
+                    error=str(e),
+                    response=response[:200],
+                )
 
         return mappings
 
@@ -606,7 +681,7 @@ class IndexEnricher:
             embedding_provider,
             similarity_threshold=self.config.dedupe_threshold,
         )
-        self.mapper = FileMapper(self.agent, root)
+        self.mapper = FileMapper(self.agent, root, jit=jit_manager)
 
     async def enrich(
         self,
@@ -732,9 +807,18 @@ class IndexEnricher:
             logger.debug("skipped file mapping (fast mode)")
 
         # Build enriched questions with context inheritance
+        # Use normalized question matching since LLM may modify whitespace/punctuation
+        def normalize_q(text: str) -> str:
+            return " ".join(text.lower().split())
+
+        normalized_mappings = {normalize_q(k): v for k, v in mappings.items()}
+
         enriched: list[EnrichedQuestion] = []
         for i, q in enumerate(unique_questions):
-            files = mappings.get(q, [])
+            # Try exact match first, then normalized match
+            files = mappings.get(q) or normalized_mappings.get(
+                normalize_q(q), []
+            )
             # Inherit contexts from mapped files
             contexts: set[str] = set()
             if self.jit and files:
@@ -867,14 +951,14 @@ async def enrich_codebase(
     ir = extractor.extract(trace_flows=False, skip_tests=True)
     report(
         EnrichPhase.EXTRACTING_IR,
-        f"found {len(ir.files)} files, {len(ir.routes)} routes",
+        f"found {len(ir.entities)} entities, {len(ir.endpoints)} endpoints",
     )
 
     # Setup JIT manager for indexing
     jit = JITIndexManager(data_dir=data_dir, embedding_provider=embedder)
 
     # Configure
-    agent_config = AgentConfig(command=agent_command, args=["-p"])
+    agent_config = AgentConfig(command=agent_command)
     enrich_config = EnrichmentConfig(
         fast_mode=fast_mode,
         question_budget=question_budget,

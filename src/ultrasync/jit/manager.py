@@ -345,7 +345,7 @@ class JITIndexManager:
 
         total_ms = (t_lex - t_start) * 1000
         if total_ms > 50:  # log slow files (>50ms)
-            logger.warning(
+            logger.debug(
                 "slow file %s: %.1fms total "
                 "(needs=%.1f read=%.1f scan=%.1f hash=%.1f blob=%.1f "
                 "ctx=%.1f upsert=%.1f aot=%.1f syms[%d]=%.1f lex=%.1f)",
@@ -797,6 +797,7 @@ class JITIndexManager:
             "__pycache__",
             "*.pyc",
             ".venv",
+            ".ultrasync",
             "target",
             "dist",
         ]
@@ -1142,6 +1143,7 @@ class JITIndexManager:
         resume: bool = True,
         embed: bool = False,
         show_progress: bool = True,
+        quiet: bool = False,
     ) -> AsyncIterator[IndexProgress]:
         """Index all files in a directory.
 
@@ -1158,6 +1160,7 @@ class JITIndexManager:
             resume: Whether to resume from checkpoint
             embed: Whether to compute embeddings (slower)
             show_progress: Show rich progress bars (if available)
+            quiet: Suppress final summary message
         """
         root = root.resolve()
 
@@ -1266,12 +1269,13 @@ class JITIndexManager:
 
         self.tracker.end_batch()
 
-        progress.print_summary(
-            "Indexing Complete",
-            files=total,
-            blob_size=self.blob.size_bytes,
-            errors=len(errors),
-        )
+        if not quiet:
+            progress.print_summary(
+                "Indexing Complete",
+                files=total,
+                blob_size=self.blob.size_bytes,
+                errors=len(errors),
+            )
 
         self.tracker.clear_checkpoints()
 

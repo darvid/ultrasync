@@ -12,6 +12,7 @@ EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
         ".git",
         "__pycache__",
         ".venv",
+        ".ultrasync",  # our own index data
         "venv",
         ".tox",
         ".nox",

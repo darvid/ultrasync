@@ -17,3 +17,4 @@ target/
 Cargo.lock
 
 .ultrasync/
+.infinity_cache/

@@ -1502,6 +1502,7 @@ class FileTracker:
                 ".git",
                 "__pycache__",
                 ".venv",
+                ".ultrasync",
                 "venv",
                 "target",
                 "dist",

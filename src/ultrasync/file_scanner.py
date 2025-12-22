@@ -117,6 +117,7 @@ class FileScanner:
                 ".git",
                 "__pycache__",
                 ".venv",
+                ".ultrasync",
                 "venv",
                 "target",
                 "dist",

@@ -1,5 +1,6 @@
-"""Rich progress display for indexing operations.
+"""Minimal progress display for indexing operations.
 
+Uses transient spinners that disappear when done, like modern CLIs (uv, cargo).
 Falls back gracefully to simple stderr output if rich isn't installed.
 """
 
@@ -13,41 +14,22 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 try:
-    from rich.console import Console, Group
+    from rich.console import Console
     from rich.live import Live
-    from rich.panel import Panel
-    from rich.progress import (
-        BarColumn,
-        MofNCompleteColumn,
-        Progress,
-        SpinnerColumn,
-        TaskID,
-        TextColumn,
-        TimeElapsedColumn,
-        TimeRemainingColumn,
-    )
-    from rich.table import Table
+    from rich.spinner import Spinner
     from rich.text import Text
 
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
 
-# Fixed width for description column to prevent bouncing
-DESC_WIDTH = 30
-# Fixed panel width for consistent layout
-PANEL_WIDTH = 80
-
 
 class IndexingProgress:
-    """Progress display for indexing operations.
+    """Minimal progress display for indexing operations.
 
-    Supports multiple phases:
-    - Scanning files
-    - Embedding texts
-    - Writing vectors
-
-    Falls back to simple stderr output if rich is not installed.
+    Shows a simple spinner with status text that updates in place.
+    All progress is transient - disappears when done, leaving only
+    the final summary.
     """
 
     def __init__(
@@ -68,10 +50,9 @@ class IndexingProgress:
 
         self._console = console
         self._live: Live | None = None
-        self._progress: Progress | None = None
-        self._task_ids: dict[str, TaskID] = {}
+        self._current_text = ""
+        self._phases: dict[str, dict] = {}
         self._stats: dict[str, int | str] = {}
-        self._current_phase = ""
         self._last_pct = -1
 
     @contextmanager
@@ -79,28 +60,11 @@ class IndexingProgress:
         """Context manager for live progress display."""
         if self._use_rich:
             self._console = self._console or Console(stderr=True)
-            from rich.table import Column
-
-            self._progress = Progress(
-                SpinnerColumn(),
-                TextColumn(
-                    "[bold blue]{task.description}",
-                    table_column=Column(width=DESC_WIDTH, no_wrap=True),
-                ),
-                BarColumn(bar_width=25),
-                MofNCompleteColumn(),
-                TextColumn("•"),
-                TimeElapsedColumn(),
-                TextColumn("•"),
-                TimeRemainingColumn(),
-                console=self._console,
-                transient=False,
-                expand=False,
-            )
             with Live(
                 self._make_display(),
                 console=self._console,
                 refresh_per_second=10,
+                transient=True,  # disappears when done
             ) as live:
                 self._live = live
                 try:
@@ -110,66 +74,20 @@ class IndexingProgress:
         else:
             yield self
 
-    def _make_display(self) -> Panel:
-        """Create the display layout with progress and stats."""
-        if not self._progress:
-            return Panel(
-                "Initializing...",
-                width=PANEL_WIDTH,
-                border_style="cyan",
-            )
-
-        # Build stats table centered below progress
-        stats_table = Table.grid(padding=(0, 2))
-        stats_table.add_column(justify="left", width=20)
-        stats_table.add_column(justify="right", width=15)
-
-        for key, value in self._stats.items():
-            if isinstance(value, int) and value > 1024:
-                display_val = self._format_bytes(value)
-            else:
-                display_val = str(value)
-            stats_table.add_row(
-                Text(key, style="dim"),
-                Text(display_val, style="bold"),
-            )
-
-        # Build content with optional stats
-        if self._stats:
-            from rich.align import Align
-            from rich.rule import Rule
-
-            centered_stats = Align.center(stats_table)
-            content = Group(
-                self._progress,
-                Text(""),  # blank line
-                Rule(style="dim"),
-                centered_stats,
-            )
-        else:
-            content = self._progress
-
-        return Panel(
-            content,
-            title=f"[bold cyan]{self._current_phase or 'Indexing'}[/]",
-            border_style="cyan",
-            width=PANEL_WIDTH,
-        )
-
-    def _truncate_desc(self, text: str) -> str:
-        """Truncate description to fixed width."""
-        max_len = DESC_WIDTH - 3  # leave room for ellipsis
-        if len(text) > max_len:
-            return text[: max_len - 1] + "…"
-        return text
+    def _make_display(self) -> Text:
+        """Create the display - just a spinner with status text."""
+        spinner = Spinner("dots", style="cyan")
+        # Get the current frame of the spinner
+        spinner_text = spinner.render(0)
+        return Text.assemble(spinner_text, " ", self._current_text)
 
     def _format_bytes(self, n: int) -> str:
         """Format bytes as human-readable string."""
         for unit in ("B", "KB", "MB", "GB"):
             if abs(n) < 1024:
-                return f"{n:.1f} {unit}"
+                return f"{n:.1f}{unit}"
             n /= 1024  # type: ignore
-        return f"{n:.1f} TB"
+        return f"{n:.1f}TB"
 
     def _update_display(self) -> None:
         """Refresh the live display."""
@@ -189,18 +107,17 @@ class IndexingProgress:
             description: Human-readable description
             total: Total items (None for indeterminate)
         """
-        self._current_phase = description
+        self._phases[name] = {
+            "description": description,
+            "total": total or 0,
+            "completed": 0,
+        }
+        self._current_text = description
         self._last_pct = -1
+        self._update_display()
 
-        if self._use_rich and self._progress:
-            task_id = self._progress.add_task(
-                description,
-                total=total or 0,
-            )
-            self._task_ids[name] = task_id
-            self._update_display()
-        else:
-            print(f"\n{description}...", file=sys.stderr, flush=True)
+        if not self._use_rich:
+            print(f"{description}...", file=sys.stderr, flush=True)
 
     def update(
         self,
@@ -219,35 +136,31 @@ class IndexingProgress:
         """
         self._stats.update(stats)
 
-        if self._use_rich and self._progress and name in self._task_ids:
-            task_id = self._task_ids[name]
-            self._progress.update(task_id, advance=advance)
-            if current_item:
-                desc = self._truncate_desc(current_item)
-                self._progress.update(task_id, description=desc)
-            self._update_display()
-        else:
-            if self._progress and name in self._task_ids:
-                task = self._progress.tasks[self._task_ids[name]]
-            else:
-                task = None
-            if task:
-                completed = int(task.completed)
-                total = int(task.total) if task.total else 0
-            else:
-                completed = 0
-                total = 0
+        if name in self._phases:
+            phase = self._phases[name]
+            phase["completed"] += advance
+            completed = phase["completed"]
+            total = phase["total"]
 
             if total > 0:
-                pct = int(100 * completed / total)
-                if pct >= self._last_pct + 2 or completed == total:
-                    self._last_pct = pct
-                    item_str = f" - {current_item}" if current_item else ""
-                    print(
-                        f"[{pct:3d}%] {completed}/{total}{item_str}",
-                        file=sys.stderr,
-                        flush=True,
+                # Show: "Indexing files... 45/100"
+                if current_item:
+                    self._current_text = f"{current_item} {completed}/{total}"
+                else:
+                    self._current_text = (
+                        f"{phase['description']} {completed}/{total}"
                     )
+            else:
+                self._current_text = current_item or phase["description"]
+
+            self._update_display()
+
+            # Fallback for non-rich
+            if not self._use_rich and total > 0:
+                pct = int(100 * completed / total)
+                if pct >= self._last_pct + 10 or completed == total:
+                    self._last_pct = pct
+                    print(f"  {completed}/{total}", file=sys.stderr, flush=True)
 
     def update_absolute(
         self,
@@ -268,27 +181,31 @@ class IndexingProgress:
         """
         self._stats.update(stats)
 
-        if self._use_rich and self._progress and name in self._task_ids:
-            task_id = self._task_ids[name]
-            self._progress.update(task_id, completed=completed)
+        if name in self._phases:
+            phase = self._phases[name]
+            phase["completed"] = completed
             if total is not None:
-                self._progress.update(task_id, total=total)
-            if current_item:
-                desc = self._truncate_desc(current_item)
-                self._progress.update(task_id, description=desc)
-            self._update_display()
-        else:
-            total = total or 0
-            if total > 0:
-                pct = int(100 * completed / total)
-                if pct >= self._last_pct + 2 or completed == total:
-                    self._last_pct = pct
-                    item_str = f" - {current_item}" if current_item else ""
-                    print(
-                        f"[{pct:3d}%] {completed}/{total}{item_str}",
-                        file=sys.stderr,
-                        flush=True,
+                phase["total"] = total
+
+            t = phase["total"]
+            if t > 0:
+                if current_item:
+                    self._current_text = f"{current_item} {completed}/{t}"
+                else:
+                    self._current_text = (
+                        f"{phase['description']} {completed}/{t}"
                     )
+            else:
+                self._current_text = current_item or phase["description"]
+
+            self._update_display()
+
+            # Fallback
+            if not self._use_rich and t > 0:
+                pct = int(100 * completed / t)
+                if pct >= self._last_pct + 10 or completed == t:
+                    self._last_pct = pct
+                    print(f"  {completed}/{t}", file=sys.stderr, flush=True)
 
     def complete_phase(self, name: str, message: str | None = None) -> None:
         """Mark a phase as complete.
@@ -297,23 +214,20 @@ class IndexingProgress:
             name: Phase name
             message: Optional completion message
         """
-        if self._use_rich and self._progress and name in self._task_ids:
-            task_id = self._task_ids[name]
-            task = self._progress.tasks[task_id]
-            if task.total:
-                self._progress.update(task_id, completed=task.total)
+        if name in self._phases:
+            phase = self._phases[name]
+            if phase["total"]:
+                phase["completed"] = phase["total"]
+            self._current_text = message or f"{phase['description']} done"
             self._update_display()
-        elif message:
-            print(f"✓ {message}", file=sys.stderr, flush=True)
 
     def set_stats(self, **stats: int | str) -> None:
-        """Set stats to display below progress bar.
+        """Set stats to display (stored for final summary).
 
         Args:
             **stats: Key-value pairs to display
         """
         self._stats.update(stats)
-        self._update_display()
 
     def log(self, message: str) -> None:
         """Log a message during progress.
@@ -331,40 +245,36 @@ class IndexingProgress:
         title: str,
         **stats: int | str,
     ) -> None:
-        """Print a summary panel after indexing.
+        """Print a minimal summary after indexing.
 
         Args:
-            title: Summary title
-            **stats: Stats to display
+            title: Summary title (e.g., "Indexed 93 files")
+            **stats: Additional stats to display inline
         """
+        # Merge any accumulated stats
+        all_stats = {**self._stats, **stats}
+
+        # Build a single-line summary
+        parts = []
+        for key, value in all_stats.items():
+            if isinstance(value, int) and value > 1024:
+                display_val = self._format_bytes(value)
+            else:
+                display_val = str(value)
+            parts.append(f"{key}: {display_val}")
+
+        summary = ", ".join(parts) if parts else ""
+
         if self._use_rich:
-            from rich.align import Align
-
             console = self._console or Console(stderr=True)
-            table = Table.grid(padding=(0, 2))
-            table.add_column(justify="left", style="dim")
-            table.add_column(justify="right", style="bold green")
-
-            for key, value in stats.items():
-                if isinstance(value, int) and value > 1024:
-                    display_val = self._format_bytes(value)
-                else:
-                    display_val = str(value)
-                table.add_row(key, display_val)
-
-            centered_table = Align.center(table)
-            console.print(
-                Panel(
-                    centered_table,
-                    title=f"[bold green]{title}[/]",
-                    width=PANEL_WIDTH,
+            if summary:
+                console.print(
+                    f"[green]✓[/green] {title} [dim]({summary})[/dim]"
                 )
-            )
+            else:
+                console.print(f"[green]✓[/green] {title}")
         else:
-            print(f"\n{title}", file=sys.stderr)
-            for key, value in stats.items():
-                if isinstance(value, int) and value > 1024:
-                    display_val = self._format_bytes(value)
-                else:
-                    display_val = str(value)
-                print(f"  {key}: {display_val}", file=sys.stderr)
+            if summary:
+                print(f"✓ {title} ({summary})", file=sys.stderr)
+            else:
+                print(f"✓ {title}", file=sys.stderr)

@@ -192,6 +192,9 @@ def configure_logging(
         stderr_handler.setLevel(level)
         stderr_handler.setFormatter(console_formatter)
         stdlib_logger.addHandler(stderr_handler)
+    else:
+        # Add NullHandler to prevent "lastResort" handler from spamming stderr
+        stdlib_logger.addHandler(logging.NullHandler())
 
     # rotating file handler with JSON output
     if log_file:

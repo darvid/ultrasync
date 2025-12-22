@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from ultrasync import console
 from ultrasync.cli._common import (
@@ -16,6 +17,65 @@ from ultrasync.cli._common import (
     get_embedder_class,
 )
 from ultrasync.jit.manager import JITIndexManager
+
+if TYPE_CHECKING:
+    from ultrasync.enrich import EnrichProgress
+
+# Try to import Rich for progress display
+try:
+    from rich.console import Console
+    from rich.live import Live
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+
+
+class EnrichmentProgress:
+    """Transient progress display for enrichment."""
+
+    def __init__(self):
+        self._message = "Starting enrichment..."
+        self._live: Live | None = None
+        self._console: Console | None = None
+        self._use_rich = RICH_AVAILABLE and sys.stderr.isatty()
+
+    def _make_display(self) -> Text:
+        spinner = Spinner("dots", style="cyan")
+        spinner_text = spinner.render(0)
+        return Text.assemble(spinner_text, " ", self._message)
+
+    def update(self, progress: EnrichProgress) -> None:
+        """Update progress from callback."""
+        # Build message from phase
+        msg = progress.message
+        if progress.total > 0:
+            msg = f"{msg} ({progress.current}/{progress.total})"
+        self._message = msg
+
+        if self._live:
+            self._live.update(self._make_display())
+        elif not self._use_rich:
+            print(f"  {msg}", file=sys.stderr, flush=True)
+
+    def __enter__(self) -> EnrichmentProgress:
+        if self._use_rich:
+            self._console = Console(stderr=True)
+            self._live = Live(
+                self._make_display(),
+                console=self._console,
+                refresh_per_second=10,
+                transient=True,
+            )
+            self._live.__enter__()
+        return self
+
+    def __exit__(self, *args) -> None:
+        if self._live:
+            self._live.__exit__(*args)
+            self._live = None
 
 
 @dataclass
@@ -79,14 +139,12 @@ class Index:
         data_dir = root / DEFAULT_DATA_DIR
 
         if self.nuke and data_dir.exists():
-            console.warning(f"nuking existing index at {data_dir}...")
             shutil.rmtree(data_dir)
-            console.success("index destroyed")
 
         # only load embedding model if we're actually embedding
         if self.embed:
             EmbeddingProvider = get_embedder_class()
-            with console.status(f"loading embedding model ({self.model})..."):
+            with console.status("Loading model..."):
                 embedder = EmbeddingProvider(model=self.model)
         else:
             embedder = None
@@ -109,21 +167,22 @@ class Index:
         if self.embed and self.enrich:
             return self._run_parallel(root, data_dir, manager, patterns, resume)
 
-        # Otherwise sequential
+        # Otherwise sequential - quiet=True since we print our own summary
         async def run_index():
             async for _progress in manager.full_index(
                 root,
                 patterns=patterns,
                 resume=resume,
                 embed=self.embed,
+                quiet=True,
             ):
                 pass
             return manager.get_stats()
 
-        asyncio.run(run_index())
+        stats = asyncio.run(run_index())
 
         elapsed = time.perf_counter() - start_time
-        console.success(f"indexing complete in {elapsed:.2f}s")
+        console.success(f"Indexed {stats.file_count} files in {elapsed:.1f}s")
 
         # Run enrichment if requested (without embed)
         if self.enrich:
@@ -142,39 +201,34 @@ class Index:
         """Run indexing with embedding and enrichment in parallel."""
         from ultrasync.enrich import enrich_codebase
 
-        console.info("running embedding + enrichment in parallel...")
         start_time = time.perf_counter()
+        progress = EnrichmentProgress()
 
         async def run_all():
             # First do basic indexing (file discovery, no embedding yet)
-            console.info("  phase 1: file discovery...")
+            # quiet=True since we print our own summary at the end
             async for _progress in manager.full_index(
                 root,
                 patterns=patterns,
                 resume=resume,
-                embed=False,  # Skip embedding in first pass
+                embed=False,
+                quiet=True,
             ):
                 pass
 
             # Now run embedding and enrichment in parallel
-            console.info("  phase 2: embedding + enrichment (parallel)...")
-
             async def do_embedding():
-                """Compute embeddings for all indexed files."""
-                console.info("    [embed] computing embeddings...")
                 async for _progress in manager.full_index(
                     root,
                     patterns=patterns,
-                    resume=True,  # Resume from checkpoint
+                    resume=True,
                     embed=True,
+                    quiet=True,
                 ):
                     pass
-                console.info("    [embed] done")
 
             async def do_enrichment():
-                """Run LLM enrichment."""
-                console.info("    [enrich] starting LLM enrichment...")
-                result = await enrich_codebase(
+                return await enrich_codebase(
                     root=root,
                     roles=[self.enrich_role],
                     agent_command="claude",
@@ -183,47 +237,43 @@ class Index:
                     output=None,
                     store_in_index=True,
                     map_files=True,
-                    compact_after=False,  # Compact once at end
-                    progress_callback=lambda p: None,  # Quiet
+                    compact_after=False,
+                    progress_callback=progress.update,
                 )
-                console.info(
-                    f"    [enrich] done ({len(result.questions)} questions)"
-                )
-                return result
 
-            # Run both in parallel
             embed_task = asyncio.create_task(do_embedding())
             enrich_task = asyncio.create_task(do_enrichment())
 
-            await asyncio.gather(embed_task, enrich_task)
+            results = await asyncio.gather(embed_task, enrich_task)
+            enrich_result = results[1]
 
             # Compact once at the end
-            console.info("  phase 3: compacting...")
             manager.compact_vectors(force=False)
 
+            return enrich_result
+
         try:
-            asyncio.run(run_all())
+            with progress:
+                result = asyncio.run(run_all())
             elapsed = time.perf_counter() - start_time
-            console.success(f"index + enrich complete in {elapsed:.1f}s")
+            stats = manager.get_stats()
+            questions = len(result.questions) if result else 0
+            msg = f"Indexed {stats.file_count} files + {questions} questions"
+            console.success(f"{msg} in {elapsed:.1f}s")
             return 0
         except FileNotFoundError as e:
-            console.error(f"agent not found: {e}")
-            console.info("make sure 'claude' is installed and in PATH")
+            console.error(f"Agent not found: {e}")
             return 1
         except Exception as e:
-            console.error(f"failed: {e}")
+            console.error(f"Failed: {e}")
             return 1
 
     def _run_enrichment(self, root: Path) -> int:
         """Run LLM enrichment after indexing."""
         from ultrasync.enrich import enrich_codebase
 
-        console.info("")
-        console.info("running enrichment...")
-        console.info(f"  role: {self.enrich_role}")
-        console.info(f"  budget: {self.enrich_budget} questions")
-
         start_time = time.perf_counter()
+        progress = EnrichmentProgress()
 
         async def run_enrich():
             return await enrich_codebase(
@@ -236,23 +286,19 @@ class Index:
                 store_in_index=True,
                 map_files=True,
                 compact_after=True,
-                progress_callback=lambda p: console.info(
-                    f"  {p.phase.value}: {p.message}"
-                ),
+                progress_callback=progress.update,
             )
 
         try:
-            result = asyncio.run(run_enrich())
+            with progress:
+                result = asyncio.run(run_enrich())
             elapsed = time.perf_counter() - start_time
-            console.success(
-                f"enrichment complete in {elapsed:.1f}s "
-                f"({len(result.questions)} questions)"
-            )
+            q = len(result.questions)
+            console.success(f"Enriched with {q} questions in {elapsed:.1f}s")
             return 0
         except FileNotFoundError as e:
-            console.error(f"agent not found: {e}")
-            console.info("make sure 'claude' is installed and in PATH")
+            console.error(f"Agent not found: {e}")
             return 1
         except Exception as e:
-            console.error(f"enrichment failed: {e}")
+            console.error(f"Enrichment failed: {e}")
             return 1
