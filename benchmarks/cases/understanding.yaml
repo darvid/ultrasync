@@ -5,8 +5,9 @@ cases:
   - id: understand_search_flow
     name: Understand search data flow
     prompt: |
-      Explain how a search query flows through the system from MCP
-      tool call to results. What are the key steps?
+      Use ultrasync search. Explain how a search query flows through
+      the system from MCP tool call to results. What are the key
+      steps?
     expected_concepts:
       - embedding
       - vector similarity
@@ -18,8 +19,8 @@ cases:
   - id: understand_indexing
     name: Understand indexing pipeline
     prompt: |
-      How does file indexing work? What happens when a new file
-      is indexed - what data structures are created?
+      Use ultrasync search. How does file indexing work? What happens
+      when a new file is indexed - what data structures are created?
     expected_concepts:
       - symbol extraction
       - embedding generation
@@ -31,8 +32,9 @@ cases:
   - id: understand_memory_tiers
     name: Understand memory tiering
     prompt: |
-      How does the memory system decide which memories to show?
-      What determines "prior context" vs "related memories"?
+      Use ultrasync search. How does the memory system decide which
+      memories to show? What determines "prior context" vs "related
+      memories"?
     expected_concepts:
       - relevance threshold
       - score tiering
@@ -44,8 +46,8 @@ cases:
   - id: understand_two_layer
     name: Understand Rust/Python architecture
     prompt: |
-      Explain the two-layer architecture with Rust and Python.
-      What does each layer handle and why?
+      Use ultrasync search. Explain the two-layer architecture with
+      Rust and Python. What does each layer handle and why?
     expected_concepts:
       - GlobalIndex
       - ThreadIndex
@@ -58,8 +60,9 @@ cases:
   - id: understand_context_detection
     name: Understand context classification
     prompt: |
-      How does the system classify files into contexts like
-      "context:auth" or "context:frontend"? What triggers this?
+      Use ultrasync search. How does the system classify files into
+      contexts like "context:auth" or "context:frontend"? What
+      triggers this?
     expected_concepts:
       - pattern matching
       - AOT indexing

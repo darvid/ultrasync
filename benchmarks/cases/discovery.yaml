@@ -5,8 +5,8 @@ cases:
   - id: find_mcp_search
     name: Find MCP search implementation
     prompt: |
-      Find the function that handles the main search functionality.
-      Tell me the file path and function name.
+      Use ultrasync search. Find the function that handles the main
+      search functionality. Tell me the file path and function name.
     expected_files:
       - src/ultrasync/mcp_server.py
     expected_symbols:
@@ -17,8 +17,8 @@ cases:
   - id: find_embedding_provider
     name: Find embedding provider
     prompt: |
-      Where is the embedding model loaded and used?
-      Show me the file and class responsible for embeddings.
+      Use ultrasync search. Where is the embedding model loaded and
+      used? Show me the file and class responsible for embeddings.
     expected_files:
       - src/ultrasync/embeddings.py
     expected_symbols:
@@ -29,8 +29,8 @@ cases:
   - id: find_memory_system
     name: Find memory persistence
     prompt: |
-      How does the memory system store and retrieve memories?
-      Find the core memory storage implementation.
+      Use ultrasync search. How does the memory system store and
+      retrieve memories? Find the core memory storage implementation.
     expected_files:
       - src/ultrasync/jit_index.py
     expected_symbols:
@@ -41,8 +41,9 @@ cases:
   - id: find_pattern_matching
     name: Find insight extraction patterns
     prompt: |
-      Where are the patterns for detecting TODOs, FIXMEs, and other
-      code annotations defined? Show me the pattern definitions.
+      Use ultrasync search. Where are the patterns for detecting
+      TODOs, FIXMEs, and other code annotations defined? Show me
+      the pattern definitions.
     expected_files:
       - src/ultrasync/patterns.py
     expected_symbols:
@@ -53,8 +54,8 @@ cases:
   - id: find_rust_bindings
     name: Find Rust/Python boundary
     prompt: |
-      Find where the Rust code interfaces with Python.
-      Show me the pyo3 bindings or FFI layer.
+      Use ultrasync search. Find where the Rust code interfaces with
+      Python. Show me the pyo3 bindings or FFI layer.
     expected_files:
       - ultrasync_index/src/lib.rs
     expected_symbols:

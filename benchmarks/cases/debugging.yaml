@@ -5,8 +5,9 @@ cases:
   - id: debug_slow_search
     name: Debug slow search performance
     prompt: |
-      Search queries are taking too long. Where would you look
-      to diagnose performance issues in the search path?
+      Use ultrasync search. Search queries are taking too long.
+      Where would you look to diagnose performance issues in the
+      search path?
     expected_files:
       - src/ultrasync/mcp_server.py
       - src/ultrasync/jit_index.py
@@ -21,8 +22,9 @@ cases:
   - id: debug_missing_results
     name: Debug missing search results
     prompt: |
-      A file I know exists isn't showing up in search results.
-      What could cause this and where would you investigate?
+      Use ultrasync search. A file I know exists isn't showing up
+      in search results. What could cause this and where would you
+      investigate?
     expected_concepts:
       - indexing
       - threshold filtering
@@ -34,8 +36,9 @@ cases:
   - id: debug_memory_not_persisting
     name: Debug memory persistence
     prompt: |
-      Memories written in one session aren't appearing in the next.
-      Trace the memory write path to find where persistence happens.
+      Use ultrasync search. Memories written in one session aren't
+      appearing in the next. Trace the memory write path to find
+      where persistence happens.
     expected_files:
       - src/ultrasync/jit_index.py
     expected_concepts:
@@ -49,8 +52,9 @@ cases:
   - id: debug_insight_detection
     name: Debug insight detection
     prompt: |
-      TODOs in my code aren't being detected. Where is the pattern
-      matching logic and what patterns does it look for?
+      Use ultrasync search. TODOs in my code aren't being detected.
+      Where is the pattern matching logic and what patterns does it
+      look for?
     expected_files:
       - src/ultrasync/patterns.py
     expected_concepts:
