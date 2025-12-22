@@ -430,6 +430,7 @@ class ServerState:
         self._watcher_started = False
         self._watcher_lock_fd: IO[bytes] | None = None  # leader election lock
         self._persistent_thread_manager: "PersistentThreadManager | None" = None  # noqa: F821, UP037
+        self._init_task: asyncio.Task[None] | None = None  # noqa: F821
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -532,6 +533,19 @@ class ServerState:
     @property
     def jit_manager(self) -> JITIndexManager:
         self._ensure_jit_initialized()
+        assert self._jit_manager is not None
+        return self._jit_manager
+
+    async def get_jit_manager_async(self) -> JITIndexManager:
+        """Get JIT manager, waiting for background init if in progress.
+
+        Use this instead of the sync property to avoid blocking when
+        background initialization is running.
+        """
+        if self._init_task is not None and not self._init_task.done():
+            await self._init_task
+        if self._jit_manager is None:
+            self._ensure_jit_initialized()
         assert self._jit_manager is not None
         return self._jit_manager
 
@@ -758,6 +772,7 @@ def create_server(
         if has_existing_index and not watch_transcripts:
             logger.info("initializing index manager in background...")
             init_task = asyncio.create_task(state._init_index_manager_async())
+            state._init_task = init_task  # store for async access
 
         # launch watcher (which also initializes index manager) in background
         if watch_transcripts:
@@ -1121,7 +1136,8 @@ Taxonomy:
         Returns:
             Index result with status, symbol count, and bytes written
         """
-        result = await state.jit_manager.index_file(Path(path), force=force)
+        jit = await state.get_jit_manager_async()
+        result = await jit.index_file(Path(path), force=force)
         response = asdict(result)
         response["key_hash"] = _key_to_hex(result.key_hash)
 
@@ -1277,7 +1293,7 @@ Taxonomy:
         }
 
     @mcp.tool()
-    def get_stats() -> dict[str, Any]:
+    async def get_stats() -> dict[str, Any]:
         """Get JIT index statistics.
 
         Returns file count, symbol count, blob size, vector cache usage,
@@ -1292,7 +1308,8 @@ Taxonomy:
         Returns:
             Dictionary of index statistics
         """
-        stats = state.jit_manager.get_stats()
+        jit = await state.get_jit_manager_async()
+        stats = jit.get_stats()
         return asdict(stats)
 
     @mcp.tool()
@@ -1725,10 +1742,12 @@ Taxonomy:
         from ultrasync.jit.search import search
 
         root = state.root or Path(os.getcwd())
+        # use async getter to wait for background init instead of blocking
+        jit_manager = await state.get_jit_manager_async()
         start = time.perf_counter()
         results, stats = search(
             query=query,
-            manager=state.jit_manager,
+            manager=jit_manager,
             root=root,
             top_k=top_k,
             fallback_glob=fallback_glob,
