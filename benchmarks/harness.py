@@ -197,13 +197,15 @@ class BenchmarkHarness:
         mcp_config = self._prepare_mcp_config(config)
 
         # build claude command
+        # use stream-json + verbose to get full transcript with tool calls
         cmd = [
             "claude",
             "--mcp-config",
             str(mcp_config),
             "--print",
             "--output-format",
-            "json",
+            "stream-json",
+            "--verbose",
             "--max-turns",
             str(config.max_turns),
             "--model",

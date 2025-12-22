@@ -122,27 +122,65 @@ class MetricsExtractor:
         message: dict[str, Any],
         metrics: ToolCallMetrics,
     ) -> None:
-        """Process a single message and update metrics."""
-        role = message.get("role", "")
-        metrics.turn_count += 1
+        """Process a single message and update metrics.
 
-        if role == "assistant":
+        Handles both formats:
+        - stream-json: {"type": "assistant", "message": {...}}
+        - standard: {"role": "assistant", "content": [...]}
+        """
+        # stream-json format wraps message in outer envelope
+        msg_type = message.get("type", "")
+        inner_msg = message.get("message", {})
+
+        if msg_type == "assistant":
+            metrics.turn_count += 1
             metrics.assistant_messages += 1
 
-            # check for tool uses in content
-            content = message.get("content", [])
+            # extract content from inner message
+            content = inner_msg.get("content", [])
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict):
                         self._process_content_block(block, metrics)
 
-            # track tokens if available
+            # track tokens from inner message usage
+            usage = inner_msg.get("usage", {})
+            metrics.input_tokens += usage.get("input_tokens", 0)
+            metrics.output_tokens += usage.get("output_tokens", 0)
+
+        elif msg_type == "user":
+            metrics.turn_count += 1
+            # check for tool results in inner message
+            content = inner_msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        self._process_tool_result(block, metrics)
+
+        elif msg_type == "result":
+            # final result message has aggregate usage
+            usage = message.get("usage", {})
+            # don't double-count, but capture if we missed earlier
+            if metrics.input_tokens == 0:
+                metrics.input_tokens = usage.get("input_tokens", 0)
+            if metrics.output_tokens == 0:
+                metrics.output_tokens = usage.get("output_tokens", 0)
+
+        # fallback for standard format (role-based)
+        elif message.get("role") == "assistant":
+            metrics.turn_count += 1
+            metrics.assistant_messages += 1
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        self._process_content_block(block, metrics)
             usage = message.get("usage", {})
             metrics.input_tokens += usage.get("input_tokens", 0)
             metrics.output_tokens += usage.get("output_tokens", 0)
 
-        elif role == "user":
-            # check for tool results
+        elif message.get("role") == "user":
+            metrics.turn_count += 1
             content = message.get("content", [])
             if isinstance(content, list):
                 for block in content:

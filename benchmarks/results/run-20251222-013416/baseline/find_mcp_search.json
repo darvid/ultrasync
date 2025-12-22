@@ -1,0 +1,34 @@
+{
+  "test_case_id": "find_mcp_search",
+  "test_case_name": "Find MCP search implementation",
+  "config_name": "baseline",
+  "success": true,
+  "error": null,
+  "start_time": "2025-12-22T01:34:53.071841",
+  "end_time": "2025-12-22T01:35:25.163369",
+  "elapsed_seconds": 29.15856759098824,
+  "exit_code": 0,
+  "metrics": {
+    "tool_calls": {},
+    "files_accessed": [],
+    "files_accessed_count": 0,
+    "search_queries": [],
+    "turn_count": 1,
+    "assistant_messages": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "ultrasync_search_count": 0,
+    "grep_count": 0,
+    "glob_count": 0,
+    "read_count": 0,
+    "memory_reads": 0,
+    "memory_writes": 0,
+    "tool_efficiency": {
+      "total_tool_calls": 0,
+      "semantic_vs_traditional": 0.0,
+      "files_per_search": 0.0
+    }
+  },
+  "stdout_length": 2004,
+  "stderr_length": 0
+}
