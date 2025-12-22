@@ -47,22 +47,43 @@ def _format_search_results_tsv(
     elapsed_ms: float,
     source: str,
     hint: str | None = None,
-    memories: list[dict] | None = None,
+    prior_context: list[dict] | None = None,
+    related_memories: list[dict] | None = None,
 ) -> str:
     """Format search results as compact TSV for reduced token usage.
 
     Format:
+        # PRIOR CONTEXT (from previous sessions) - shown FIRST if present
+        M  mem:abc123  task:debug  0.65  <high relevance memory>
+
         # search <elapsed>ms src=<source>
-        # [hint if present]
         # type  path  name  kind  lines  score  key_hash
         F  src/foo.py  -  -  -  0.92  0x1234
         S  src/foo.py  login  func  10-25  0.89  0x5678
-        # memories (if present):
-        M  mem:abc123  task:debug  0.85  <truncated text>
+
+        # related memories (supplementary):
+        M  mem:def456  task:general  0.35  <medium relevance memory>
 
     ~3-4x fewer tokens than JSON format.
     """
-    lines = [f"# search {elapsed_ms:.1f}ms src={source}"]
+    lines = []
+
+    # PRIOR CONTEXT shown FIRST - high relevance memories from previous work
+    if prior_context:
+        lines.append("# PRIOR CONTEXT (from previous sessions):")
+        lines.append(
+            "# Review this before proceeding - you've worked on this before"
+        )
+        lines.append("# id\ttask\tscore\ttext")
+        for m in prior_context:
+            text = m.get("text", "")[:150].replace("\n", " ")
+            task = m.get("task") or "-"
+            score = m.get("score", 0)
+            lines.append(f"M\t{m['id']}\t{task}\t{score:.2f}\t{text}")
+        lines.append("")  # blank line separator
+
+    # search header and results
+    lines.append(f"# search {elapsed_ms:.1f}ms src={source}")
     if hint:
         lines.append(f"# {hint}")
     lines.append("# type\tpath\tname\tkind\tlines\tscore\tkey_hash")
@@ -83,11 +104,12 @@ def _format_search_results_tsv(
             f"{typ}\t{r.path}\t{name}\t{kind}\t{line_range}\t{score}\t{key_hex}"
         )
 
-    # add memories section if present
-    if memories:
-        lines.append("# memories (prior context):")
+    # related memories (medium relevance) - supplementary context
+    if related_memories:
+        lines.append("")  # blank line separator
+        lines.append("# related memories (supplementary):")
         lines.append("# id\ttask\tscore\ttext")
-        for m in memories:
+        for m in related_memories:
             text = m.get("text", "")[:100].replace("\n", " ")
             task = m.get("task") or "-"
             score = m.get("score", 0)
@@ -103,9 +125,11 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
 # env var for enabling transcript watching
 ENV_WATCH_TRANSCRIPTS = "GALAXYBRAIN_WATCH_TRANSCRIPTS"
 
-# memory relevance threshold for inclusion in search results
-# memories with score below this are filtered out
-MEMORY_RELEVANCE_THRESHOLD = 0.3
+# memory relevance thresholds for tiered display
+# high relevance = show FIRST as "prior context" (before code results)
+# medium relevance = show after results as supplementary
+MEMORY_HIGH_RELEVANCE_THRESHOLD = 0.5
+MEMORY_MEDIUM_RELEVANCE_THRESHOLD = 0.3
 
 logger = get_logger("mcp_server")
 
@@ -431,11 +455,25 @@ class ServerState:
         """Initialize index manager without blocking event loop.
 
         Runs model loading in thread pool so MCP handshake can complete.
+        Also performs a warmup embed to pay the cold-start cost upfront.
         """
         import asyncio
 
         if self._embedder is None or self._jit_manager is None:
             await asyncio.to_thread(self._ensure_jit_initialized)
+
+        # warmup embed to pay cold-start cost (model graph compilation, etc.)
+        # this runs in background so MCP handshake isn't blocked
+        if self._embedder is not None:
+            import time
+
+            logger.info("warming up embedding model...")
+            start = time.perf_counter()
+            await asyncio.to_thread(self._embedder.embed, "warmup")
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.info(
+                "embedding model ready (warmup took %.0fms)", elapsed_ms
+            )
 
     def _ensure_aot_initialized(self) -> None:
         """Try to load AOT GlobalIndex if it exists."""
@@ -771,6 +809,36 @@ succeed.
 Use full_index() for large codebases - shows progress, persists results.
 After editing files, call reindex_file(path) to keep index fresh.
 </indexing>
+
+<insights>
+For queries about code annotations, markers, or technical debt, use
+the insights tools. These are pre-extracted during indexing for
+instant lookup - no scanning required.
+
+Use insights_by_type(type) when user asks about:
+- TODOs, tasks, pending work → "insight:todo"
+- FIXMEs, bugs to fix → "insight:fixme"
+- Hacks, workarounds → "insight:hack"
+- Known bugs → "insight:bug"
+- Notes, documentation → "insight:note"
+- Invariants, assertions → "insight:invariant"
+- Assumptions made → "insight:assumption"
+- Design decisions → "insight:decision"
+- Constraints, limitations → "insight:constraint"
+- Pitfalls, gotchas → "insight:pitfall"
+- Performance concerns → "insight:optimize"
+- Deprecated code → "insight:deprecated"
+- Security concerns → "insight:security"
+
+Use list_insights() to show all available types with counts.
+
+Pattern matching examples:
+- "list TODOs" → insights_by_type("insight:todo")
+- "show me FIXMEs" → insights_by_type("insight:fixme")
+- "any security issues?" → insights_by_type("insight:security")
+- "what's deprecated?" → insights_by_type("insight:deprecated")
+- "technical debt" → list_insights() then relevant types
+</insights>
 
 <memory>
 Memory builds context across sessions. Prior decisions, constraints,
@@ -1707,15 +1775,20 @@ Taxonomy:
         filtered_results = [r for r in results if r.score >= threshold]
 
         # search memories for relevant context (shared by both formats)
-        memories_data: list[dict[str, Any]] = []
+        # split into tiers: high relevance (prior context) vs medium (related)
+        prior_context: list[dict[str, Any]] = []
+        related_memories: list[dict[str, Any]] = []
         if include_memories:
             try:
                 mem_results = state.jit_manager.memory.search(
                     query=query,
-                    top_k=3,  # limit to top 3 most relevant memories
+                    top_k=5,  # get more to allow for tiering
                 )
-                memories_data = [
-                    {
+                for m in mem_results:
+                    if m.score < MEMORY_MEDIUM_RELEVANCE_THRESHOLD:
+                        continue  # skip low relevance
+
+                    mem_dict = {
                         "id": m.entry.id,
                         "task": m.entry.task,
                         "insights": m.entry.insights,
@@ -1723,9 +1796,11 @@ Taxonomy:
                         "text": m.entry.text[:300],  # truncate for display
                         "score": round(m.score, 3),
                     }
-                    for m in mem_results
-                    if m.score >= MEMORY_RELEVANCE_THRESHOLD
-                ]
+
+                    if m.score >= MEMORY_HIGH_RELEVANCE_THRESHOLD:
+                        prior_context.append(mem_dict)
+                    else:
+                        related_memories.append(mem_dict)
             except Exception:
                 pass  # gracefully ignore memory search errors
 
@@ -1736,31 +1811,40 @@ Taxonomy:
                 elapsed_ms,
                 primary_source,
                 hint,
-                memories_data,
+                prior_context,
+                related_memories,
             )
 
         # verbose JSON format
         response: dict[str, Any] = {
             "elapsed_ms": round(elapsed_ms, 2),
             "source": primary_source,
-            "results": [
-                {
-                    "type": r.type,
-                    "path": r.path,
-                    "name": r.name,
-                    "kind": r.kind,
-                    "key_hash": _key_to_hex(r.key_hash),
-                    "score": r.score,
-                    "source": r.source,
-                    "line_start": r.line_start,
-                    "line_end": r.line_end,
-                    "content": r.content,
-                }
-                for r in filtered_results
-            ],
         }
-        if memories_data:
-            response["memories"] = memories_data
+
+        # prior context shown FIRST - high relevance memories from previous work
+        if prior_context:
+            response["prior_context"] = prior_context
+
+        # code search results
+        response["results"] = [
+            {
+                "type": r.type,
+                "path": r.path,
+                "name": r.name,
+                "kind": r.kind,
+                "key_hash": _key_to_hex(r.key_hash),
+                "score": r.score,
+                "source": r.source,
+                "line_start": r.line_start,
+                "line_end": r.line_end,
+                "content": r.content,
+            }
+            for r in filtered_results
+        ]
+
+        # related memories (medium relevance) - supplementary
+        if related_memories:
+            response["related_memories"] = related_memories
         if hint:
             response["hint"] = hint
         return response
