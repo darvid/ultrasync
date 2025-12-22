@@ -1591,7 +1591,7 @@ Taxonomy:
         format: Literal["json", "tsv"] = "json",
         include_source: bool = True,
         threshold: float | None = None,
-        search_mode: Literal["hybrid", "semantic", "lexical"] = "hybrid",
+        search_mode: Literal["hybrid", "semantic", "lexical"] = "semantic",
         recency_bias: bool = False,
         recency_config: Literal["default", "aggressive", "mild"] | None = None,
         include_memories: bool = True,
@@ -1631,12 +1631,11 @@ Taxonomy:
                 - semantic: 0.3 (cosine similarity 0.0-1.0)
                 - lexical: 0.0 (BM25 scores vary wildly, rely on ranking)
                 Set explicitly to override. Use 0.0 to return all results.
-            search_mode: Search strategy (default: "hybrid"):
-                - "hybrid": Best of both - combines semantic and lexical
-                  results using Reciprocal Rank Fusion (RRF). Best for most
-                  queries.
+            search_mode: Search strategy (default: "semantic"):
                 - "semantic": Vector similarity only. Best for conceptual
                   queries like "authentication logic" or "error handling".
+                - "hybrid": Combines semantic and lexical results using
+                  Reciprocal Rank Fusion (RRF). More thorough but slower.
                 - "lexical": BM25 keyword matching only. Best for exact
                   symbol names like "handleSubmit" or "JITIndexManager".
             recency_bias: If True, apply recency weighting to favor newer

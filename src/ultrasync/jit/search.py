@@ -82,7 +82,7 @@ def search(
     fallback_glob: str | None = None,
     result_type: str = "all",
     include_source: bool = True,
-    search_mode: str = "hybrid",
+    search_mode: str = "semantic",
     recency_bias: bool = False,
     recency_config: str | None = None,
 ) -> tuple[list[SearchResult], SearchStats]:
@@ -97,8 +97,8 @@ def search(
         result_type: Filter by type - "all", "file", or "symbol"
         include_source: Include source code content for symbol results
             (default: True). This is cheap as it reads from the blob.
-        search_mode: Search strategy - "hybrid" (default, combines semantic
-            and lexical with RRF), "semantic" (vector only), or "lexical"
+        search_mode: Search strategy - "semantic" (default, vector only),
+            "hybrid" (combines semantic and lexical with RRF), or "lexical"
             (BM25 only).
         recency_bias: If True, apply recency weighting to favor newer files.
             Only applies to hybrid search mode.

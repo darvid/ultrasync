@@ -1842,42 +1842,79 @@ class JITIndexManager:
         """
         from ultrasync.jit.lexical import rrf_fuse
 
-        # Get semantic results
-        semantic_results: list[tuple[int, float]] = []
-        if self.provider is not None:
-            q_vec = self.provider.embed(query)
-            raw_results = self.search_vectors(q_vec, top_k * 2, result_type)
-            semantic_results = [(kh, score) for kh, score, _ in raw_results]
+        # BM25 confidence threshold - if lexical hits this hard, skip embedding
+        # Tuned empirically: exact symbol matches typically score 15-30+
+        LEXICAL_CONFIDENCE_THRESHOLD = 12.0
 
-        # Get lexical results
+        # Phase 1: Lexical first (sub-millisecond)
+        # This is the fast path for identifier queries like "handleSubmit"
         lexical_results = []
+        doc_type = None if result_type == "all" else result_type
         if self.lexical is not None:
-            doc_type = None if result_type == "all" else result_type
             lexical_results = self.lexical.search(
                 query, top_k=top_k * 2, doc_type=doc_type
             )
 
-        # If only one index has results, return those directly
+        # Fast path: confident lexical hit, skip embedding entirely
+        # Saves ~100ms per query for exact identifier matches
+        if (
+            lexical_results
+            and lexical_results[0].score >= LEXICAL_CONFIDENCE_THRESHOLD
+        ):
+            logger.info(
+                "search_hybrid: lexical fast path",
+                query=query[:50],
+                top_score=lexical_results[0].score,
+                result_count=len(lexical_results),
+            )
+            output = [
+                (r.key_hash, r.score, r.doc_type, "lexical")
+                for r in lexical_results[:top_k]
+            ]
+            if recency_bias and output:
+                output = self._apply_recency_bias(output, recency_config)
+            return output
+
+        # Phase 2: Semantic search (slow path, ~100ms embedding cost)
+        # Only pay this cost when lexical didn't find confident matches
+        semantic_results: list[tuple[int, float]] = []
+        if self.provider is not None:
+            logger.debug(
+                "search_hybrid: semantic slow path",
+                query=query[:50],
+                lexical_top_score=(
+                    lexical_results[0].score if lexical_results else 0
+                ),
+            )
+            q_vec = self.provider.embed(query)
+            raw_results = self.search_vectors(q_vec, top_k * 2, result_type)
+            semantic_results = [(kh, score) for kh, score, _ in raw_results]
+
+        # Handle edge cases: only one index has results
         if not semantic_results and not lexical_results:
             return []
 
         if not semantic_results:
-            return [
+            output = [
                 (r.key_hash, r.score, r.doc_type, "lexical")
                 for r in lexical_results[:top_k]
             ]
+            if recency_bias and output:
+                output = self._apply_recency_bias(output, recency_config)
+            return output
 
         if not lexical_results:
-            # Look up types from tracker
             out = []
             for key_hash, score in semantic_results[:top_k]:
                 item_type = "file"
                 if self.tracker.get_symbol_by_key(key_hash):
                     item_type = "symbol"
                 out.append((key_hash, score, item_type, "semantic"))
+            if recency_bias and out:
+                out = self._apply_recency_bias(out, recency_config)
             return out
 
-        # Fuse results with RRF
+        # Phase 3: RRF fusion when we have both
         fused = rrf_fuse(
             semantic_results,
             lexical_results,
@@ -1889,7 +1926,6 @@ class JITIndexManager:
         # Build output with type info
         output: list[tuple[int, float, str, str]] = []
         for key_hash, score, source in fused[:top_k]:
-            # Determine type from tracker
             item_type = "file"
             if self.tracker.get_symbol_by_key(key_hash):
                 item_type = "symbol"
