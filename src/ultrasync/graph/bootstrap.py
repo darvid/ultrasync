@@ -207,12 +207,18 @@ def _bootstrap_symbols(
             )
             sym_count += 1
 
-            # Create defines edge (file -> symbol)
+            # Create edge: file -> symbol
+            # Use ENRICHES for enrichment_questions, DEFINES for everything else
             file_key = file_keys.get(file_path)
             if file_key:
+                rel = (
+                    Relation.ENRICHES
+                    if record["kind"] == "enrichment_question"
+                    else Relation.DEFINES
+                )
                 graph.put_edge(
                     src_id=file_key,
-                    rel=Relation.DEFINES,
+                    rel=rel,
                     dst_id=key_hash,
                 )
                 edge_count += 1

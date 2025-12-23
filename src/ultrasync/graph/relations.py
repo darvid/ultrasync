@@ -33,6 +33,7 @@ class Relation(IntEnum):
     TRIGGERS = 13  # event -> handler
     VALIDATES = 14  # validator -> entity
     DOCUMENTS = 15  # docstring/comment -> code
+    ENRICHES = 16  # enrichment_question -> file (semantic question about code)
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +91,9 @@ _BUILTIN_INFO: dict[int, RelationInfo] = {
     ),
     Relation.DOCUMENTS: RelationInfo(
         Relation.DOCUMENTS, "documents", "documentation covers code"
+    ),
+    Relation.ENRICHES: RelationInfo(
+        Relation.ENRICHES, "enriches", "semantic question enriches code understanding"
     ),
 }
 

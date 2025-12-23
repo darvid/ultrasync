@@ -370,9 +370,16 @@ class Query:
                         queue.append((src_id, curr_depth + 1))
 
         # Also add relevant memories directly (not via BFS)
+        # Track memory entries for edge creation later
+        memory_entries: dict[int, object] = {}  # key_hash -> MemoryEntry
         if self.dot_memories:
             for mem_id in relevant_memories:
                 nodes_to_include.add(mem_id)
+                # Fetch entry for edge creation
+                if manager.memory:
+                    entry = manager.memory.get_by_key(mem_id)
+                    if entry:
+                        memory_entries[mem_id] = entry
 
         # Build node info for labels
         import msgpack
@@ -382,6 +389,13 @@ class Query:
         for node_id in nodes_to_include:
             node = graph.get_node(node_id)
             if not node:
+                # Memory might exist in MemoryManager but not graph (created post-bootstrap)
+                if node_id in relevant_memories and manager.memory:
+                    mem_entry = memory_entries.get(node_id)
+                    if mem_entry:
+                        preview = mem_entry.text[:30] if mem_entry.text else ""
+                        label = f"mem\\n{preview}..."
+                        node_info[node_id] = ("memory", label, False)
                 continue
             # Skip irrelevant memories
             if node.type == "memory" and node_id not in relevant_memories:
@@ -411,6 +425,14 @@ class Query:
 
         lines.append("")
         lines.append("  // Edges")
+
+        # Add edges from memory entries to their symbol_keys
+        DERIVED_FROM_REL = 9  # Relation.DERIVED_FROM
+        for mem_id, entry in memory_entries.items():
+            if mem_id in node_info and hasattr(entry, "symbol_keys"):
+                for sym_key in entry.symbol_keys:
+                    if sym_key in node_info:
+                        edges_to_include.append((mem_id, DERIVED_FROM_REL, sym_key))
 
         # Output edges
         seen_edges: set[tuple[int, int, int]] = set()
