@@ -36,6 +36,7 @@ from ultrasync.cli.commands.enrich import Enrich, EnrichClear, EnrichList
 from ultrasync.cli.commands.graph import (
     GraphBootstrap,
     GraphDiff,
+    GraphDot,
     GraphEdges,
     GraphExport,
     GraphKvGet,
@@ -150,6 +151,7 @@ _GraphKvList = Annotated[GraphKvList, tyro.conf.subcommand("graph:kv:list")]
 _GraphKvSet = Annotated[GraphKvSet, tyro.conf.subcommand("graph:kv:set")]
 _GraphKvGet = Annotated[GraphKvGet, tyro.conf.subcommand("graph:kv:get")]
 _GraphDiff = Annotated[GraphDiff, tyro.conf.subcommand("graph:diff")]
+_GraphDot = Annotated[GraphDot, tyro.conf.subcommand("graph:dot")]
 _GraphExport = Annotated[GraphExport, tyro.conf.subcommand("graph:export")]
 _GraphRelations = Annotated[
     GraphRelations, tyro.conf.subcommand("graph:relations")
@@ -257,6 +259,7 @@ Command = (
     | _GraphKvSet
     | _GraphKvGet
     | _GraphDiff
+    | _GraphDot
     | _GraphExport
     | _GraphRelations
     | _IrExtract

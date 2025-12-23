@@ -136,9 +136,12 @@ class GraphNodes:
         tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
-        nodes = list(
-            graph.iter_nodes(node_type=self.node_type, limit=self.limit)
-        )
+        # iter_nodes doesn't support limit, do it manually
+        nodes = []
+        for node in graph.iter_nodes(node_type=self.node_type):
+            nodes.append(node)
+            if len(nodes) >= self.limit:
+                break
 
         if not nodes:
             print("no nodes found")
@@ -148,16 +151,19 @@ class GraphNodes:
         print(f"{'ID':<18}  {'Type':<10}  {'Scope':<8}  {'Rev':>4}  Payload")
         print("-" * 90)
 
+        import msgpack
+
         for node in nodes:
             node_id = hex(node.id)
             payload_str = ""
             if node.payload:
-                if "path" in node.payload:
-                    payload_str = node.payload["path"]
-                elif "name" in node.payload:
-                    payload_str = node.payload["name"]
+                payload = msgpack.unpackb(node.payload)
+                if "path" in payload:
+                    payload_str = payload["path"]
+                elif "name" in payload:
+                    payload_str = payload["name"]
                 else:
-                    payload_str = str(node.payload)[:40]
+                    payload_str = str(payload)[:40]
             print(
                 f"{node_id:<18}  {node.type:<10}  "
                 f"{node.scope:<8}  {node.rev:>4}  {payload_str}"
@@ -597,6 +603,197 @@ class GraphExport:
 
         tracker.close()
         return 0
+
+
+@dataclass
+class GraphDot:
+    """Export graph to DOT format for visualization."""
+
+    output: str | None = field(
+        default=None,
+        metadata={"help": "Output file (default: stdout)"},
+    )
+    node_type: str | None = field(
+        default=None,
+        metadata={"help": "Filter by node type (file, symbol, memory)"},
+    )
+    relation: str | None = field(
+        default=None,
+        metadata={"help": "Filter by relation (defines, calls, etc.)"},
+    )
+    root: str | None = field(
+        default=None,
+        metadata={"help": "Start from node ID (hex) and traverse"},
+    )
+    depth: int = field(
+        default=2,
+        metadata={"help": "Max traversal depth from root"},
+    )
+    limit: int = field(
+        default=100,
+        metadata={"help": "Max nodes to include"},
+    )
+    directory: Path | None = field(
+        default=None,
+        metadata={"help": "Directory with .ultrasync index"},
+    )
+
+    def run(self) -> int:
+        """Execute the graph dot command."""
+        from ultrasync.graph import GraphMemory, Relation
+        from ultrasync.jit import FileTracker
+
+        root = self.directory.resolve() if self.directory else Path.cwd()
+        data_dir = root / DEFAULT_DATA_DIR
+
+        if not data_dir.exists():
+            console.error(f"no index found at {data_dir}")
+            return 1
+
+        tracker = FileTracker(data_dir / "tracker.db")
+        graph = GraphMemory(tracker)
+
+        # Get relation filter ID if specified
+        rel_filter = None
+        if self.relation:
+            rel_name = self.relation.upper()
+            try:
+                rel_filter = Relation[rel_name].value
+            except KeyError:
+                # Check custom relations
+                rel_filter = graph.relations.intern(self.relation)
+
+        # Collect nodes to include
+        nodes_to_include: set[int] = set()
+        edges_to_include: list[tuple[int, int, int]] = []  # src, rel, dst
+
+        if self.root:
+            # BFS from root node
+            root_id = int(self.root, 16) if self.root.startswith("0x") else int(
+                self.root
+            )
+            queue = [(root_id, 0)]
+            visited = {root_id}
+
+            while queue and len(nodes_to_include) < self.limit:
+                node_id, curr_depth = queue.pop(0)
+                nodes_to_include.add(node_id)
+
+                if curr_depth >= self.depth:
+                    continue
+
+                # Get outgoing edges
+                out_edges = graph.get_out(node_id, rel=rel_filter)
+                for rel_id, dst_id in out_edges:
+                    edges_to_include.append((node_id, rel_id, dst_id))
+                    if dst_id not in visited:
+                        visited.add(dst_id)
+                        queue.append((dst_id, curr_depth + 1))
+
+                # Get incoming edges
+                in_edges = graph.get_in(node_id, rel=rel_filter)
+                for rel_id, src_id in in_edges:
+                    edges_to_include.append((src_id, rel_id, node_id))
+                    if src_id not in visited:
+                        visited.add(src_id)
+                        queue.append((src_id, curr_depth + 1))
+        else:
+            # Iterate all nodes with optional type filter
+            count = 0
+            for node in graph.iter_nodes(node_type=self.node_type):
+                if count >= self.limit:
+                    break
+                nodes_to_include.add(node.id)
+                count += 1
+
+            # Get edges between included nodes
+            for node_id in nodes_to_include:
+                out_edges = graph.get_out(node_id, rel=rel_filter)
+                for rel_id, dst_id in out_edges:
+                    if dst_id in nodes_to_include:
+                        edges_to_include.append((node_id, rel_id, dst_id))
+
+        # Build node info for labels
+        node_info: dict[int, tuple[str, str]] = {}  # id -> (type, label)
+        for node_id in nodes_to_include:
+            node = graph.get_node(node_id)
+            if node:
+                import msgpack
+
+                payload = msgpack.unpackb(node.payload) if node.payload else {}
+                label = _get_node_label(node.type, payload)
+                node_info[node_id] = (node.type, label)
+
+        # Generate DOT output
+        lines = ["digraph G {", '  rankdir=LR;', '  node [shape=box];', ""]
+
+        # Define node styles by type
+        lines.append("  // Node styles")
+        lines.append(
+            '  node [style=filled, fillcolor=lightblue] // default'
+        )
+        lines.append("")
+
+        # Output nodes with labels
+        lines.append("  // Nodes")
+        for node_id, (node_type, label) in node_info.items():
+            color = _get_node_color(node_type)
+            escaped_label = label.replace('"', '\\"').replace("\n", "\\n")
+            lines.append(
+                f'  n{node_id} [label="{escaped_label}", fillcolor={color}];'
+            )
+
+        lines.append("")
+        lines.append("  // Edges")
+
+        # Output edges
+        for src_id, rel_id, dst_id in edges_to_include:
+            if src_id in node_info and dst_id in node_info:
+                rel_name = graph.relations.lookup(rel_id) or f"rel:{rel_id}"
+                lines.append(f'  n{src_id} -> n{dst_id} [label="{rel_name}"];')
+
+        lines.append("}")
+
+        dot_output = "\n".join(lines)
+
+        # Write output
+        if self.output:
+            Path(self.output).write_text(dot_output)
+            console.success(
+                f"wrote {len(nodes_to_include)} nodes, "
+                f"{len(edges_to_include)} edges to {self.output}"
+            )
+        else:
+            print(dot_output)
+
+        tracker.close()
+        return 0
+
+
+def _get_node_label(node_type: str, payload: dict) -> str:
+    """Get a readable label for a node."""
+    if node_type == "file":
+        path = payload.get("path", "?")
+        # Just filename for brevity
+        return Path(path).name if path else "?"
+    elif node_type == "symbol":
+        name = payload.get("name", "?")
+        kind = payload.get("kind", "")
+        return f"{kind}\\n{name}" if kind else name
+    elif node_type == "memory":
+        preview = payload.get("text_preview", "")[:30]
+        return f"mem\\n{preview}..."
+    return str(payload)[:30]
+
+
+def _get_node_color(node_type: str) -> str:
+    """Get fill color for node type."""
+    colors = {
+        "file": "lightgreen",
+        "symbol": "lightblue",
+        "memory": "lightyellow",
+    }
+    return colors.get(node_type, "white")
 
 
 @dataclass
