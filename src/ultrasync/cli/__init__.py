@@ -39,6 +39,7 @@ from ultrasync.cli.commands.graph import (
     GraphDot,
     GraphEdges,
     GraphExport,
+    GraphGc,
     GraphImportCallgraph,
     GraphKvGet,
     GraphKvList,
@@ -154,6 +155,7 @@ _GraphKvGet = Annotated[GraphKvGet, tyro.conf.subcommand("graph:kv:get")]
 _GraphDiff = Annotated[GraphDiff, tyro.conf.subcommand("graph:diff")]
 _GraphDot = Annotated[GraphDot, tyro.conf.subcommand("graph:dot")]
 _GraphExport = Annotated[GraphExport, tyro.conf.subcommand("graph:export")]
+_GraphGc = Annotated[GraphGc, tyro.conf.subcommand("graph:gc")]
 _GraphImportCallgraph = Annotated[
     GraphImportCallgraph, tyro.conf.subcommand("graph:import-callgraph")
 ]
@@ -265,6 +267,7 @@ Command = (
     | _GraphDiff
     | _GraphDot
     | _GraphExport
+    | _GraphGc
     | _GraphImportCallgraph
     | _GraphRelations
     | _IrExtract

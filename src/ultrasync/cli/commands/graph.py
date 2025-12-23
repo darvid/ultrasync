@@ -797,6 +797,116 @@ def _get_node_color(node_type: str) -> str:
 
 
 @dataclass
+class GraphGc:
+    """Garbage collect stale graph nodes and edges."""
+
+    dry_run: bool = field(
+        default=False,
+        metadata={"help": "Show what would be deleted without deleting"},
+    )
+    directory: Path | None = field(
+        default=None,
+        metadata={"help": "Directory with .ultrasync index"},
+    )
+
+    def run(self) -> int:
+        """Execute the graph gc command."""
+        import msgpack
+
+        from ultrasync.graph import GraphMemory
+        from ultrasync.jit import FileTracker
+
+        root = self.directory.resolve() if self.directory else Path.cwd()
+        data_dir = root / DEFAULT_DATA_DIR
+
+        if not data_dir.exists():
+            console.error(f"no index found at {data_dir}")
+            return 1
+
+        tracker = FileTracker(data_dir / "tracker.db")
+        graph = GraphMemory(tracker)
+
+        # Stats
+        stale_files = 0
+        stale_symbols = 0
+        stale_memories = 0
+        edges_removed = 0
+
+        # Collect valid file keys (files that still exist in tracker)
+        valid_file_keys: set[int] = set()
+        for file_rec in tracker.iter_files():
+            valid_file_keys.add(file_rec.key_hash)
+
+        # Collect valid symbol keys
+        valid_symbol_keys: set[int] = set()
+        for sym_rec in tracker.iter_all_symbols():
+            valid_symbol_keys.add(sym_rec.key_hash)
+
+        # Collect valid memory keys
+        valid_memory_keys: set[int] = set()
+        for mem_rec in tracker.iter_memories():
+            valid_memory_keys.add(mem_rec.key_hash)
+
+        # Find stale file nodes (in graph but not in tracker)
+        stale_node_ids: set[int] = set()
+
+        for node in graph.iter_nodes(node_type="file"):
+            if node.id not in valid_file_keys:
+                stale_files += 1
+                stale_node_ids.add(node.id)
+                if not self.dry_run:
+                    payload = (
+                        msgpack.unpackb(node.payload) if node.payload else {}
+                    )
+                    path = payload.get("path", "unknown")
+                    console.dim(f"  stale file: {path}")
+
+        for node in graph.iter_nodes(node_type="symbol"):
+            if node.id not in valid_symbol_keys:
+                stale_symbols += 1
+                stale_node_ids.add(node.id)
+
+        for node in graph.iter_nodes(node_type="memory"):
+            if node.id not in valid_memory_keys:
+                stale_memories += 1
+                stale_node_ids.add(node.id)
+
+        # Delete stale nodes and their edges
+        if not self.dry_run and stale_node_ids:
+            with tracker.batch():
+                for node_id in stale_node_ids:
+                    # Delete outgoing edges
+                    for rel_id, dst_id in graph.get_out(node_id):
+                        graph.delete_edge(node_id, rel_id, dst_id)
+                        edges_removed += 1
+
+                    # Delete incoming edges
+                    for rel_id, src_id in graph.get_in(node_id):
+                        graph.delete_edge(src_id, rel_id, node_id)
+                        edges_removed += 1
+
+                    # Delete the node
+                    graph.delete_node(node_id)
+
+        # Report
+        action = "would delete" if self.dry_run else "deleted"
+        console.header("Graph GC" + (" (dry run)" if self.dry_run else ""))
+        console.key_value(f"stale files {action}", stale_files, indent=2)
+        console.key_value(f"stale symbols {action}", stale_symbols, indent=2)
+        console.key_value(f"stale memories {action}", stale_memories, indent=2)
+        console.key_value(f"edges {action}", edges_removed, indent=2)
+
+        if not self.dry_run:
+            stats = graph.stats()
+            console.subheader("\nGraph Stats")
+            console.key_value("nodes", stats["node_count"], indent=2)
+            console.key_value("edges", stats["edge_count"], indent=2)
+
+        tracker.close()
+        return 0
+
+
+@dataclass
 class GraphImportCallgraph:
     """Import call edges from callgraph into graph."""
 
@@ -857,7 +967,7 @@ class GraphImportCallgraph:
         calls_added = 0
 
         with tracker.batch():
-            for symbol_name, node_data in cg.nodes.items():
+            for _symbol_name, node_data in cg.nodes.items():
                 callee_key = node_data.key_hash
                 if not callee_key:
                     continue

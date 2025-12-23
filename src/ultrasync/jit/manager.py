@@ -10,10 +10,12 @@ import structlog
 
 from ultrasync.file_scanner import FileScanner
 from ultrasync.git import get_tracked_files, should_ignore_path
+from ultrasync.graph import GraphMemory, Relation
+from ultrasync.graph.bootstrap import is_bootstrapped
 from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
-from ultrasync.jit.embed_queue import EmbedQueue
 from ultrasync.jit.conventions import ConventionManager
+from ultrasync.jit.embed_queue import EmbedQueue
 from ultrasync.jit.lmdb_tracker import FileTracker
 from ultrasync.jit.memory import MemoryManager
 from ultrasync.jit.progress import IndexingProgress
@@ -101,6 +103,7 @@ class JITIndexManager:
         max_vector_cache_mb: int = 256,
         embed_batch_size: int = 32,
         enable_lexical: bool = True,
+        enable_graph: bool = True,
     ):
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -153,6 +156,12 @@ class JITIndexManager:
             except Exception as e:
                 logger.warning("failed to initialize lexical index: %s", e)
                 self.lexical = None
+
+        # Graph memory layer - only enabled if bootstrapped
+        self.graph: GraphMemory | None = None
+        if enable_graph and is_bootstrapped(self.tracker):
+            self.graph = GraphMemory(self.tracker)
+            logger.info("graph memory enabled")
 
         self._started = False
 
@@ -556,6 +565,9 @@ class JITIndexManager:
 
         self.tracker.delete_symbols(path)
 
+        # Track symbol keys for graph sync
+        indexed_symbol_keys: list[int] = []
+
         for i, sym in enumerate(metadata.symbol_info):
             sym_embedding = embeddings[i + 1]
             sym_key = hash64_sym_key(
@@ -590,6 +602,8 @@ class JITIndexManager:
                         sym_key, sym_blob.offset, sym_blob.length
                     )
 
+                indexed_symbol_keys.append(sym_key)
+
         # Extract insights (TODOs, FIXMEs, etc.) as symbols (no embedding)
         insights = self.pattern_manager.extract_insights(content)
         for insight in insights:
@@ -616,6 +630,9 @@ class JITIndexManager:
                 self.aot_index.insert(
                     insight_key, insight_blob.offset, insight_blob.length
                 )
+
+        # Sync to graph if enabled
+        self._sync_file_to_graph(path, file_key, indexed_symbol_keys)
 
         return IndexResult(
             status="indexed",
@@ -748,11 +765,15 @@ class JITIndexManager:
 
         # evict file from cache
         file_record = self.tracker.get_file(path)
+        file_key = file_record.key_hash if file_record else None
         if file_record:
             self.vector_cache.evict(file_record.key_hash)
 
+        # collect symbol keys before deletion (for graph cleanup)
+        symbol_keys = list(self.tracker.get_symbol_keys(path))
+
         # evict all symbols from cache
-        for sym_key in self.tracker.get_symbol_keys(path):
+        for sym_key in symbol_keys:
             self.vector_cache.evict(sym_key)
 
         # evict pattern caches that reference this file
@@ -761,6 +782,10 @@ class JITIndexManager:
         # delete from lexical index
         if self.lexical is not None:
             self.lexical.delete_by_path(str(path))
+
+        # delete from graph (before tracker deletion)
+        if file_key is not None:
+            self._delete_file_from_graph(file_key, symbol_keys)
 
         # delete symbols from tracker
         self.tracker.delete_symbols(path)
@@ -777,6 +802,10 @@ class JITIndexManager:
         if self.lexical is not None:
             self.lexical.delete(key_hash)
 
+        # delete from graph if enabled
+        if self.graph is not None:
+            self._delete_node_from_graph(key_hash)
+
         # delete from tracker
         return self.tracker.delete_symbol_by_key(key_hash)
 
@@ -786,9 +815,91 @@ class JITIndexManager:
         mem = self.tracker.get_memory(memory_id)
         if mem:
             self.vector_cache.evict(mem.key_hash)
+            # delete from graph if enabled
+            if self.graph is not None:
+                self._delete_node_from_graph(mem.key_hash)
 
         # delete from tracker
         return self.tracker.delete_memory(memory_id)
+
+    # --- Graph sync helpers ---
+
+    def _sync_file_to_graph(
+        self,
+        path: Path,
+        file_key: int,
+        symbol_keys: list[int],
+    ) -> None:
+        """Sync file and symbols to graph after indexing."""
+        if self.graph is None:
+            return
+
+        import time as time_mod
+
+        ts = time_mod.time()
+
+        # Upsert file node
+        self.graph.put_node(
+            node_id=file_key,
+            node_type="file",
+            payload={"path": str(path)},
+            scope="repo",
+            ts=ts,
+        )
+
+        # Upsert symbol nodes and defines edges
+        for sym_key in symbol_keys:
+            sym_rec = self.tracker.get_symbol_by_key(sym_key)
+            if sym_rec:
+                self.graph.put_node(
+                    node_id=sym_key,
+                    node_type="symbol",
+                    payload={
+                        "name": sym_rec.name,
+                        "kind": sym_rec.kind,
+                        "file_path": str(sym_rec.file_path),
+                        "line_start": sym_rec.line_start,
+                        "line_end": sym_rec.line_end,
+                    },
+                    scope="repo",
+                    ts=ts,
+                )
+                # Create defines edge
+                self.graph.put_edge(
+                    src_id=file_key,
+                    rel=Relation.DEFINES,
+                    dst_id=sym_key,
+                )
+
+    def _delete_file_from_graph(
+        self, file_key: int, symbol_keys: list[int]
+    ) -> None:
+        """Remove file and its symbols from graph."""
+        if self.graph is None:
+            return
+
+        # Delete symbol nodes and their edges
+        for sym_key in symbol_keys:
+            self._delete_node_from_graph(sym_key)
+
+        # Delete file node and its edges
+        self._delete_node_from_graph(file_key)
+
+    def _delete_node_from_graph(self, node_id: int) -> None:
+        """Delete a node and all its edges from graph."""
+        if self.graph is None:
+            return
+
+        # Delete outgoing edges
+        for rel_id, dst_id in self.graph.get_out(node_id):
+            self.graph.delete_edge(node_id, rel_id, dst_id)
+
+        # Delete incoming edges
+        for rel_id, src_id in self.graph.get_in(node_id):
+            self.graph.delete_edge(src_id, rel_id, node_id)
+
+        # Delete the node
+        self.graph.delete_node(node_id)
 
     async def index_directory(
         self,
