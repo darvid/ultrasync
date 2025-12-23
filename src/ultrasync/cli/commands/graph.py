@@ -32,7 +32,7 @@ class GraphStats:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         stats = graph.stats()
@@ -80,7 +80,7 @@ class GraphBootstrap:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         stats = bootstrap_graph(tracker, graph, force=self.force)
@@ -133,7 +133,7 @@ class GraphNodes:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         nodes = list(
@@ -199,7 +199,7 @@ class GraphEdges:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         # Parse node ID
@@ -274,7 +274,7 @@ class GraphKvList:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         # List all namespaces if none specified
@@ -349,7 +349,7 @@ class GraphKvSet:
             console.error(f"invalid JSON: {e}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         record = graph.put_kv(
@@ -401,7 +401,7 @@ class GraphKvGet:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         if self.revision:
@@ -461,7 +461,7 @@ class GraphDiff:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         # Calculate timestamp
@@ -557,7 +557,7 @@ class GraphExport:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         # Collect nodes
@@ -620,7 +620,7 @@ class GraphRelations:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        tracker = FileTracker(data_dir / "jit.db")
+        tracker = FileTracker(data_dir / "tracker.db")
         graph = GraphMemory(tracker)
 
         console.header("Builtin Relations")

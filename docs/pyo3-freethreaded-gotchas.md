@@ -75,6 +75,7 @@ For types using `RwLock`, `Mutex`, or `Arc` for interior mutability, the
 ### Example: Before and After
 
 **Before (broken - class silently not exported):**
+
 ```rust
 #[pyclass]
 pub struct MutableGlobalIndex {
@@ -84,6 +85,7 @@ pub struct MutableGlobalIndex {
 ```
 
 **After (working):**
+
 ```rust
 #[pyclass]
 pub struct MutableGlobalIndex {
