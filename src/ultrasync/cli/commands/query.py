@@ -65,6 +65,10 @@ class Query:
         default=2,
         metadata={"help": "Graph traversal depth for DOT output"},
     )
+    dot_memories: bool = field(
+        default=False,
+        metadata={"help": "Include relevant memories in DOT output"},
+    )
     debug: bool = field(
         default=False,
         metadata={"help": "Enable debug logging"},
@@ -311,15 +315,30 @@ class Query:
             tracker.close()
             return 1
 
-        # BFS from each root to collect neighborhood (skip memory nodes)
+        # Search for relevant memories if flag is set
+        relevant_memories: set[int] = set()
+        if self.dot_memories and manager.memory:
+            mem_results = manager.memory.search(
+                query=self.query_text,
+                top_k=5,
+            )
+            for mem in mem_results:
+                if mem.score >= 0.3:
+                    relevant_memories.add(mem.entry.key_hash)
+
+        # BFS from each root to collect neighborhood
         nodes_to_include: set[int] = set()
         edges_to_include: list[tuple[int, int, int]] = []
         visited: set[int] = set()
 
-        def is_memory_node(nid: int) -> bool:
-            """Check if node is a memory (skip in visualization)."""
+        def should_skip_memory(nid: int) -> bool:
+            """Skip memory nodes unless --dot-memories and relevant."""
             node = graph.get_node(nid)
-            return node is not None and node.type == "memory"
+            if node is None or node.type != "memory":
+                return False  # not a memory, don't skip
+            if not self.dot_memories:
+                return True  # memories disabled
+            return nid not in relevant_memories  # skip irrelevant
 
         for root_id in root_nodes:
             queue = [(root_id, 0)]
@@ -332,36 +351,45 @@ class Query:
                 if curr_depth >= self.dot_depth:
                     continue
 
-                # Get outgoing edges (skip memory nodes)
+                # Get outgoing edges
                 for rel_id, dst_id in graph.get_out(node_id):
-                    if is_memory_node(dst_id):
+                    if should_skip_memory(dst_id):
                         continue
                     edges_to_include.append((node_id, rel_id, dst_id))
                     if dst_id not in visited:
                         visited.add(dst_id)
                         queue.append((dst_id, curr_depth + 1))
 
-                # Get incoming edges (skip memory nodes)
+                # Get incoming edges
                 for rel_id, src_id in graph.get_in(node_id):
-                    if is_memory_node(src_id):
+                    if should_skip_memory(src_id):
                         continue
                     edges_to_include.append((src_id, rel_id, node_id))
                     if src_id not in visited:
                         visited.add(src_id)
                         queue.append((src_id, curr_depth + 1))
 
-        # Build node info for labels (skip memory nodes)
+        # Also add relevant memories directly (not via BFS)
+        if self.dot_memories:
+            for mem_id in relevant_memories:
+                nodes_to_include.add(mem_id)
+
+        # Build node info for labels
         import msgpack
 
         # id -> (type, label, is_root)
         node_info: dict[int, tuple[str, str, bool]] = {}
         for node_id in nodes_to_include:
             node = graph.get_node(node_id)
-            if node and node.type != "memory":
-                payload = msgpack.unpackb(node.payload) if node.payload else {}
-                label = _get_dot_label(node.type, payload)
-                is_root = node_id in root_nodes
-                node_info[node_id] = (node.type, label, is_root)
+            if not node:
+                continue
+            # Skip irrelevant memories
+            if node.type == "memory" and node_id not in relevant_memories:
+                continue
+            payload = msgpack.unpackb(node.payload) if node.payload else {}
+            label = _get_dot_label(node.type, payload)
+            is_root = node_id in root_nodes
+            node_info[node_id] = (node.type, label, is_root)
 
         # Generate DOT
         lines = [

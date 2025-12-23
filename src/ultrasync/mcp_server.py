@@ -2091,6 +2091,31 @@ After writing code, validate against conventions:
             tags=tags,
         )
 
+        # Sync to graph if enabled
+        if state.jit_manager.graph:
+            from ultrasync.graph.relations import Relation
+
+            state.jit_manager.graph.put_node(
+                node_id=entry.key_hash,
+                node_type="memory",
+                payload={
+                    "id": entry.id,
+                    "task": entry.task,
+                    "insights": entry.insights,
+                    "context": entry.context,
+                    "tags": entry.tags,
+                    "text_preview": text[:200],
+                },
+                scope="repo",
+            )
+            # Create DERIVED_FROM edges to symbols
+            for sym_key in entry.symbol_keys:
+                state.jit_manager.graph.put_edge(
+                    src_id=entry.key_hash,
+                    rel=Relation.DERIVED_FROM,
+                    dst_id=sym_key,
+                )
+
         return StructuredMemoryResult(
             id=entry.id,
             key_hash=entry.key_hash,
@@ -3799,7 +3824,7 @@ After writing code, validate against conventions:
         Returns:
             List of relation info with id, name, and whether builtin
         """
-        from ultrasync.graph import GraphMemory, Relation
+        from ultrasync.graph import GraphMemory
 
         graph = GraphMemory(state.jit_manager.tracker)
         relations = graph.relations.all_relations()
