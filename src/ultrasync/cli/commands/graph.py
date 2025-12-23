@@ -797,6 +797,105 @@ def _get_node_color(node_type: str) -> str:
 
 
 @dataclass
+class GraphImportCallgraph:
+    """Import call edges from callgraph into graph."""
+
+    directory: Path | None = field(
+        default=None,
+        metadata={"help": "Directory with .ultrasync index"},
+    )
+    rebuild: bool = field(
+        default=False,
+        metadata={"help": "Rebuild callgraph (ignore cache)"},
+    )
+
+    def run(self) -> int:
+        """Execute the graph import-callgraph command."""
+        from ultrasync.call_graph import CallGraph
+        from ultrasync.graph import GraphMemory, Relation
+        from ultrasync.jit import FileTracker
+
+        root = self.directory.resolve() if self.directory else Path.cwd()
+        data_dir = root / DEFAULT_DATA_DIR
+
+        if not data_dir.exists():
+            console.error(f"no index found at {data_dir}")
+            return 1
+
+        # Load cached callgraph
+        cache_path = data_dir / "callgraph.json"
+        if not cache_path.exists():
+            console.error(
+                f"no callgraph found at {cache_path}\n"
+                "run 'ultrasync callgraph' first to build it"
+            )
+            return 1
+
+        console.info("loading cached call graph...")
+        cg = CallGraph.load(cache_path)
+        if not cg:
+            console.error("failed to load callgraph")
+            return 1
+
+        tracker = FileTracker(data_dir / "tracker.db")
+        graph = GraphMemory(tracker)
+
+        # Build file path -> file key_hash mapping
+        file_keys: dict[str, int] = {}
+        for node in graph.iter_nodes(node_type="file"):
+            import msgpack
+            payload = msgpack.unpackb(node.payload) if node.payload else {}
+            path = payload.get("path", "")
+            # Store both full path and relative path
+            file_keys[path] = node.id
+            # Also store relative path from root
+            if path.startswith(str(root)):
+                rel_path = path[len(str(root)) + 1:]
+                file_keys[rel_path] = node.id
+
+        # Import call edges
+        calls_added = 0
+
+        with tracker.batch():
+            for symbol_name, node_data in cg.nodes.items():
+                callee_key = node_data.key_hash
+                if not callee_key:
+                    continue
+
+                # Get caller files for this symbol
+                for call_site in node_data.call_sites:
+                    caller_path = call_site.caller_path
+                    if not caller_path:
+                        continue
+
+                    caller_key = file_keys.get(caller_path)
+                    if not caller_key:
+                        continue
+
+                    # Create CALLS edge: file -> symbol
+                    graph.put_edge(
+                        src_id=caller_key,
+                        rel=Relation.CALLS,
+                        dst_id=callee_key,
+                        payload={"line": call_site.line},
+                    )
+                    calls_added += 1
+
+        console.header("Import Complete")
+        console.key_value("call edges added", calls_added, indent=2)
+        console.key_value("total symbols", len(cg.nodes), indent=2)
+
+        # Update stats
+        stats = graph.stats()
+        console.subheader("\nGraph Stats")
+        console.key_value("nodes", stats["node_count"], indent=2)
+        console.key_value("edges", stats["edge_count"], indent=2)
+
+        tracker.close()
+        return 0
+
+
+@dataclass
 class GraphRelations:
     """List all relations (builtin and custom)."""
 
