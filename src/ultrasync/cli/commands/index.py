@@ -128,6 +128,10 @@ class Index:
         default="general",
         metadata={"help": "Developer role for enrichment questions"},
     )
+    enrich_agent: str = field(
+        default="claude",
+        metadata={"help": "LLM CLI command (claude, codex, etc.)"},
+    )
     nuke: bool = field(
         default=False,
         metadata={"help": "Delete existing index and start fresh"},
@@ -231,7 +235,7 @@ class Index:
                 return await enrich_codebase(
                     root=root,
                     roles=[self.enrich_role],
-                    agent_command="claude",
+                    agent_command=self.enrich_agent,
                     fast_mode=False,
                     question_budget=self.enrich_budget,
                     output=None,
@@ -279,7 +283,7 @@ class Index:
             return await enrich_codebase(
                 root=root,
                 roles=[self.enrich_role],
-                agent_command="claude",
+                agent_command=self.enrich_agent,
                 fast_mode=False,
                 question_budget=self.enrich_budget,
                 output=None,
