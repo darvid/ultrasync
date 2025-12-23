@@ -633,6 +633,10 @@ class GraphDot:
         default=100,
         metadata={"help": "Max nodes to include"},
     )
+    include_orphans: bool = field(
+        default=False,
+        metadata={"help": "Include memory nodes without edges"},
+    )
     directory: Path | None = field(
         default=None,
         metadata={"help": "Directory with .ultrasync index"},
@@ -703,6 +707,14 @@ class GraphDot:
             for node in graph.iter_nodes(node_type=self.node_type):
                 if count >= self.limit:
                     break
+                # Skip orphan memory nodes unless explicitly requested
+                if node.type == "memory" and not self.include_orphans:
+                    has_edges = (
+                        len(graph.get_out(node.id)) > 0
+                        or len(graph.get_in(node.id)) > 0
+                    )
+                    if not has_edges:
+                        continue
                 nodes_to_include.add(node.id)
                 count += 1
 
