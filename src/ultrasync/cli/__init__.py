@@ -33,6 +33,18 @@ from ultrasync.cli.commands.conventions import (
 )
 from ultrasync.cli.commands.delete import Delete
 from ultrasync.cli.commands.enrich import Enrich, EnrichClear, EnrichList
+from ultrasync.cli.commands.graph import (
+    GraphBootstrap,
+    GraphDiff,
+    GraphEdges,
+    GraphExport,
+    GraphKvGet,
+    GraphKvList,
+    GraphKvSet,
+    GraphNodes,
+    GraphRelations,
+    GraphStats,
+)
 from ultrasync.cli.commands.grep import Grep, Sgrep
 from ultrasync.cli.commands.index import Index
 from ultrasync.cli.commands.ir import (
@@ -126,6 +138,22 @@ _MemorySearch = Annotated[MemorySearch, tyro.conf.subcommand("memory:search")]
 _MemoryStats = Annotated[MemoryStats, tyro.conf.subcommand("memory:stats")]
 _MemoryWrite = Annotated[MemoryWrite, tyro.conf.subcommand("memory:write")]
 _MemoryDelete = Annotated[MemoryDelete, tyro.conf.subcommand("memory:delete")]
+
+# Graph subcommands
+_GraphStats = Annotated[GraphStats, tyro.conf.subcommand("graph:stats")]
+_GraphBootstrap = Annotated[
+    GraphBootstrap, tyro.conf.subcommand("graph:bootstrap")
+]
+_GraphNodes = Annotated[GraphNodes, tyro.conf.subcommand("graph:nodes")]
+_GraphEdges = Annotated[GraphEdges, tyro.conf.subcommand("graph:edges")]
+_GraphKvList = Annotated[GraphKvList, tyro.conf.subcommand("graph:kv:list")]
+_GraphKvSet = Annotated[GraphKvSet, tyro.conf.subcommand("graph:kv:set")]
+_GraphKvGet = Annotated[GraphKvGet, tyro.conf.subcommand("graph:kv:get")]
+_GraphDiff = Annotated[GraphDiff, tyro.conf.subcommand("graph:diff")]
+_GraphExport = Annotated[GraphExport, tyro.conf.subcommand("graph:export")]
+_GraphRelations = Annotated[
+    GraphRelations, tyro.conf.subcommand("graph:relations")
+]
 
 # IR subcommands
 _IrExtract = Annotated[IrExtract, tyro.conf.subcommand("ir:extract")]
@@ -221,6 +249,16 @@ Command = (
     | _MemoryStats
     | _MemoryWrite
     | _MemoryDelete
+    | _GraphStats
+    | _GraphBootstrap
+    | _GraphNodes
+    | _GraphEdges
+    | _GraphKvList
+    | _GraphKvSet
+    | _GraphKvGet
+    | _GraphDiff
+    | _GraphExport
+    | _GraphRelations
     | _IrExtract
     | _IrEntities
     | _IrEndpoints

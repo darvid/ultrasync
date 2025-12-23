@@ -163,6 +163,50 @@ class ConventionRecord:
     last_applied: float | None = None
 
 
+@dataclass
+class GraphNodeRecord:
+    """A node in the graph memory layer."""
+
+    id: int  # u64 hash
+    type: str  # file, symbol, decision, constraint, memory, etc.
+    payload: bytes  # msgpack blob
+    scope: str  # repo, session, task
+    run_id: str
+    task_id: str
+    created_ts: float
+    updated_ts: float
+    rev: int
+
+
+@dataclass
+class GraphEdgeRecord:
+    """An edge in the graph memory layer."""
+
+    src_id: int
+    rel_id: int
+    dst_id: int
+    payload: bytes  # msgpack blob (optional metadata)
+    run_id: str
+    task_id: str
+    created_ts: float
+    updated_ts: float
+    tombstone: bool = False
+
+
+@dataclass
+class GraphPolicyRecord:
+    """A policy key-value entry (decision/constraint/procedure)."""
+
+    scope: str  # repo, session, task
+    namespace: str  # decisions, constraints, procedures
+    key: str
+    payload: bytes  # msgpack blob
+    ts: float
+    rev: int
+    run_id: str
+    task_id: str
+
+
 def _pack_u64(val: int) -> bytes:
     """Pack u64 as big-endian for lexicographic ordering."""
     return struct.pack(">Q", val)
@@ -253,6 +297,14 @@ class FileTracker:
         b"conventions_by_scope",  # context|conv_id -> ""
         b"conventions_by_cat",  # category|conv_id -> ""
         b"conventions_by_org",  # org_id|conv_id -> ""
+        # Graph memory keyspaces
+        b"graph_nodes",  # node_id(u64) -> NodeRecord
+        b"graph_edges",  # src_id|rel_id|dst_id -> EdgeRecord
+        b"graph_adj_out",  # src_id(u64) -> packed adjacency list
+        b"graph_adj_in",  # dst_id(u64) -> packed adjacency list
+        b"graph_relations",  # rel_id(u32) -> relation_name
+        b"graph_policy_kv",  # scope|namespace|key -> PolicyRecord
+        b"graph_policy_hist",  # scope|namespace|key|rev -> payload snapshot
     ]
 
     def __init__(

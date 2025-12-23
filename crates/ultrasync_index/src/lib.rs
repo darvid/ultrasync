@@ -641,11 +641,386 @@ impl MutableGlobalIndex {
     }
 }
 
+// =============================================================================
+// Graph Snapshot - Read-only mmap'd graph for benchmarking
+// =============================================================================
+
+const GRAPH_MAGIC: &[u8; 4] = b"GRPH";
+const GRAPH_HEADER_SIZE: usize = 48;
+const GRAPH_NODE_SIZE: usize = 22; // node_id(8) + type_idx(2) + payload_off(8) + payload_len(4)
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GraphHeader {
+    magic: [u8; 4],
+    version: u32,
+    node_count: u64,
+    edge_count: u64,
+    intern_offset: u64,
+    node_offset: u64,
+    adj_offset: u64,
+}
+
+/// A node entry in the graph snapshot.
+#[pyclass]
+#[derive(Clone)]
+pub struct GraphNodeEntry {
+    #[pyo3(get)]
+    pub node_id: u64,
+    #[pyo3(get)]
+    pub type_idx: u16,
+    #[pyo3(get)]
+    pub payload_offset: u64,
+    #[pyo3(get)]
+    pub payload_length: u32,
+}
+
+/// An adjacency entry (edge) in the graph snapshot.
+#[pyclass]
+#[derive(Clone)]
+pub struct GraphAdjEntry {
+    #[pyo3(get)]
+    pub rel_id: u32,
+    #[pyo3(get)]
+    pub target_id: u64,
+    #[pyo3(get)]
+    pub flags: u8,
+}
+
+/// Read-only mmapped graph snapshot for benchmarking and regression detection.
+///
+/// Binary format:
+/// - Header (48 bytes): magic, version, counts, offsets
+/// - Intern table: null-terminated strings for node types/relation names
+/// - Node table: sorted by node_id for binary search
+/// - Adjacency arrays: packed per-node edge lists
+#[pyclass]
+pub struct GraphSnapshot {
+    mmap: Mmap,
+    header: GraphHeader,
+}
+
+unsafe impl Send for GraphSnapshot {}
+unsafe impl Sync for GraphSnapshot {}
+
+#[pymethods]
+impl GraphSnapshot {
+    /// Open a graph snapshot file.
+    #[new]
+    pub fn new(path: &str) -> PyResult<Self> {
+        let file = File::open(Path::new(path))?;
+        let mmap = unsafe { Mmap::map(&file)? };
+
+        if mmap.len() < GRAPH_HEADER_SIZE {
+            return Err(PyValueError::new_err("graph file too small"));
+        }
+
+        let header = unsafe { *(mmap.as_ptr() as *const GraphHeader) };
+
+        if &header.magic != GRAPH_MAGIC {
+            return Err(PyValueError::new_err("bad graph magic"));
+        }
+
+        if header.version != 1 {
+            return Err(PyValueError::new_err("unsupported graph version"));
+        }
+
+        Ok(Self { mmap, header })
+    }
+
+    /// Number of nodes in the graph.
+    pub fn node_count(&self) -> u64 {
+        self.header.node_count
+    }
+
+    /// Number of edges in the graph.
+    pub fn edge_count(&self) -> u64 {
+        self.header.edge_count
+    }
+
+    /// Get a node by ID using binary search.
+    ///
+    /// Returns None if node not found.
+    pub fn get_node(&self, node_id: u64) -> Option<GraphNodeEntry> {
+        let node_count = self.header.node_count as usize;
+        if node_count == 0 {
+            return None;
+        }
+
+        let base = self.header.node_offset as usize;
+
+        // Binary search for node_id
+        let mut left = 0;
+        let mut right = node_count;
+
+        while left < right {
+            let mid = left + (right - left) / 2;
+            let offset = base + mid * GRAPH_NODE_SIZE;
+
+            if offset + GRAPH_NODE_SIZE > self.mmap.len() {
+                return None;
+            }
+
+            let mid_id = self.read_node_id(offset);
+
+            if mid_id == node_id {
+                return Some(self.read_node_entry(offset));
+            } else if mid_id < node_id {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+
+        None
+    }
+
+    /// Get outgoing edges for a node.
+    ///
+    /// Returns list of (rel_id, target_id, flags) tuples.
+    pub fn get_out(&self, node_id: u64) -> Vec<GraphAdjEntry> {
+        self.get_adjacency(node_id, true)
+    }
+
+    /// Get incoming edges for a node.
+    ///
+    /// Returns list of (rel_id, source_id, flags) tuples.
+    pub fn get_in(&self, node_id: u64) -> Vec<GraphAdjEntry> {
+        self.get_adjacency(node_id, false)
+    }
+
+    /// Get an interned string by index.
+    pub fn get_intern(&self, idx: u32) -> Option<String> {
+        let base = self.header.intern_offset as usize;
+        let end = self.header.node_offset as usize;
+
+        if base >= self.mmap.len() || base >= end {
+            return None;
+        }
+
+        // Skip to idx-th null-terminated string
+        let mut offset = base;
+        let mut current_idx = 0u32;
+
+        while offset < end && current_idx < idx {
+            while offset < end && self.mmap[offset] != 0 {
+                offset += 1;
+            }
+            offset += 1; // skip null
+            current_idx += 1;
+        }
+
+        if current_idx != idx || offset >= end {
+            return None;
+        }
+
+        // Read string until null
+        let start = offset;
+        while offset < end && self.mmap[offset] != 0 {
+            offset += 1;
+        }
+
+        String::from_utf8(self.mmap[start..offset].to_vec()).ok()
+    }
+
+    /// Iterate all nodes.
+    pub fn iter_nodes(&self) -> Vec<GraphNodeEntry> {
+        let mut nodes = Vec::with_capacity(self.header.node_count as usize);
+        let base = self.header.node_offset as usize;
+
+        for i in 0..self.header.node_count as usize {
+            let offset = base + i * GRAPH_NODE_SIZE;
+            if offset + GRAPH_NODE_SIZE <= self.mmap.len() {
+                nodes.push(self.read_node_entry(offset));
+            }
+        }
+
+        nodes
+    }
+}
+
+impl GraphSnapshot {
+    fn read_node_id(&self, offset: usize) -> u64 {
+        let bytes: [u8; 8] = self.mmap[offset..offset + 8].try_into().unwrap();
+        u64::from_le_bytes(bytes)
+    }
+
+    fn read_node_entry(&self, offset: usize) -> GraphNodeEntry {
+        let node_id = self.read_node_id(offset);
+        let type_idx = u16::from_le_bytes(self.mmap[offset + 8..offset + 10].try_into().unwrap());
+        let payload_offset =
+            u64::from_le_bytes(self.mmap[offset + 10..offset + 18].try_into().unwrap());
+        let payload_length =
+            u32::from_le_bytes(self.mmap[offset + 18..offset + 22].try_into().unwrap());
+
+        GraphNodeEntry { node_id, type_idx, payload_offset, payload_length }
+    }
+
+    fn get_adjacency(&self, node_id: u64, outgoing: bool) -> Vec<GraphAdjEntry> {
+        // Adjacency format: node_id(8) + count(4) + entries...
+        // Each entry: rel_id(4) + target_id(8) + flags(1) = 13 bytes
+        const ADJ_ENTRY_SIZE: usize = 13;
+
+        let base = self.header.adj_offset as usize;
+        let mut offset = base;
+        let end = self.mmap.len();
+
+        // Scan for node_id (adjacency lists are stored by node_id)
+        // Format: [direction(1)][node_id(8)][count(4)][entries...]
+        while offset + 13 < end {
+            let dir = self.mmap[offset];
+            let is_out = dir == b'O';
+            offset += 1;
+
+            let adj_node_id = u64::from_le_bytes(self.mmap[offset..offset + 8].try_into().unwrap());
+            offset += 8;
+
+            let count = u32::from_le_bytes(self.mmap[offset..offset + 4].try_into().unwrap());
+            offset += 4;
+
+            let entries_size = count as usize * ADJ_ENTRY_SIZE;
+
+            if adj_node_id == node_id && is_out == outgoing {
+                // Found it - read entries
+                let mut entries = Vec::with_capacity(count as usize);
+
+                for _ in 0..count {
+                    if offset + ADJ_ENTRY_SIZE > end {
+                        break;
+                    }
+
+                    let rel_id =
+                        u32::from_le_bytes(self.mmap[offset..offset + 4].try_into().unwrap());
+                    let target_id =
+                        u64::from_le_bytes(self.mmap[offset + 4..offset + 12].try_into().unwrap());
+                    let flags = self.mmap[offset + 12];
+
+                    entries.push(GraphAdjEntry { rel_id, target_id, flags });
+                    offset += ADJ_ENTRY_SIZE;
+                }
+
+                return entries;
+            }
+
+            // Skip this adjacency list
+            offset += entries_size;
+        }
+
+        Vec::new()
+    }
+}
+
+/// Export a graph snapshot from LMDB data.
+///
+/// Args:
+///     output_path: Path to write the snapshot file
+///     nodes: List of (node_id, type_idx, payload_offset, payload_length)
+///     adj_out: Dict of node_id -> [(rel_id, target_id, flags), ...]
+///     adj_in: Dict of node_id -> [(rel_id, source_id, flags), ...]
+///     intern_strings: List of strings to intern (types, relations)
+///
+/// Returns:
+///     Dict with stats (bytes_written, node_count, edge_count)
+#[pyfunction]
+pub fn export_graph_snapshot(
+    output_path: &str,
+    nodes: Vec<(u64, u16, u64, u32)>,
+    adj_out: std::collections::HashMap<u64, Vec<(u32, u64, u8)>>,
+    adj_in: std::collections::HashMap<u64, Vec<(u32, u64, u8)>>,
+    intern_strings: Vec<String>,
+) -> PyResult<std::collections::HashMap<String, u64>> {
+    let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(output_path)?;
+
+    // Build intern table
+    let mut intern_bytes = Vec::new();
+    for s in &intern_strings {
+        intern_bytes.extend_from_slice(s.as_bytes());
+        intern_bytes.push(0); // null terminator
+    }
+
+    // Sort nodes by ID
+    let mut sorted_nodes = nodes.clone();
+    sorted_nodes.sort_by_key(|(id, _, _, _)| *id);
+
+    // Calculate offsets
+    let intern_offset = GRAPH_HEADER_SIZE as u64;
+    let node_offset = intern_offset + intern_bytes.len() as u64;
+    let adj_offset = node_offset + (sorted_nodes.len() * GRAPH_NODE_SIZE) as u64;
+
+    // Count edges
+    let edge_count: u64 = adj_out.values().map(|v| v.len() as u64).sum();
+
+    // Write header
+    let header = GraphHeader {
+        magic: *GRAPH_MAGIC,
+        version: 1,
+        node_count: sorted_nodes.len() as u64,
+        edge_count,
+        intern_offset,
+        node_offset,
+        adj_offset,
+    };
+
+    let header_bytes: [u8; GRAPH_HEADER_SIZE] = unsafe { mem::transmute_copy(&header) };
+    file.write_all(&header_bytes)?;
+
+    // Write intern table
+    file.write_all(&intern_bytes)?;
+
+    // Write nodes
+    for (node_id, type_idx, payload_off, payload_len) in &sorted_nodes {
+        file.write_all(&node_id.to_le_bytes())?;
+        file.write_all(&type_idx.to_le_bytes())?;
+        file.write_all(&payload_off.to_le_bytes())?;
+        file.write_all(&payload_len.to_le_bytes())?;
+    }
+
+    // Write adjacency lists
+    // Outgoing
+    for (node_id, edges) in &adj_out {
+        file.write_all(b"O")?; // direction marker
+        file.write_all(&node_id.to_le_bytes())?;
+        file.write_all(&(edges.len() as u32).to_le_bytes())?;
+        for (rel_id, target_id, flags) in edges {
+            file.write_all(&rel_id.to_le_bytes())?;
+            file.write_all(&target_id.to_le_bytes())?;
+            file.write_all(&[*flags])?;
+        }
+    }
+
+    // Incoming
+    for (node_id, edges) in &adj_in {
+        file.write_all(b"I")?; // direction marker
+        file.write_all(&node_id.to_le_bytes())?;
+        file.write_all(&(edges.len() as u32).to_le_bytes())?;
+        for (rel_id, source_id, flags) in edges {
+            file.write_all(&rel_id.to_le_bytes())?;
+            file.write_all(&source_id.to_le_bytes())?;
+            file.write_all(&[*flags])?;
+        }
+    }
+
+    file.sync_all()?;
+
+    let bytes_written = file.metadata()?.len();
+
+    let mut stats = std::collections::HashMap::new();
+    stats.insert("bytes_written".to_string(), bytes_written);
+    stats.insert("node_count".to_string(), sorted_nodes.len() as u64);
+    stats.insert("edge_count".to_string(), edge_count);
+
+    Ok(stats)
+}
+
 #[pymodule(gil_used = false)]
 fn ultrasync_index(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlobView>()?;
     m.add_class::<GlobalIndex>()?;
     m.add_class::<ThreadIndex>()?;
     m.add_class::<MutableGlobalIndex>()?;
+    m.add_class::<GraphSnapshot>()?;
+    m.add_class::<GraphNodeEntry>()?;
+    m.add_class::<GraphAdjEntry>()?;
+    m.add_function(wrap_pyfunction!(export_graph_snapshot, m)?)?;
     Ok(())
 }
