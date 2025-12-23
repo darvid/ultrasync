@@ -311,30 +311,15 @@ class Query:
             tracker.close()
             return 1
 
-        # Search for relevant memories separately
-        relevant_memories: set[int] = set()
-        if manager.memory:
-            mem_results = manager.memory.search(
-                query=self.query_text,
-                top_k=5,
-            )
-            for mem in mem_results:
-                if mem.score >= 0.3:  # only include relevant ones
-                    relevant_memories.add(mem.entry.key_hash)
-
-        # BFS from each root to collect neighborhood (skip unrelated memories)
+        # BFS from each root to collect neighborhood (skip memory nodes)
         nodes_to_include: set[int] = set()
         edges_to_include: list[tuple[int, int, int]] = []
         visited: set[int] = set()
 
-        def should_skip_node(nid: int) -> bool:
-            """Skip memory nodes unless they're relevant to the query."""
+        def is_memory_node(nid: int) -> bool:
+            """Check if node is a memory (skip in visualization)."""
             node = graph.get_node(nid)
-            if node is None:
-                return True
-            if node.type == "memory":
-                return nid not in relevant_memories
-            return False
+            return node is not None and node.type == "memory"
 
         for root_id in root_nodes:
             queue = [(root_id, 0)]
@@ -347,35 +332,32 @@ class Query:
                 if curr_depth >= self.dot_depth:
                     continue
 
-                # Get outgoing edges (skip irrelevant memories)
+                # Get outgoing edges (skip memory nodes)
                 for rel_id, dst_id in graph.get_out(node_id):
-                    if should_skip_node(dst_id):
+                    if is_memory_node(dst_id):
                         continue
                     edges_to_include.append((node_id, rel_id, dst_id))
                     if dst_id not in visited:
                         visited.add(dst_id)
                         queue.append((dst_id, curr_depth + 1))
 
-                # Get incoming edges (skip irrelevant memories)
+                # Get incoming edges (skip memory nodes)
                 for rel_id, src_id in graph.get_in(node_id):
-                    if should_skip_node(src_id):
+                    if is_memory_node(src_id):
                         continue
                     edges_to_include.append((src_id, rel_id, node_id))
                     if src_id not in visited:
                         visited.add(src_id)
                         queue.append((src_id, curr_depth + 1))
 
-        # Build node info for labels (include relevant memories only)
+        # Build node info for labels (skip memory nodes)
         import msgpack
 
         # id -> (type, label, is_root)
         node_info: dict[int, tuple[str, str, bool]] = {}
         for node_id in nodes_to_include:
             node = graph.get_node(node_id)
-            if node:
-                # Skip irrelevant memories
-                if node.type == "memory" and node_id not in relevant_memories:
-                    continue
+            if node and node.type != "memory":
                 payload = msgpack.unpackb(node.payload) if node.payload else {}
                 label = _get_dot_label(node.type, payload)
                 is_root = node_id in root_nodes
