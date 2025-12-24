@@ -1,3 +1,6 @@
+#[cfg(feature = "scanner")]
+mod scanner;
+
 use std::ffi::c_int;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -9,6 +12,12 @@ use memmap2::Mmap;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi;
 use pyo3::prelude::*;
+
+#[cfg(feature = "scanner")]
+pub use scanner::{
+    batch_scan_files, batch_scan_files_with_content, FileMetadata as ScannerFileMetadata,
+    ScanResult, SymbolInfo as ScannerSymbolInfo, TreeSitterScanner,
+};
 
 const MAGIC: &[u8; 8] = b"FXINDEX\0";
 const HEADER_SIZE: usize = 32;
@@ -1014,6 +1023,7 @@ pub fn export_graph_snapshot(
 
 #[pymodule(gil_used = false)]
 fn ultrasync_index(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Index classes
     m.add_class::<BlobView>()?;
     m.add_class::<GlobalIndex>()?;
     m.add_class::<ThreadIndex>()?;
@@ -1022,5 +1032,19 @@ fn ultrasync_index(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GraphNodeEntry>()?;
     m.add_class::<GraphAdjEntry>()?;
     m.add_function(wrap_pyfunction!(export_graph_snapshot, m)?)?;
+
+    // Scanner classes and functions (tree-sitter based)
+    // Note: NO init_scanner() call here - grammars are lazy-loaded on first use
+    // to avoid segfault during PyO3 module initialization
+    #[cfg(feature = "scanner")]
+    {
+        m.add_class::<TreeSitterScanner>()?;
+        m.add_class::<ScannerFileMetadata>()?;
+        m.add_class::<ScannerSymbolInfo>()?;
+        m.add_class::<ScanResult>()?;
+        m.add_function(wrap_pyfunction!(batch_scan_files, m)?)?;
+        m.add_function(wrap_pyfunction!(batch_scan_files_with_content, m)?)?;
+    }
+
     Ok(())
 }

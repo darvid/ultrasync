@@ -6,6 +6,14 @@ from pathlib import Path
 
 from ultrasync.regex_safety import RegexTimeout, safe_compile
 
+# Try to import the fast Rust scanner
+try:
+    import ultrasync_index as _rust_scanner
+
+    _HAS_RUST_SCANNER = True
+except ImportError:
+    _HAS_RUST_SCANNER = False
+
 
 @dataclass
 class SymbolInfo:
@@ -41,7 +49,11 @@ class FileMetadata:
 
 
 class FileScanner:
-    """Scans source files and extracts metadata for indexing."""
+    """Scans source files and extracts metadata for indexing.
+
+    By default, uses a fast Rust/tree-sitter backend if available.
+    Falls back to Python AST parsing if Rust scanner is not installed.
+    """
 
     # file extensions we know how to parse
     PYTHON_EXTS = {".py", ".pyi"}
@@ -50,6 +62,58 @@ class FileScanner:
 
     # skip symbol extraction for large files (likely bundled/minified)
     MAX_SCAN_BYTES = 500_000  # 500KB
+
+    def __init__(self, *, use_rust: bool | None = None):
+        """Initialize the file scanner.
+
+        Args:
+            use_rust: Use the fast Rust/tree-sitter backend.
+                      None (default) = auto-detect (use if available)
+                      True = force Rust (raises if unavailable)
+                      False = force Python backend
+        """
+        if use_rust is None:
+            self._use_rust = _HAS_RUST_SCANNER
+        elif use_rust:
+            if not _HAS_RUST_SCANNER:
+                raise ImportError(
+                    "Rust scanner requested but ultrasync_index not installed. "
+                    "Install with: uv run maturin develop -m "
+                    "crates/ultrasync_index/Cargo.toml --release"
+                )
+            self._use_rust = True
+        else:
+            self._use_rust = False
+
+        if self._use_rust:
+            self._rust_scanner = _rust_scanner.TreeSitterScanner()
+
+    @classmethod
+    def has_rust_backend(cls) -> bool:
+        """Check if the fast Rust scanner is available."""
+        return _HAS_RUST_SCANNER
+
+    def _convert_rust_result(
+        self, rust_meta: "_rust_scanner.FileMetadata"
+    ) -> FileMetadata:
+        """Convert Rust FileMetadata to Python FileMetadata."""
+        symbols = [
+            SymbolInfo(
+                name=sym.name,
+                line=sym.line,
+                kind=sym.kind,
+                end_line=sym.end_line,
+            )
+            for sym in rust_meta.symbols
+        ]
+        return FileMetadata(
+            path=Path(rust_meta.path),
+            filename_no_ext=rust_meta.filename_no_ext,
+            exported_symbols=list(rust_meta.exported_symbols),
+            symbol_info=symbols,
+            component_names=list(rust_meta.component_names),
+            top_comments=list(rust_meta.top_comments),
+        )
 
     def scan(
         self,
@@ -70,6 +134,21 @@ class FileScanner:
         if ext not in supported_exts:
             return None
 
+        # Use Rust backend if available
+        if self._use_rust:
+            content_bytes = None
+            if content is not None:
+                if isinstance(content, str):
+                    content_bytes = content.encode("utf-8")
+                else:
+                    content_bytes = content
+
+            rust_result = self._rust_scanner.scan(str(path), content_bytes)
+            if rust_result is None:
+                return None
+            return self._convert_rust_result(rust_result)
+
+        # Fall back to Python implementation
         filename_no_ext = path.stem
 
         metadata = FileMetadata(
@@ -101,13 +180,42 @@ class FileScanner:
 
         return metadata
 
+    def scan_batch(self, paths: list[Path]) -> list[FileMetadata]:
+        """Scan multiple files in parallel (Rust backend only).
+
+        Uses rayon for parallel processing when Rust backend is available.
+        Falls back to sequential scanning if using Python backend.
+
+        Args:
+            paths: List of file paths to scan
+
+        Returns:
+            List of FileMetadata for successfully scanned files
+        """
+        if self._use_rust:
+            # Use fast parallel Rust scanner
+            str_paths = [str(p) for p in paths]
+            results = _rust_scanner.batch_scan_files(str_paths)
+            return [
+                self._convert_rust_result(r.metadata)
+                for r in results
+                if r.metadata is not None
+            ]
+        else:
+            # Fall back to sequential Python scanning
+            return [m for p in paths if (m := self.scan(p)) is not None]
+
     def scan_directory(
         self,
         root: Path,
         extensions: set[str] | None = None,
         exclude_dirs: set[str] | None = None,
     ) -> list[FileMetadata]:
-        """Recursively scan a directory for source files."""
+        """Recursively scan a directory for source files.
+
+        When using the Rust backend, uses parallel batch scanning for
+        optimal performance.
+        """
         if extensions is None:
             extensions = self.PYTHON_EXTS | self.TS_JS_EXTS | self.RUST_EXTS
 
@@ -125,18 +233,21 @@ class FileScanner:
                 ".next",
             }
 
-        results: list[FileMetadata] = []
-
+        # Collect all matching paths
+        paths: list[Path] = []
         for path in root.rglob("*"):
             if path.is_file() and path.suffix.lower() in extensions:
                 # check if any parent is in exclude_dirs
                 if any(part in exclude_dirs for part in path.parts):
                     continue
-                metadata = self.scan(path)
-                if metadata:
-                    results.append(metadata)
+                paths.append(path)
 
-        return results
+        # Use batch scanning for better performance
+        if self._use_rust and paths:
+            return self.scan_batch(paths)
+
+        # Fall back to sequential scanning
+        return [m for p in paths if (m := self.scan(p)) is not None]
 
     def _scan_python(self, content: str, metadata: FileMetadata) -> None:
         """Extract symbols from Python code."""
