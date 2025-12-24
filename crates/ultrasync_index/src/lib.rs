@@ -1,6 +1,9 @@
 #[cfg(feature = "scanner")]
 mod scanner;
 
+#[cfg(feature = "embeddings")]
+mod embeddings;
+
 use std::ffi::c_int;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -1044,6 +1047,12 @@ fn ultrasync_index(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<ScanResult>()?;
         m.add_function(wrap_pyfunction!(batch_scan_files, m)?)?;
         m.add_function(wrap_pyfunction!(batch_scan_files_with_content, m)?)?;
+    }
+
+    // Embeddings (candle-based)
+    #[cfg(feature = "embeddings")]
+    {
+        embeddings::register_module(m)?;
     }
 
     Ok(())

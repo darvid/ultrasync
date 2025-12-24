@@ -8,6 +8,28 @@ import structlog
 if TYPE_CHECKING:
     import httpx
 
+
+def _optimal_batch_size() -> int:
+    """Calculate optimal batch size based on CPU cores.
+
+    Uses 4x CPU count as a baseline - balances memory throughput
+    and parallelism. Minimum 16, max 64.
+    """
+    cpu_count = os.cpu_count() or 4
+    # 4x multiplier gives good balance for CPU embedding workloads
+    batch_size = cpu_count * 4
+    # clamp to 16-64 range (64 was fastest in benchmarks)
+    return max(16, min(batch_size, 64))
+
+# Try to import fast Rust embedder
+try:
+    import ultrasync_index as _rust_index
+
+    _HAS_RUST_EMBEDDER = hasattr(_rust_index, "RustEmbedder")
+except ImportError:
+    _rust_index = None  # type: ignore[assignment]
+    _HAS_RUST_EMBEDDER = False
+
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
 )
@@ -72,17 +94,20 @@ class SentenceTransformerProvider:
         model: str = DEFAULT_EMBEDDING_MODEL,
         max_chars: int = DEFAULT_MAX_CHARS,
         device: str | None = None,
+        batch_size: int | None = None,
     ) -> None:
         from sentence_transformers import SentenceTransformer
 
         self._model_name = model
         self._max_chars = max_chars
+        self._batch_size = batch_size or _optimal_batch_size()
         self._device = device or _get_device()
 
         logger.info(
             "loading sentence-transformers model",
             model=model,
             device=self._device,
+            batch_size=self._batch_size,
         )
         self._model = SentenceTransformer(model, device=self._device)
 
@@ -143,11 +168,106 @@ class SentenceTransformerProvider:
             indices, batch_texts = zip(*to_embed, strict=True)
             vecs = self._model.encode(
                 list(batch_texts),
+                batch_size=self._batch_size,
                 convert_to_numpy=True,
                 normalize_embeddings=True,
                 show_progress_bar=False,
             )
             for idx, text, vec in zip(indices, batch_texts, vecs, strict=True):
+                self._cache[text] = vec
+                results[idx] = vec
+
+        return results
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+
+class RustEmbedderProvider:
+    """Embedding provider using fast Rust/candle backend.
+
+    Uses the ultrasync_index Rust extension for embeddings. Faster model
+    loading and single-embed performance compared to sentence-transformers.
+    Falls back gracefully if the Rust backend is not available.
+    """
+
+    def __init__(
+        self,
+        model: str = DEFAULT_EMBEDDING_MODEL,
+        max_chars: int = DEFAULT_MAX_CHARS,
+        device: str | None = None,
+    ) -> None:
+        if not _HAS_RUST_EMBEDDER:
+            raise ImportError(
+                "Rust embedder not available. Install with: "
+                "uv run maturin develop -m crates/ultrasync_index/Cargo.toml --release"
+            )
+
+        self._model_name = model
+        self._max_chars = max_chars
+        device_str = device or "cpu"  # Rust backend only supports cpu for now
+
+        logger.info(
+            "loading rust/candle model",
+            model=model,
+            device=device_str,
+        )
+        self._embedder = _rust_index.RustEmbedder(
+            model_id=model,
+            device=device_str,
+            max_chars=max_chars,
+        )
+        self._dim = self._embedder.dim
+        self._device = self._embedder.device
+        self._cache: dict[str, np.ndarray] = {}
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Check if the Rust embedder backend is available."""
+        return _HAS_RUST_EMBEDDER
+
+    @property
+    def model(self) -> str:
+        return self._model_name
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def embed(self, text: str) -> np.ndarray:
+        """Embed a single text string."""
+        cached = self._cache.get(text)
+        if cached is not None:
+            return cached
+
+        vec = np.array(self._embedder.embed(text), dtype=np.float32)
+        self._cache[text] = vec
+        return vec
+
+    def embed_batch(self, texts: list[str]) -> list[np.ndarray]:
+        """Embed multiple texts."""
+        results: list[np.ndarray] = []
+        to_embed: list[tuple[int, str]] = []
+
+        for i, text in enumerate(texts):
+            cached = self._cache.get(text)
+            if cached is not None:
+                results.append(cached)
+            else:
+                results.append(np.array([]))  # placeholder
+                to_embed.append((i, text))
+
+        if to_embed:
+            indices, batch_texts = zip(*to_embed, strict=True)
+            vecs_list = self._embedder.embed_batch(list(batch_texts))
+            for idx, text, vec_list in zip(
+                indices, batch_texts, vecs_list, strict=True
+            ):
+                vec = np.array(vec_list, dtype=np.float32)
                 self._cache[text] = vec
                 results[idx] = vec
 
@@ -603,6 +723,7 @@ def create_provider(
     Args:
         backend: Which backend to use:
             - "sentence-transformers" / "st" / "sbert": Local ST
+            - "rust" / "candle": Fast Rust/candle backend
             - "infinity" / "infinity-emb": Local infinity engine
             - "infinity-api": Remote infinity server (REST API)
         model: Model name or path
@@ -617,7 +738,15 @@ def create_provider(
     """
     backend = backend.lower()
     if backend in ("sentence-transformers", "st", "sbert"):
+        batch_size = kwargs.get("batch_size")
         return SentenceTransformerProvider(
+            model=model,
+            max_chars=max_chars,
+            device=device,
+            batch_size=batch_size,
+        )
+    elif backend in ("rust", "candle"):
+        return RustEmbedderProvider(
             model=model,
             max_chars=max_chars,
             device=device,
@@ -644,5 +773,5 @@ def create_provider(
     else:
         raise ValueError(
             f"Unknown embedding backend: {backend}. "
-            f"Supported: 'sentence-transformers', 'infinity', 'infinity-api'"
+            f"Supported: 'sentence-transformers', 'rust', 'infinity', 'infinity-api'"
         )

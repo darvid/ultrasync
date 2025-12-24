@@ -91,6 +91,7 @@ INSIGHT_PATTERN_IDS = [
     "pat:ins-optimize",
     "pat:ins-deprecated",
     "pat:ins-security",
+    "pat:ins-change",  # Agent-written change tracking for regression detection
 ]
 
 
@@ -1629,6 +1630,27 @@ class PatternSetManager:
                     r"CVE-\d+",
                 ],
                 "tags": ["insight", "security"],
+            }
+        )
+
+        # Change tracking - for agent-written regression detection
+        self.load(
+            {
+                "id": "pat:ins-change",
+                "description": "Change tracking for regression detection",
+                "patterns": [
+                    r"CHANGE\s*:",
+                    r"CHANGED\s*:",
+                    r"MODIFIED\s*:",
+                    r"ADDED\s*:",
+                    r"REMOVED\s*:",
+                    r"REFACTORED\s*:",
+                    r"// CHANGE",
+                    r"# CHANGE",
+                    r"BREAKING\s*:",
+                    r"REGRESSION\s*:",
+                ],
+                "tags": ["insight", "change", "regression"],
             }
         )
 
