@@ -10,8 +10,10 @@ from ultrasync.regex_safety import RegexTimeout, safe_compile
 try:
     import ultrasync_index as _rust_scanner
 
-    _HAS_RUST_SCANNER = True
+    # Verify TreeSitterScanner exists (older builds may not have it)
+    _HAS_RUST_SCANNER = hasattr(_rust_scanner, "TreeSitterScanner")
 except ImportError:
+    _rust_scanner = None  # type: ignore[assignment]
     _HAS_RUST_SCANNER = False
 
 
