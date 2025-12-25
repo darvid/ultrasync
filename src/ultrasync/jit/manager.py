@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,7 +17,7 @@ from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
 from ultrasync.jit.conventions import ConventionManager
 from ultrasync.jit.embed_queue import EmbedQueue
-from ultrasync.jit.lmdb_tracker import FileTracker
+from ultrasync.jit.lmdb_tracker import BatchContext, FileTracker
 from ultrasync.jit.memory import MemoryManager
 from ultrasync.jit.progress import IndexingProgress
 from ultrasync.jit.vector_store import CompactionResult, VectorStore
@@ -388,6 +389,363 @@ class JITIndexManager:
             bytes=blob_entry.length,
             key_hash=file_key,
         )
+
+    def register_batch(
+        self,
+        paths: list[Path],
+        max_workers: int = 8,
+        force: bool = False,
+    ) -> list[IndexResult]:
+        """Register multiple files with parallel I/O and parsing.
+
+        Uses ThreadPoolExecutor for parallel file reads and Rust's
+        batch_scan_files_with_content for parallel tree-sitter parsing.
+        AOT inserts are batched at the end for reduced syscalls.
+
+        Args:
+            paths: List of file paths to register
+            max_workers: Number of threads for parallel I/O
+            force: Re-register even if up-to-date
+
+        Returns:
+            List of IndexResult for each file
+        """
+        if not paths:
+            return []
+
+        t_start = time.perf_counter()
+
+        # Resolve and filter paths
+        resolved_paths = [p.resolve() for p in paths]
+        valid_paths = [
+            p
+            for p in resolved_paths
+            if p.exists() and not should_ignore_path(p)
+        ]
+
+        if not valid_paths:
+            return [
+                IndexResult(
+                    status="skipped",
+                    reason="ignored_or_missing",
+                    path=str(p),
+                )
+                for p in resolved_paths
+            ]
+
+        # Check which files need indexing
+        if not force:
+            to_index = [p for p in valid_paths if self.tracker.needs_index(p)]
+            skipped = [
+                IndexResult(
+                    status="skipped",
+                    reason="up_to_date",
+                    path=str(p),
+                    key_hash=getattr(
+                        self.tracker.get_file(p), "key_hash", None
+                    ),
+                )
+                for p in valid_paths
+                if p not in to_index
+            ]
+        else:
+            to_index = valid_paths
+            skipped = []
+
+        if not to_index:
+            return skipped
+
+        t_filter = time.perf_counter()
+
+        # Phase 1: Parallel file reads
+        file_contents: dict[Path, bytes] = {}
+
+        def read_file(p: Path) -> tuple[Path, bytes | None]:
+            try:
+                return p, p.read_bytes()
+            except (OSError, PermissionError):
+                return p, None
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(read_file, p): p for p in to_index}
+            for future in as_completed(futures):
+                path, content = future.result()
+                if content is not None:
+                    file_contents[path] = content
+
+        t_read = time.perf_counter()
+
+        # Phase 2: Parallel tree-sitter scanning via Rust
+        items_for_scan = [
+            (str(p), content) for p, content in file_contents.items()
+        ]
+        scan_results = self.scanner.scan_batch_with_content(items_for_scan)
+        # Convert Rust metadata to Python format
+        scan_map: dict[str, object] = {}
+        for r in scan_results:
+            if r.metadata is not None:
+                # Convert Rust FileMetadata to Python format
+                # Rust uses 'symbols', Python uses 'symbol_info'
+                scan_map[r.path] = self.scanner._convert_rust_result(
+                    r.metadata
+                )
+
+        t_scan = time.perf_counter()
+
+        # Phase 3A: Collect ALL blob data and metadata
+        # Structure: list of tuples tracking what each blob item is for
+        # We collect everything first to enable a single batch append
+        results: list[IndexResult] = list(skipped)
+        aot_entries: list[tuple[int, int, int]] = []  # (key_hash, offset, len)
+
+        # Collected data for batch processing
+        blob_data: list[bytes] = []  # All bytes to append in one fsync
+
+        # Per-file collected data for second pass
+        file_info: dict[Path, dict] = {}
+
+        for path in to_index:
+            content = file_contents.get(path)
+            if content is None:
+                results.append(
+                    IndexResult(
+                        status="error",
+                        reason="read_failed",
+                        path=str(path),
+                    )
+                )
+                continue
+
+            metadata = scan_map.get(str(path))
+            if not metadata:
+                results.append(
+                    IndexResult(
+                        status="skipped",
+                        reason="unsupported_type",
+                        path=str(path),
+                    )
+                )
+                continue
+
+            # Scan for patterns (contexts + insights)
+            detected_contexts, insights = self.pattern_manager.scan_all_fast(
+                content, path
+            )
+
+            path_rel = str(path)
+            file_key = hash64_file_key(path_rel)
+            content_hash = self._content_hash(content)
+
+            # Queue file content for blob append
+            file_blob_idx = len(blob_data)
+            blob_data.append(content)
+
+            # Collect symbol bytes
+            symbols_collected: list[tuple[int, object, bytes]] = []
+            for sym in metadata.symbol_info:
+                sym_bytes = self._extract_symbol_bytes(
+                    content, sym.line, sym.end_line
+                )
+                if sym_bytes:
+                    blob_idx = len(blob_data)
+                    blob_data.append(sym_bytes)
+                    symbols_collected.append((blob_idx, sym, sym_bytes))
+
+            # Collect insight bytes
+            insights_collected: list[tuple[int, object, bytes]] = []
+            for insight in insights:
+                insight_bytes = insight.text.encode("utf-8")
+                blob_idx = len(blob_data)
+                blob_data.append(insight_bytes)
+                insights_collected.append((blob_idx, insight, insight_bytes))
+
+            # Store info for second pass
+            file_info[path] = {
+                "file_blob_idx": file_blob_idx,
+                "content": content,
+                "content_hash": content_hash,
+                "file_key": file_key,
+                "path_rel": path_rel,
+                "metadata": metadata,
+                "detected_contexts": detected_contexts,
+                "symbols_collected": symbols_collected,
+                "insights_collected": insights_collected,
+            }
+
+        t_collect = time.perf_counter()
+
+        # Phase 3B: Single batch blob append (ONE fsync for entire batch!)
+        if blob_data:
+            blob_entries = self.blob.append_batch(blob_data)
+        else:
+            blob_entries = []
+
+        t_blob = time.perf_counter()
+
+        # Phase 3C: Distribute blob entries and do LMDB upserts
+        # Use batch context for single transaction (huge perf win)
+        # Also batch lexical index commits
+        if self.lexical is not None:
+            self.lexical.begin_batch()
+
+        with BatchContext(self.tracker):
+            for path, info in file_info.items():
+                file_blob_entry = blob_entries[info["file_blob_idx"]]
+                file_key = info["file_key"]
+                path_rel = info["path_rel"]
+                metadata = info["metadata"]
+                content = info["content"]
+
+                # Upsert file record
+                self.tracker.upsert_file(
+                    path=path,
+                    content_hash=info["content_hash"],
+                    blob_offset=file_blob_entry.offset,
+                    blob_length=file_blob_entry.length,
+                    key_hash=file_key,
+                    detected_contexts=(
+                        info["detected_contexts"]
+                        if info["detected_contexts"]
+                        else None
+                    ),
+                )
+
+                # Queue AOT insert for file
+                aot_entries.append(
+                    (file_key, file_blob_entry.offset, file_blob_entry.length)
+                )
+
+                # Process symbols
+                self.tracker.delete_symbols(path)
+                sym_count = 0
+
+                for blob_idx, sym, _ in info["symbols_collected"]:
+                    sym_blob_entry = blob_entries[blob_idx]
+                    sym_key = hash64_sym_key(
+                        path_rel,
+                        sym.name,
+                        sym.kind,
+                        sym.line,
+                        sym.end_line or sym.line,
+                    )
+                    self.tracker.upsert_symbol(
+                        file_path=path,
+                        name=sym.name,
+                        kind=sym.kind,
+                        line_start=sym.line,
+                        line_end=sym.end_line,
+                        blob_offset=sym_blob_entry.offset,
+                        blob_length=sym_blob_entry.length,
+                        key_hash=sym_key,
+                    )
+                    aot_entries.append(
+                        (sym_key, sym_blob_entry.offset, sym_blob_entry.length)
+                    )
+                    sym_count += 1
+
+                # Process insights
+                for blob_idx, insight, _ in info["insights_collected"]:
+                    insight_blob_entry = blob_entries[blob_idx]
+                    insight_key = hash64_sym_key(
+                        path_rel,
+                        insight.text[:50],
+                        insight.insight_type,
+                        insight.line_number,
+                        insight.line_number,
+                    )
+                    self.tracker.upsert_symbol(
+                        file_path=path,
+                        name=insight.text[:100],
+                        kind=insight.insight_type,
+                        line_start=insight.line_number,
+                        line_end=insight.line_number,
+                        blob_offset=insight_blob_entry.offset,
+                        blob_length=insight_blob_entry.length,
+                        key_hash=insight_key,
+                    )
+                    aot_entries.append(
+                        (
+                            insight_key,
+                            insight_blob_entry.offset,
+                            insight_blob_entry.length,
+                        )
+                    )
+                    sym_count += 1
+
+                # Lexical index
+                if self.lexical is not None:
+                    try:
+                        content_str = content.decode("utf-8", errors="replace")
+                        symbols_for_lex = [
+                            {
+                                "key_hash": hash64_sym_key(
+                                    path_rel,
+                                    s.name,
+                                    s.kind,
+                                    s.line,
+                                    s.end_line or s.line,
+                                ),
+                                "name": s.name,
+                                "kind": s.kind,
+                                "line_start": s.line,
+                                "line_end": s.end_line,
+                                "content": self._extract_symbol_bytes(
+                                    content, s.line, s.end_line
+                                ).decode("utf-8", errors="replace"),
+                            }
+                            for s in metadata.symbol_info
+                        ]
+                        self.lexical.add_file(
+                            key_hash=file_key,
+                            path=path_rel,
+                            content=content_str,
+                            symbols=symbols_for_lex,
+                        )
+                    except Exception as e:
+                        logger.debug("failed to add to lexical index: %s", e)
+
+                results.append(
+                    IndexResult(
+                        status="registered",
+                        path=str(path),
+                        symbols=sym_count,
+                        bytes=file_blob_entry.length,
+                        key_hash=file_key,
+                    )
+                )
+
+        t_process = time.perf_counter()
+
+        # End lexical batch mode (commit all pending docs)
+        if self.lexical is not None:
+            self.lexical.end_batch()
+
+        t_lexical = time.perf_counter()
+
+        # Phase 4: Batch AOT inserts
+        if self.aot_index is not None and aot_entries:
+            self.aot_index.insert_batch(aot_entries)
+
+        t_aot = time.perf_counter()
+
+        logger.info(
+            "register_batch: %d files (%d blobs) in %.1fms "
+            "(filter=%.1f read=%.1f scan=%.1f collect=%.1f "
+            "blob=%.1f lmdb=%.1f lexical=%.1f aot=%.1f)",
+            len(to_index),
+            len(blob_data),
+            (t_aot - t_start) * 1000,
+            (t_filter - t_start) * 1000,
+            (t_read - t_filter) * 1000,
+            (t_scan - t_read) * 1000,
+            (t_collect - t_scan) * 1000,
+            (t_blob - t_collect) * 1000,
+            (t_process - t_blob) * 1000,
+            (t_lexical - t_process) * 1000,
+            (t_aot - t_lexical) * 1000,
+        )
+
+        return results
 
     def ensure_embedded(self, key_hash: int, path: Path | None = None) -> bool:
         """Ensure a file/symbol has an embedding in the vector cache.
@@ -1352,34 +1710,52 @@ class JITIndexManager:
                     total - start_idx,
                 )
 
-                for i, file_path in enumerate(
-                    all_files[start_idx:], start=start_idx
-                ):
-                    result = self.register_file(file_path)
+                # Process files in batches for parallelism
+                batch_size = checkpoint_interval
+                files_to_process = all_files[start_idx:]
+                processed = 0
 
-                    if result.status == "error":
-                        errors.append(f"{file_path}: {result.reason}")
+                for batch_start in range(
+                    0, len(files_to_process), batch_size
+                ):
+                    batch_end = min(
+                        batch_start + batch_size, len(files_to_process)
+                    )
+                    batch = files_to_process[batch_start:batch_end]
+
+                    results = self.register_batch(batch)
+
+                    for result in results:
+                        if result.status == "error":
+                            errors.append(
+                                f"{result.path}: {result.reason}"
+                            )
+                        processed += 1
+
+                    current_idx = start_idx + batch_end
+                    last_file = batch[-1] if batch else None
 
                     progress.update_absolute(
                         "register",
-                        completed=i + 1 - start_idx,
-                        current_item=file_path.name,
-                        files=i + 1,
+                        completed=batch_end,
+                        current_item=last_file.name if last_file else "",
+                        files=current_idx,
                         blob_size=self.blob.size_bytes,
                         errors=len(errors),
                     )
 
-                    if (i + 1) % checkpoint_interval == 0:
-                        self.tracker.end_batch()
+                    # Checkpoint after each batch
+                    self.tracker.end_batch()
+                    if last_file:
                         self.tracker.save_checkpoint(
-                            i + 1, total, str(file_path)
+                            current_idx, total, str(last_file)
                         )
-                        self.tracker.begin_batch()
+                    self.tracker.begin_batch()
 
                     yield IndexProgress(
-                        processed=i + 1,
+                        processed=current_idx,
                         total=total,
-                        current_file=str(file_path),
+                        current_file=str(last_file) if last_file else "",
                         bytes_written=self.blob.size_bytes,
                         errors=errors[-10:],
                     )

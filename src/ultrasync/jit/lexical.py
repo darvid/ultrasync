@@ -163,6 +163,17 @@ class LexicalIndex:
 
         self._writer = self._index.writer(heap_size=50_000_000)  # 50MB
         self._pending_docs = 0
+        self._batch_mode = False
+
+    def begin_batch(self) -> None:
+        """Start batch mode - defer commits until end_batch()."""
+        self._batch_mode = True
+
+    def end_batch(self) -> None:
+        """End batch mode and commit all pending changes."""
+        if self._batch_mode:
+            self.commit()
+            self._batch_mode = False
 
     def _tokenize_for_index(self, text: str) -> str:
         """Prepare text for indexing with code-aware tokenization.
@@ -231,8 +242,8 @@ class LexicalIndex:
                     content=sym.get("content", sym["name"]),
                 )
 
-        # Auto-commit every 100 docs for durability
-        if self._pending_docs >= 100:
+        # Auto-commit every 100 docs for durability (unless in batch mode)
+        if self._pending_docs >= 100 and not self._batch_mode:
             self.commit()
 
     def add_symbol(
@@ -283,7 +294,8 @@ class LexicalIndex:
         self._writer.add_document(doc)
         self._pending_docs += 1
 
-        if self._pending_docs >= 100:
+        # Auto-commit every 100 docs (unless in batch mode)
+        if self._pending_docs >= 100 and not self._batch_mode:
             self.commit()
 
     def delete(self, key_hash: int) -> None:

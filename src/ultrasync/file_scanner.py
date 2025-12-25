@@ -207,6 +207,39 @@ class FileScanner:
             # Fall back to sequential Python scanning
             return [m for p in paths if (m := self.scan(p)) is not None]
 
+    def scan_batch_with_content(
+        self, items: list[tuple[str, bytes]]
+    ) -> list["_rust_scanner.ScanResult"]:
+        """Scan files with pre-read content in parallel.
+
+        More efficient when content is already in memory - avoids
+        redundant file reads in the Rust layer.
+
+        Args:
+            items: List of (path, content) tuples
+
+        Returns:
+            List of ScanResult objects from Rust
+        """
+        if self._use_rust:
+            return _rust_scanner.batch_scan_files_with_content(items)
+        else:
+            # Fallback: scan each file sequentially
+            from dataclasses import dataclass
+
+            @dataclass
+            class FakeScanResult:
+                path: str
+                metadata: FileMetadata | None
+                error: str | None = None
+
+            results = []
+            for path_str, content in items:
+                path = Path(path_str)
+                meta = self.scan(path, content)
+                results.append(FakeScanResult(path=path_str, metadata=meta))
+            return results  # type: ignore
+
     def scan_directory(
         self,
         root: Path,

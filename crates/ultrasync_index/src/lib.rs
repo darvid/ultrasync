@@ -481,6 +481,66 @@ impl MutableGlobalIndex {
         Err(PyValueError::new_err("index full"))
     }
 
+    /// Batch insert multiple entries - more efficient than individual inserts.
+    ///
+    /// Takes a list of (key_hash, offset, length) tuples and inserts them all
+    /// while holding the lock once. Reduces lock overhead significantly.
+    /// Items are sorted by bucket index to minimize disk seek distance.
+    ///
+    /// Returns the number of new entries inserted (excludes updates).
+    pub fn insert_batch(&self, items: Vec<(u64, u64, u32)>) -> PyResult<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        let mut inner = self.inner.write().unwrap();
+
+        // Check if we need to grow before batch insert
+        let needed_capacity = inner.count + items.len() as u64;
+        let load = (needed_capacity + inner.tombstone_count) as f64 / inner.capacity as f64;
+        if load > 0.7 {
+            Self::grow_inner(&mut inner)?;
+        }
+
+        // Sort items by bucket index to minimize disk seeks
+        let mut indexed_items: Vec<(u64, u64, u64, u32)> = items
+            .iter()
+            .filter(|(k, _, _)| *k != EMPTY_KEY && *k != TOMBSTONE_KEY)
+            .map(|(k, o, l)| (*k % inner.capacity, *k, *o, *l))
+            .collect();
+        indexed_items.sort_by_key(|(idx, _, _, _)| *idx);
+
+        let mut inserted = 0usize;
+
+        for (_, key_hash, offset, length) in indexed_items {
+            let mut idx = key_hash % inner.capacity;
+
+            for _ in 0..inner.capacity {
+                let bucket = Self::read_bucket(&mut inner.file, idx)?;
+
+                if bucket.key_hash == EMPTY_KEY || bucket.key_hash == TOMBSTONE_KEY {
+                    let was_tombstone = bucket.key_hash == TOMBSTONE_KEY;
+                    Self::write_bucket(&mut inner.file, idx, key_hash, offset, length)?;
+                    inner.count += 1;
+                    if was_tombstone {
+                        inner.tombstone_count -= 1;
+                    }
+                    inserted += 1;
+                    break;
+                }
+
+                if bucket.key_hash == key_hash {
+                    Self::write_bucket(&mut inner.file, idx, key_hash, offset, length)?;
+                    break;
+                }
+
+                idx = (idx + 1) % inner.capacity;
+            }
+        }
+
+        Ok(inserted)
+    }
+
     pub fn remove(&self, key_hash: u64) -> PyResult<bool> {
         if key_hash == EMPTY_KEY || key_hash == TOMBSTONE_KEY {
             return Ok(false);
