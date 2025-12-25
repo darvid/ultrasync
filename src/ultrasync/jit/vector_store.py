@@ -113,6 +113,48 @@ class VectorStore:
         self._size = offset + length
         return VectorEntry(offset=offset, length=length, dim=dim)
 
+    def append_batch(self, vectors: list[np.ndarray]) -> list[VectorEntry]:
+        """Append multiple vectors with a single fsync.
+
+        Much faster than repeated append() calls for bulk inserts.
+        """
+        if not vectors:
+            return []
+
+        # Prepare all data first
+        entries_data: list[tuple[bytes, bytes, int]] = []
+        for vec in vectors:
+            if vec.dtype != np.float32:
+                vec = vec.astype(np.float32)
+            dim = vec.shape[0]
+            header = struct.pack("<I", dim)
+            data = vec.tobytes()
+            entries_data.append((header, data, dim))
+
+        entries: list[VectorEntry] = []
+
+        with open(self.path, "r+b") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.seek(0, os.SEEK_END)
+                offset = f.tell()
+
+                for header, data, dim in entries_data:
+                    length = len(header) + len(data)
+                    f.write(header)
+                    f.write(data)
+                    entries.append(VectorEntry(offset=offset, length=length, dim=dim))
+                    offset += length
+
+                # Single fsync for all vectors!
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+        self._size = offset
+        return entries
+
     def read(self, offset: int, length: int) -> np.ndarray | None:
         """Read a vector from the store."""
         # refresh size from file in case another instance appended

@@ -1344,31 +1344,36 @@ class JITIndexManager:
         errors: list[str],
         progress: IndexingProgress | None = None,
     ) -> None:
-        """Batch embed all files for better performance."""
-        embed_batch_size = 256 if self.provider.device != "cpu" else 64
+        """Pipelined index with async embedding and batched writes.
 
-        # Phase 1: Scanning files
+        Architecture:
+        1. Scan phase: Collect all file data (parallel reads, no writes)
+        2. Write phase: Batch blob/tracker/AOT writes (single fsync)
+        3. Embed phase: Async embedding with pipelined vector writes
+        """
+        embed_batch_size = 256 if self.provider.device != "cpu" else 128
+
+        # ============================================================
+        # Phase 1: Scan all files and collect data (no writes yet)
+        # ============================================================
         if progress:
             progress.start_phase("scan", "Scanning files", len(files))
 
-        # file_data: (path, file_text, file_key, [(sym_text, sym_key), ...])
-        file_data: list[tuple[Path, str, int, list[tuple[str, int]]]] = []
+        # Collected data for batch processing
+        # file_info[path] = {content, content_hash, metadata, contexts, ...}
+        file_info: dict[Path, dict] = {}
+        embed_texts: list[str] = []
+        embed_meta: list[tuple[str, int, str]] = []  # (type, key_hash, name)
 
-        # track files needing index vs just embedding
         indexed_count = 0
         embed_only_count = 0
 
+        # Sequential scan (ThreadPoolExecutor had threading issues with scanner)
         for i, file_path in enumerate(files):
             needs_index = self.tracker.needs_index(file_path)
             needs_embed = self.tracker.needs_embed(file_path)
 
             if not needs_index and not needs_embed:
-                if progress:
-                    progress.update(
-                        "scan",
-                        current_item=file_path.name,
-                        files_scanned=i + 1,
-                    )
                 continue
 
             metadata = self.scanner.scan(file_path)
@@ -1384,113 +1389,34 @@ class JITIndexManager:
             path_rel = str(file_path)
             file_key = hash64_file_key(path_rel)
 
+            result: dict = {
+                "path_rel": path_rel,
+                "file_key": file_key,
+                "metadata": metadata,
+                "needs_index": needs_index,
+                "needs_embed": needs_embed,
+            }
+
             if needs_index:
-                # full indexing: read content, store blob, update tracker
-                indexed_count += 1
                 try:
                     content = file_path.read_bytes()
+                    result["content"] = content
+                    result["content_hash"] = self._content_hash(content)
+                    contexts, insights = self.pattern_manager.scan_all_fast(
+                        content, file_path
+                    )
+                    result["contexts"] = contexts
+                    result["insights"] = insights
                 except (OSError, PermissionError) as e:
                     errors.append(f"{file_path}: {e}")
                     continue
 
-                content_hash = self._content_hash(content)
-                blob_entry = self.blob.append(content)
+            file_info[file_path] = result
 
-                detected_contexts, insights = (
-                    self.pattern_manager.scan_all_fast(content, file_path)
-                )
-
-                self.tracker.upsert_file(
-                    path=file_path,
-                    content_hash=content_hash,
-                    blob_offset=blob_entry.offset,
-                    blob_length=blob_entry.length,
-                    key_hash=file_key,
-                    detected_contexts=detected_contexts or None,
-                )
-
-                if self.aot_index is not None:
-                    self.aot_index.insert(
-                        file_key, blob_entry.offset, blob_entry.length
-                    )
-
-                self.tracker.delete_symbols(file_path)
-
-                sym_data: list[tuple[str, int]] = []
-                for sym in metadata.symbol_info:
-                    sym_key = hash64_sym_key(
-                        path_rel,
-                        sym.name,
-                        sym.kind,
-                        sym.line,
-                        sym.end_line or sym.line,
-                    )
-                    sym_bytes = self._extract_symbol_bytes(
-                        content, sym.line, sym.end_line
-                    )
-                    if sym_bytes:
-                        sym_blob = self.blob.append(sym_bytes)
-                        self.tracker.upsert_symbol(
-                            file_path=file_path,
-                            name=sym.name,
-                            kind=sym.kind,
-                            line_start=sym.line,
-                            line_end=sym.end_line,
-                            blob_offset=sym_blob.offset,
-                            blob_length=sym_blob.length,
-                            key_hash=sym_key,
-                        )
-                        if self.aot_index is not None:
-                            self.aot_index.insert(
-                                sym_key, sym_blob.offset, sym_blob.length
-                            )
-                        sym_text = f"{sym.kind} {sym.name}"
-                        sym_data.append((sym_text, sym_key))
-
-                # Process insights from unified scan
-                for insight in insights:
-                    insight_key = hash64_sym_key(
-                        path_rel,
-                        insight.text[:50],
-                        insight.insight_type,
-                        insight.line_number,
-                        insight.line_number,
-                    )
-                    insight_bytes = insight.text.encode("utf-8")
-                    insight_blob = self.blob.append(insight_bytes)
-                    self.tracker.upsert_symbol(
-                        file_path=file_path,
-                        name=insight.text[:100],
-                        kind=insight.insight_type,
-                        line_start=insight.line_number,
-                        line_end=insight.line_number,
-                        blob_offset=insight_blob.offset,
-                        blob_length=insight_blob.length,
-                        key_hash=insight_key,
-                    )
-                    if self.aot_index is not None:
-                        self.aot_index.insert(
-                            insight_key,
-                            insight_blob.offset,
-                            insight_blob.length,
-                        )
-
-                file_text = metadata.to_embedding_text()
-                file_data.append((file_path, file_text, file_key, sym_data))
-
+            if needs_index:
+                indexed_count += 1
             elif needs_embed:
-                # embed-only: file is indexed, just needs vectors
                 embed_only_count += 1
-                file_text = metadata.to_embedding_text()
-
-                # get existing symbols from tracker
-                sym_data = []
-                for sym_rec in self.tracker.get_symbols(file_path):
-                    if sym_rec.vector_offset is None:
-                        sym_text = f"{sym_rec.kind} {sym_rec.name}"
-                        sym_data.append((sym_text, sym_rec.key_hash))
-
-                file_data.append((file_path, file_text, file_key, sym_data))
 
             if progress:
                 progress.update(
@@ -1499,117 +1425,263 @@ class JITIndexManager:
                     files_scanned=i + 1,
                     indexed=indexed_count,
                     embed_only=embed_only_count,
-                    blob_size=self.blob.size_bytes,
                 )
 
         if progress:
             progress.complete_phase("scan", f"Scanned {len(files)} files")
 
-        if not file_data:
+        if not file_info:
             if progress:
-                progress.log("No files need embedding")
+                progress.log("No files need processing")
             return
 
-        # Build text list for embedding with source tracking
-        all_texts: list[str] = []
-        text_map: list[
-            tuple[int, str, int, str]
-        ] = []  # (file_idx, type, key, name)
-        file_paths: list[Path] = []
+        # ============================================================
+        # Phase 2: Batch blob writes (single fsync)
+        # ============================================================
+        t_write_start = time.perf_counter()
 
-        file_count = 0
-        symbol_count = 0
+        # Collect all blob data
+        blob_data: list[bytes] = []
+        # (path, type, sym_idx)
+        blob_map: list[tuple[Path, str, int | None]] = []
 
-        for file_idx, (file_path, file_text, file_key, sym_data) in enumerate(
-            file_data
-        ):
-            text_map.append((file_idx, "file", file_key, file_path.name))
-            all_texts.append(file_text)
-            file_paths.append(file_path)
-            file_count += 1
+        for path, info in file_info.items():
+            if not info["needs_index"]:
+                continue
 
-            for sym_text, sym_key in sym_data:
-                text_map.append((file_idx, "symbol", sym_key, sym_text))
-                all_texts.append(sym_text)
-                symbol_count += 1
+            content = info["content"]
+            metadata = info["metadata"]
 
-        # Phase 2: Embedding with detailed progress
+            # File blob
+            blob_data.append(content)
+            blob_map.append((path, "file", None))
+
+            # Symbol blobs
+            for sym_idx, sym in enumerate(metadata.symbol_info):
+                sym_bytes = self._extract_symbol_bytes(
+                    content, sym.line, sym.end_line
+                )
+                if sym_bytes:
+                    blob_data.append(sym_bytes)
+                    blob_map.append((path, "symbol", sym_idx))
+
+            # Insight blobs
+            for insight_idx, insight in enumerate(info.get("insights", [])):
+                insight_bytes = insight.text.encode("utf-8")
+                blob_data.append(insight_bytes)
+                blob_map.append((path, "insight", insight_idx))
+
+        # Single batch append (one fsync!)
+        if blob_data:
+            blob_entries = self.blob.append_batch(blob_data)
+        else:
+            blob_entries = []
+
+        # ============================================================
+        # Phase 3: Batch LMDB + AOT writes
+        # ============================================================
+        aot_entries: list[tuple[int, int, int]] = []
+        blob_idx = 0
+
+        with BatchContext(self.tracker):
+            for path, info in file_info.items():
+                path_rel = info["path_rel"]
+                file_key = info["file_key"]
+                metadata = info["metadata"]
+
+                if info["needs_index"]:
+                    content = info["content"]
+                    file_blob = blob_entries[blob_idx]
+                    blob_idx += 1
+
+                    # Upsert file
+                    self.tracker.upsert_file(
+                        path=path,
+                        content_hash=info["content_hash"],
+                        blob_offset=file_blob.offset,
+                        blob_length=file_blob.length,
+                        key_hash=file_key,
+                        detected_contexts=info["contexts"] or None,
+                    )
+                    aot_entries.append(
+                        (file_key, file_blob.offset, file_blob.length)
+                    )
+
+                    # Delete old symbols
+                    self.tracker.delete_symbols(path)
+
+                    # Upsert symbols
+                    sym_data: list[tuple[str, int]] = []
+                    for sym in metadata.symbol_info:
+                        sym_key = hash64_sym_key(
+                            path_rel,
+                            sym.name,
+                            sym.kind,
+                            sym.line,
+                            sym.end_line or sym.line,
+                        )
+                        sym_bytes = self._extract_symbol_bytes(
+                            content, sym.line, sym.end_line
+                        )
+                        if sym_bytes:
+                            sym_blob = blob_entries[blob_idx]
+                            blob_idx += 1
+                            self.tracker.upsert_symbol(
+                                file_path=path,
+                                name=sym.name,
+                                kind=sym.kind,
+                                line_start=sym.line,
+                                line_end=sym.end_line,
+                                blob_offset=sym_blob.offset,
+                                blob_length=sym_blob.length,
+                                key_hash=sym_key,
+                            )
+                            aot_entries.append(
+                                (sym_key, sym_blob.offset, sym_blob.length)
+                            )
+                            sym_text = f"{sym.kind} {sym.name}"
+                            sym_data.append((sym_text, sym_key))
+
+                    # Upsert insights
+                    for insight in info.get("insights", []):
+                        insight_key = hash64_sym_key(
+                            path_rel,
+                            insight.text[:50],
+                            insight.insight_type,
+                            insight.line_number,
+                            insight.line_number,
+                        )
+                        insight_blob = blob_entries[blob_idx]
+                        blob_idx += 1
+                        self.tracker.upsert_symbol(
+                            file_path=path,
+                            name=insight.text[:100],
+                            kind=insight.insight_type,
+                            line_start=insight.line_number,
+                            line_end=insight.line_number,
+                            blob_offset=insight_blob.offset,
+                            blob_length=insight_blob.length,
+                            key_hash=insight_key,
+                        )
+                        aot_entries.append((
+                            insight_key,
+                            insight_blob.offset,
+                            insight_blob.length,
+                        ))
+
+                    # Collect embedding texts
+                    file_text = metadata.to_embedding_text()
+                    embed_texts.append(file_text)
+                    embed_meta.append(("file", file_key, path.name))
+                    for sym_text, sym_key in sym_data:
+                        embed_texts.append(sym_text)
+                        embed_meta.append(("symbol", sym_key, sym_text))
+
+                elif info["needs_embed"]:
+                    # Embed-only: collect texts from existing tracker data
+                    file_text = metadata.to_embedding_text()
+                    embed_texts.append(file_text)
+                    embed_meta.append(("file", file_key, path.name))
+
+                    for sym_rec in self.tracker.get_symbols(path):
+                        if sym_rec.vector_offset is None:
+                            sym_text = f"{sym_rec.kind} {sym_rec.name}"
+                            embed_texts.append(sym_text)
+                            embed_meta.append(
+                                ("symbol", sym_rec.key_hash, sym_text)
+                            )
+
+        # Batch AOT inserts
+        if self.aot_index is not None and aot_entries:
+            self.aot_index.insert_batch(aot_entries)
+
+        t_write = time.perf_counter()
+        logger.info(
+            "write phase: %d blobs, %d aot in %.1fms",
+            len(blob_data),
+            len(aot_entries),
+            (t_write - t_write_start) * 1000,
+        )
+
+        if not embed_texts:
+            if progress:
+                progress.log("No texts need embedding")
+            return
+
+        # ============================================================
+        # Phase 4: Batch embedding (CPU/GPU bound)
+        # ============================================================
         if progress:
-            progress.start_phase(
-                "embed",
-                "Embedding texts",
-                len(all_texts),
-            )
+            progress.start_phase("embed", "Embedding texts", len(embed_texts))
             progress.set_stats(
                 device=self.provider.device,
-                files=file_count,
-                symbols=symbol_count,
+                texts=len(embed_texts),
             )
 
-        all_embeddings = []
+        all_embeddings: list = []
         embed_start = time.perf_counter()
 
-        for batch_start in range(0, len(all_texts), embed_batch_size):
-            batch_end = min(batch_start + embed_batch_size, len(all_texts))
-            batch_texts = all_texts[batch_start:batch_end]
+        for batch_start in range(0, len(embed_texts), embed_batch_size):
+            batch_end = min(batch_start + embed_batch_size, len(embed_texts))
+            batch_texts = embed_texts[batch_start:batch_end]
+
+            # Run embedding (sync - CPU/GPU bound anyway)
             batch_embeddings = self.provider.embed_batch(batch_texts)
             all_embeddings.extend(batch_embeddings)
 
             if progress:
                 elapsed = time.perf_counter() - embed_start
                 rate = batch_end / elapsed if elapsed > 0 else 0
-
-                # find what we just embedded
-                last_item = text_map[batch_end - 1]
-                item_type, item_name = last_item[1], last_item[3]
-                if item_type == "file":
-                    current = item_name
-                else:
-                    current = f"{item_name[:30]}"
-
                 progress.update_absolute(
                     "embed",
                     completed=batch_end,
-                    current_item=current,
                     rate=f"{rate:.0f}/s",
                 )
 
         if progress:
             total_time = time.perf_counter() - embed_start
-            avg_rate = len(all_texts) / total_time if total_time > 0 else 0
+            avg_rate = len(embed_texts) / total_time if total_time > 0 else 0
             progress.complete_phase(
                 "embed",
-                f"Embedded {len(all_texts)} texts ({avg_rate:.0f}/s)",
+                f"Embedded {len(embed_texts)} texts ({avg_rate:.0f}/s)",
             )
 
-        # Phase 3: Writing vectors
+        # ============================================================
+        # Phase 5: Batch write vectors (single fsync!)
+        # ============================================================
         if progress:
-            progress.start_phase("write", "Writing vectors", len(text_map))
+            progress.start_phase("write", "Writing vectors", len(embed_texts))
 
-        for i, (_, item_type, key_hash, _) in enumerate(text_map):
-            embedding = all_embeddings[i]
-            vec_entry = self.vector_store.append(embedding)
-            self.vector_cache.put(key_hash, embedding)
+        t_vec_start = time.perf_counter()
 
-            if item_type == "file":
-                self.tracker.update_file_vector(
-                    key_hash, vec_entry.offset, vec_entry.length
-                )
-            else:
-                self.tracker.update_symbol_vector(
-                    key_hash, vec_entry.offset, vec_entry.length
-                )
+        # Batch vector store write (single fsync)
+        vec_entries = self.vector_store.append_batch(all_embeddings)
 
-            if progress and (i + 1) % 100 == 0:
-                progress.update_absolute(
-                    "write",
-                    completed=i + 1,
-                    vectors_written=i + 1,
-                )
+        # Update cache and tracker
+        with BatchContext(self.tracker):
+            for vec_entry, embedding, (item_type, key_hash, _) in zip(
+                vec_entries, all_embeddings, embed_meta, strict=True
+            ):
+                self.vector_cache.put(key_hash, embedding)
+
+                if item_type == "file":
+                    self.tracker.update_file_vector(
+                        key_hash, vec_entry.offset, vec_entry.length
+                    )
+                else:
+                    self.tracker.update_symbol_vector(
+                        key_hash, vec_entry.offset, vec_entry.length
+                    )
+
+        logger.info(
+            "vector phase: %d vectors in %.1fms",
+            len(vec_entries),
+            (time.perf_counter() - t_vec_start) * 1000,
+        )
 
         if progress:
-            progress.update_absolute("write", completed=len(text_map))
-            progress.complete_phase("write", f"Wrote {len(text_map)} vectors")
+            progress.update_absolute("write", completed=len(vec_entries))
+            progress.complete_phase("write", f"Wrote {len(vec_entries)} vectors")
 
     async def full_index(
         self,
