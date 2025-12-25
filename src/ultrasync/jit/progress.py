@@ -7,6 +7,7 @@ Falls back gracefully to simple stderr output if rich isn't installed.
 from __future__ import annotations
 
 import sys
+import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
@@ -89,6 +90,30 @@ class IndexingProgress:
             n /= 1024  # type: ignore
         return f"{n:.1f}TB"
 
+    def _format_rate_eta(
+        self, completed: int, total: int, start_time: float
+    ) -> str:
+        """Format rate and ETA string."""
+        elapsed = time.perf_counter() - start_time
+        if elapsed <= 0 or completed <= 0:
+            return ""
+
+        rate = completed / elapsed
+        remaining = total - completed
+
+        if rate > 0 and remaining > 0:
+            eta_secs = remaining / rate
+            if eta_secs < 60:
+                eta_str = f"{eta_secs:.0f}s"
+            elif eta_secs < 3600:
+                eta_str = f"{eta_secs / 60:.1f}m"
+            else:
+                eta_str = f"{eta_secs / 3600:.1f}h"
+            return f" ({rate:.1f}/s, ~{eta_str})"
+        elif rate > 0:
+            return f" ({rate:.1f}/s)"
+        return ""
+
     def _update_display(self) -> None:
         """Refresh the live display."""
         if self._live:
@@ -111,6 +136,7 @@ class IndexingProgress:
             "description": description,
             "total": total or 0,
             "completed": 0,
+            "start_time": time.perf_counter(),
         }
         self._current_text = description
         self._last_pct = -1
@@ -141,14 +167,18 @@ class IndexingProgress:
             phase["completed"] += advance
             completed = phase["completed"]
             total = phase["total"]
+            start_time = phase.get("start_time", 0)
 
             if total > 0:
-                # Show: "Indexing files... 45/100"
+                rate_eta = self._format_rate_eta(completed, total, start_time)
+                # Show: "Indexing files 45/100 (15.2/s, ~3s)"
                 if current_item:
-                    self._current_text = f"{current_item} {completed}/{total}"
+                    self._current_text = (
+                        f"{current_item} {completed}/{total}{rate_eta}"
+                    )
                 else:
                     self._current_text = (
-                        f"{phase['description']} {completed}/{total}"
+                        f"{phase['description']} {completed}/{total}{rate_eta}"
                     )
             else:
                 self._current_text = current_item or phase["description"]
@@ -160,7 +190,12 @@ class IndexingProgress:
                 pct = int(100 * completed / total)
                 if pct >= self._last_pct + 10 or completed == total:
                     self._last_pct = pct
-                    print(f"  {completed}/{total}", file=sys.stderr, flush=True)
+                    rate_eta = self._format_rate_eta(completed, total, start_time)
+                    print(
+                        f"  {completed}/{total}{rate_eta}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
     def update_absolute(
         self,
@@ -188,12 +223,17 @@ class IndexingProgress:
                 phase["total"] = total
 
             t = phase["total"]
+            start_time = phase.get("start_time", 0)
+
             if t > 0:
+                rate_eta = self._format_rate_eta(completed, t, start_time)
                 if current_item:
-                    self._current_text = f"{current_item} {completed}/{t}"
+                    self._current_text = (
+                        f"{current_item} {completed}/{t}{rate_eta}"
+                    )
                 else:
                     self._current_text = (
-                        f"{phase['description']} {completed}/{t}"
+                        f"{phase['description']} {completed}/{t}{rate_eta}"
                     )
             else:
                 self._current_text = current_item or phase["description"]
@@ -205,7 +245,12 @@ class IndexingProgress:
                 pct = int(100 * completed / t)
                 if pct >= self._last_pct + 10 or completed == t:
                     self._last_pct = pct
-                    print(f"  {completed}/{t}", file=sys.stderr, flush=True)
+                    rate_eta = self._format_rate_eta(completed, t, start_time)
+                    print(
+                        f"  {completed}/{t}{rate_eta}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
     def complete_phase(self, name: str, message: str | None = None) -> None:
         """Mark a phase as complete.
