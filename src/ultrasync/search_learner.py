@@ -25,9 +25,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # env vars for configuration
-ENV_LEARN_ENABLED = "GALAXYBRAIN_LEARN_FROM_SEARCH"
-ENV_LEARN_THRESHOLD = "GALAXYBRAIN_LEARN_THRESHOLD"
-ENV_LEARN_TIMEOUT = "GALAXYBRAIN_LEARN_TIMEOUT"
+ENV_LEARN_ENABLED = "ULTRASYNC_LEARN_FROM_SEARCH"
+ENV_LEARN_THRESHOLD = "ULTRASYNC_LEARN_THRESHOLD"
+ENV_LEARN_TIMEOUT = "ULTRASYNC_LEARN_TIMEOUT"
 
 # default configuration
 DEFAULT_SCORE_THRESHOLD = 0.65  # below this = weak results
@@ -35,7 +35,7 @@ DEFAULT_SESSION_TIMEOUT = 60.0  # seconds to track after search
 DEFAULT_MIN_FALLBACK_READS = 1  # min reads to consider resolved
 
 # tool names we track
-GALAXYBRAIN_SEARCH_TOOLS = {
+ULTRASYNC_SEARCH_TOOLS = {
     "mcp__ultrasync__jit_search",
 }
 FALLBACK_READ_TOOLS = {"Read"}
@@ -139,7 +139,7 @@ class SearchLearner:
         )
 
         # detect our jit_search calls
-        if tool_name in GALAXYBRAIN_SEARCH_TOOLS:
+        if tool_name in ULTRASYNC_SEARCH_TOOLS:
             logger.debug("detected ultrasync search tool: %s", tool_name)
             await self._handle_search(tool_input, tool_result)
 

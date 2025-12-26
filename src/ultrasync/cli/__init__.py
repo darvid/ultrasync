@@ -297,7 +297,7 @@ Command = (
 
 def main() -> int:
     """Entry point for the CLI."""
-    # configure structlog (respects GALAXYBRAIN_DEBUG env var)
+    # configure structlog (respects ULTRASYNC_DEBUG env var)
     from ultrasync.logging_config import configure_logging
 
     configure_logging()

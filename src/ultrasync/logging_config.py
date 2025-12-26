@@ -1,15 +1,15 @@
 """Logging configuration for ultrasync using structlog.
 
 Enable debug logging via environment variable:
-    GALAXYBRAIN_DEBUG=1 claude
+    ULTRASYNC_DEBUG=1 claude
 
 Debug logs are written to .ultrasync/debug.log in the project directory.
-Set GALAXYBRAIN_DEBUG_FILE to override the log file location.
+Set ULTRASYNC_DEBUG_FILE to override the log file location.
 
 Log levels:
-    GALAXYBRAIN_DEBUG=1     → DEBUG level
-    GALAXYBRAIN_DEBUG=info  → INFO level (more verbose than default)
-    GALAXYBRAIN_DEBUG=warn  → WARNING level only
+    ULTRASYNC_DEBUG=1     → DEBUG level
+    ULTRASYNC_DEBUG=info  → INFO level (more verbose than default)
+    ULTRASYNC_DEBUG=warn  → WARNING level only
 
 Logs are automatically rotated at 10MB, keeping 3 backup files.
 File logs use JSON format for structured querying.
@@ -31,8 +31,8 @@ from structlog.typing import EventDict, WrappedLogger
 LOGGER_NAME = "ultrasync"
 
 # env vars
-ENV_DEBUG = "GALAXYBRAIN_DEBUG"
-ENV_DEBUG_FILE = "GALAXYBRAIN_DEBUG_FILE"
+ENV_DEBUG = "ULTRASYNC_DEBUG"
+ENV_DEBUG_FILE = "ULTRASYNC_DEBUG_FILE"
 
 # log rotation settings
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -65,7 +65,7 @@ def get_log_file(data_dir: Path | None = None) -> Path | None:
     """Get log file path.
 
     Priority:
-    1. GALAXYBRAIN_DEBUG_FILE env var
+    1. ULTRASYNC_DEBUG_FILE env var
     2. data_dir/debug.log if data_dir provided
     3. ./.ultrasync/debug.log
     """

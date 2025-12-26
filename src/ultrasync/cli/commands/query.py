@@ -77,7 +77,7 @@ class Query:
     def run(self) -> int:
         """Execute the query command."""
         if self.debug:
-            os.environ["GALAXYBRAIN_DEBUG"] = "1"
+            os.environ["ULTRASYNC_DEBUG"] = "1"
 
         if not self.query_text and not self.key:
             console.error("Provide a query or --key")

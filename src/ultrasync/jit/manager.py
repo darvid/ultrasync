@@ -1351,7 +1351,7 @@ class JITIndexManager:
         2. Write phase: Batch blob/tracker/AOT writes (single fsync)
         3. Embed phase: Async embedding with pipelined vector writes
         """
-        embed_batch_size = 256 if self.provider.device != "cpu" else 128
+        embed_batch_size = 512 if self.provider.device != "cpu" else 512
 
         # ============================================================
         # Phase 1: Scan all files and collect data (no writes yet)

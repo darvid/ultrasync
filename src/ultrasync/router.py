@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from ultrasync.embeddings import EmbeddingProvider
 
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
-    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    "ULTRASYNC_EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2"
 )
 
 

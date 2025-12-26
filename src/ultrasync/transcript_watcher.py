@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # env var for enabling search learning
-ENV_LEARN_ENABLED = "GALAXYBRAIN_LEARN_FROM_SEARCH"
+ENV_LEARN_ENABLED = "ULTRASYNC_LEARN_FROM_SEARCH"
 
 # max files to full-index from a single grep/glob result
 # prevents slowdown on broad patterns like **/*.tsx

@@ -119,11 +119,11 @@ def _format_search_results_tsv(
 
 
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
-    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    "ULTRASYNC_EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2"
 )
 
 # env var for enabling transcript watching
-ENV_WATCH_TRANSCRIPTS = "GALAXYBRAIN_WATCH_TRANSCRIPTS"
+ENV_WATCH_TRANSCRIPTS = "ULTRASYNC_WATCH_TRANSCRIPTS"
 
 # memory relevance thresholds for tiered display
 # high relevance = show FIRST as "prior context" (before code results)
@@ -755,10 +755,10 @@ def create_server(
 
     Args:
         model_name: Embedding model to use
-            (default: sentence-transformers/all-MiniLM-L6-v2)
+            (default: sentence-transformers/paraphrase-MiniLM-L3-v2)
         root: Repository root path for file registration
         watch_transcripts: Enable automatic transcript watching
-            (default: auto from GALAXYBRAIN_WATCH_TRANSCRIPTS env var)
+            (default: auto from ULTRASYNC_WATCH_TRANSCRIPTS env var)
         agent: Coding agent name for transcript parser
             (default: auto-detect from environment)
         enable_learning: Enable search learning when watching
@@ -770,7 +770,7 @@ def create_server(
     # determine data directory early for logging
     data_dir = root / ".ultrasync" if root else Path.cwd() / ".ultrasync"
 
-    # configure logging (writes to data_dir/debug.log if GALAXYBRAIN_DEBUG set)
+    # configure logging (writes to data_dir/debug.log if ULTRASYNC_DEBUG set)
     configure_logging(data_dir=data_dir)
 
     # check env var if watch_transcripts not explicitly set (defaults to True)

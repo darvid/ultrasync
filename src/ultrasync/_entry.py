@@ -6,8 +6,8 @@ import sys
 
 def main():
     # if we haven't re-exec'd yet, do it with -W flag
-    if not os.environ.get("_GALAXYBRAIN_WARNED"):
-        os.environ["_GALAXYBRAIN_WARNED"] = "1"
+    if not os.environ.get("_ULTRASYNC_WARNED"):
+        os.environ["_ULTRASYNC_WARNED"] = "1"
         os.execv(
             sys.executable,
             [

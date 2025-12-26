@@ -12,14 +12,14 @@ if TYPE_CHECKING:
 def _optimal_batch_size() -> int:
     """Calculate optimal batch size based on CPU cores.
 
-    Uses 4x CPU count as a baseline - balances memory throughput
-    and parallelism. Minimum 16, max 64.
+    Uses 8x CPU count as baseline. Larger batches are faster on CPU
+    due to better SIMD utilization. Minimum 64, max 512.
     """
     cpu_count = os.cpu_count() or 4
-    # 4x multiplier gives good balance for CPU embedding workloads
-    batch_size = cpu_count * 4
-    # clamp to 16-64 range (64 was fastest in benchmarks)
-    return max(16, min(batch_size, 64))
+    # 8x multiplier - larger batches give better throughput on CPU
+    batch_size = cpu_count * 8
+    # clamp to 64-512 range (512 was fastest in benchmarks)
+    return max(64, min(batch_size, 512))
 
 # Try to import fast Rust embedder
 try:
@@ -31,7 +31,7 @@ except ImportError:
     _HAS_RUST_EMBEDDER = False
 
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
-    "GALAXYBRAIN_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    "ULTRASYNC_EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2"
 )
 
 # ~4 chars per token, 512 token limit -> 1500 chars is safe with headroom
@@ -470,7 +470,7 @@ class InfinityAPIProvider:
 
     Example:
         # Start infinity server:
-        # infinity_emb v2 --model-id sentence-transformers/all-MiniLM-L6-v2
+        # infinity_emb v2 --model-id sentence-transformers/paraphrase-MiniLM-L3-v2
 
         provider = InfinityAPIProvider(base_url="http://localhost:7997")
         vec = provider.embed("hello world")
