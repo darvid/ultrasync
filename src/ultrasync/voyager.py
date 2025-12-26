@@ -462,13 +462,43 @@ class CallGraphTable(DataTable):
 class ClassificationTable(DataTable):
     """Classification results as a data table."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    # default classification threshold (matches taxonomy.py)
+    DEFAULT_THRESHOLD = 0.1
+
+    def __init__(
+        self, threshold: float = DEFAULT_THRESHOLD, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self._ir: CodebaseIR | None = None
+        self._threshold = threshold
         self.cursor_type = "row"
 
+    def _score_to_color(self, score: float) -> str:
+        """Convert score to gradient color based on proximity to threshold.
+
+        Colors range from red (at/below threshold) through yellow
+        to green (high confidence).
+        """
+        if score <= self._threshold:
+            return "red"
+
+        # normalize score to 0-1 range above threshold
+        # threshold -> 0, 1.0 -> 1
+        normalized = (score - self._threshold) / (1.0 - self._threshold)
+
+        if normalized < 0.33:
+            return "red"
+        elif normalized < 0.5:
+            return "orange1"
+        elif normalized < 0.67:
+            return "yellow"
+        elif normalized < 0.85:
+            return "green_yellow"
+        else:
+            return "green"
+
     def load_ir(self, ir: CodebaseIR) -> None:
-        """Load classification IR into table."""
+        """Load classification IR, sorted by confidence descending."""
         self._ir = ir
         self.clear(columns=True)
 
@@ -477,7 +507,14 @@ class ClassificationTable(DataTable):
         self.add_column("Confidence", key="confidence")
         self.add_column("Symbols", key="symbols")
 
-        for file_ir in sorted(ir.files, key=lambda f: f.path_rel):
+        # sort by confidence descending
+        sorted_files = sorted(
+            ir.files,
+            key=lambda f: max(f.scores.values()) if f.scores else 0,
+            reverse=True,
+        )
+
+        for file_ir in sorted_files:
             file_display = file_ir.path_rel
             if len(file_display) > 40:
                 file_display = "..." + file_display[-37:]
@@ -486,10 +523,14 @@ class ClassificationTable(DataTable):
             top_cat = file_ir.categories[0] if file_ir.categories else "-"
             top_score = max(file_ir.scores.values()) if file_ir.scores else 0
 
+            # color the confidence score based on gradient
+            color = self._score_to_color(top_score)
+            confidence_display = f"[{color}]{top_score:.2f}[/]"
+
             self.add_row(
                 file_display,
                 top_cat,
-                f"{top_score:.2f}",
+                confidence_display,
                 str(symbol_count),
                 key=file_ir.path_rel,
             )
