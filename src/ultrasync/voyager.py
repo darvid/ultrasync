@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     DataTable,
     Footer,
@@ -576,6 +576,9 @@ class SymbolDetailsPanel(Static):
 class MemoryDetailsPanel(Static):
     """Panel showing details for selected memory."""
 
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__("Select a memory to view details", **kwargs)
+
     def show_memory(self, mem: MemoryEntry) -> None:
         """Display memory details."""
         lines = [
@@ -697,11 +700,13 @@ class VoyagerApp(App[None]):
         height: 70%;
     }
 
-    #memory-details {
+    #memory-details-scroll {
         height: 30%;
         border-top: solid $primary;
+    }
+
+    #memory-details {
         padding: 1;
-        overflow-y: auto;
     }
 
     #callgraph-table {
@@ -820,7 +825,8 @@ class VoyagerApp(App[None]):
             with TabPane("Memories", id="memories-tab"):
                 with Vertical():
                     yield MemoriesTable(id="memories-table")
-                    yield MemoryDetailsPanel(id="memory-details")
+                    with VerticalScroll(id="memory-details-scroll"):
+                        yield MemoryDetailsPanel(id="memory-details")
 
             # Call Graph tab
             with TabPane("Call Graph", id="callgraph-tab"):

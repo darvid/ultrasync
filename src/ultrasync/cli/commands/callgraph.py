@@ -99,7 +99,7 @@ class Callgraph:
                 return 0
 
             print(f"classifying {len(entries)} files...")
-            classifier = Classifier(embedder, threshold=0.6)
+            classifier = Classifier(embedder, threshold=0.1)
             ir = classifier.classify_entries(entries, include_symbols=True)
             ir.root = str(root)
 

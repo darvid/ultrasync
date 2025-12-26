@@ -97,7 +97,7 @@ class Voyager:
                     entries = manager.export_entries_for_taxonomy(root_path)
                     if entries:
                         print("classifying files...")
-                        classifier = Classifier(embedder, threshold=0.6)
+                        classifier = Classifier(embedder, threshold=0.1)
                         ir = classifier.classify_entries(
                             entries, include_symbols=True
                         )

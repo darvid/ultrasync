@@ -171,7 +171,7 @@ class Classifier:
         self,
         embedder: Any,  # EmbeddingProvider
         taxonomy: dict[str, str] | None = None,
-        threshold: float = 0.7,
+        threshold: float = 0.1,
         max_categories: int = 3,
         cache: EmbeddingCache | None = None,
     ) -> None:
@@ -319,7 +319,7 @@ class TaxonomyRefiner:
         self,
         embedder: Any,
         base_taxonomy: dict[str, str] | None = None,
-        threshold: float = 0.7,
+        threshold: float = 0.1,
         max_categories: int = 3,
         split_threshold: int = 20,  # split if category has > N items
         merge_threshold: float = 0.85,  # merge if categories overlap > N%
