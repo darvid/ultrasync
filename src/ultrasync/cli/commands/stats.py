@@ -141,11 +141,7 @@ class Stats:
                 console.dim(f"  - {w}")
             print()
             console.info("To fix:")
-            console.dim(
-                "  ultrasync index --embed .  # full index with embeddings"
-            )
-            console.dim(
-                "  ultrasync warm             # embed registered files only"
-            )
+            console.dim("  ultrasync index .   # full index with embeddings")
+            console.dim("  ultrasync warm      # embed registered files only")
 
         return 0

@@ -194,3 +194,10 @@ ruff format src/ultrasync
 # Build Rust extension
 uv run maturin develop -m ultrasync_index/Cargo.toml
 ```
+
+## Team Sync
+
+Private, self-hosted memory and context sharing for development
+teams. Centralized convention management, shared decision/constraint
+policies, and cross-session knowledge persistence without external
+dependencies.

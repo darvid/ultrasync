@@ -105,8 +105,8 @@ class Index:
         },
     )
     embed: bool = field(
-        default=False,
-        metadata={"help": "Compute embeddings upfront (enables search)"},
+        default=True,
+        metadata={"help": "Compute embeddings (disable with --no-embed)"},
     )
     enrich: bool = field(
         default=False,
