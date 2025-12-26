@@ -1,6 +1,6 @@
 """Learn from failed searches by observing coding agent transcripts.
 
-When jit_search returns weak results and the agent falls back to
+When search() returns weak results and the agent falls back to
 grep/glob/read to find what it needed, we automatically index those
 files with the original query context - ensuring future searches succeed.
 
@@ -36,7 +36,7 @@ DEFAULT_MIN_FALLBACK_READS = 1  # min reads to consider resolved
 
 # tool names we track
 ULTRASYNC_SEARCH_TOOLS = {
-    "mcp__ultrasync__jit_search",
+    "mcp__ultrasync__search",
 }
 FALLBACK_READ_TOOLS = {"Read"}
 FALLBACK_SEARCH_TOOLS = {"Grep", "Glob"}
@@ -54,7 +54,7 @@ class ToolCallEvent:
 
 @dataclass
 class SearchSession:
-    """Track a jit_search and its fallback resolution."""
+    """Track a search() call and its fallback resolution."""
 
     session_id: str
     query: str
@@ -178,7 +178,7 @@ class SearchLearner:
         tool_input: dict[str, Any],
         tool_result: dict[str, Any] | list | None,
     ) -> None:
-        """Handle a jit_search call - start session if weak results."""
+        """Handle a search() call - start session if weak results."""
         query = tool_input.get("query", "")
         if not query:
             logger.debug("_handle_search: no query in tool_input, skipping")
@@ -249,7 +249,7 @@ class SearchLearner:
     ) -> list[dict[str, Any]]:
         """Extract search results from various MCP response formats.
 
-        jit_search MCP tool returns a list directly, but the transcript
+        search() MCP tool returns a list directly, but the transcript
         format may wrap it differently. Handle all known formats:
         1. Direct list of results
         2. Dict with "results" key (FastMCP wrapper)
