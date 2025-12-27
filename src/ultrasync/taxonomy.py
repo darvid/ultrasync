@@ -145,6 +145,31 @@ class EmbeddingCache:
             self._text_vecs[text] = self._embedder.embed(text)
         return self._text_vecs[text]
 
+    def embed_batch(self, texts: list[str], batch_size: int = 256) -> None:
+        """Batch embed texts that aren't already cached.
+
+        This pre-populates the cache for faster subsequent lookups.
+        """
+        # filter to only uncached texts
+        uncached = [t for t in texts if t not in self._text_vecs]
+        if not uncached:
+            return
+
+        # deduplicate while preserving order
+        seen: set[str] = set()
+        unique_texts: list[str] = []
+        for t in uncached:
+            if t not in seen:
+                seen.add(t)
+                unique_texts.append(t)
+
+        # batch embed
+        for i in range(0, len(unique_texts), batch_size):
+            batch = unique_texts[i : i + batch_size]
+            vecs = self._embedder.embed_batch(batch)
+            for text, vec in zip(batch, vecs, strict=True):
+                self._text_vecs[text] = vec
+
     def embed_taxonomy(self, taxonomy: dict[str, str]) -> dict[str, np.ndarray]:
         """Embed full taxonomy, using cache."""
         return {
@@ -220,8 +245,16 @@ class Classifier:
         self,
         entries: list[dict[str, Any]],
         include_symbols: bool = True,
+        progress_callback: Any | None = None,
     ) -> CodebaseIR:
-        """Classify all entries from a registry/index."""
+        """Classify all entries from a registry/index.
+
+        Args:
+            entries: List of entry dicts with 'path', 'vector', 'symbol_info'
+            include_symbols: Whether to classify individual symbols
+            progress_callback: Optional callable(current, total, message)
+                               for progress updates
+        """
         ir = CodebaseIR(
             root=entries[0].get("path", "") if entries else "",
             model=self._embedder.model,
@@ -232,7 +265,28 @@ class Classifier:
         for cat in self._taxonomy:
             ir.category_index[cat] = []
 
-        for entry in entries:
+        # batch embed all symbol texts upfront if needed
+        if include_symbols:
+            all_sym_texts: list[str] = []
+            for entry in entries:
+                for sym in entry.get("symbol_info", []):
+                    sym_text = f"{sym['kind']} {sym['name']}"
+                    all_sym_texts.append(sym_text)
+
+            if all_sym_texts:
+                if progress_callback:
+                    progress_callback(
+                        0,
+                        len(entries),
+                        f"embedding {len(all_sym_texts)} symbols...",
+                    )
+                self._cache.embed_batch(all_sym_texts)
+
+        total = len(entries)
+        for i, entry in enumerate(entries):
+            if progress_callback and i % 50 == 0:
+                progress_callback(i, total, f"classifying files ({i}/{total})")
+
             vec = np.array(entry["vector"])
             scores, top_cats = self.classify_vector(vec)
 
@@ -248,10 +302,9 @@ class Classifier:
             for cat in top_cats:
                 ir.category_index[cat].append(file_ir.path_rel)
 
-            # classify symbols if requested
+            # classify symbols using cached embeddings
             if include_symbols:
                 for sym in entry.get("symbol_info", []):
-                    # use symbol name + kind as proxy text
                     sym_text = f"{sym['kind']} {sym['name']}"
                     sym_scores, sym_cats = self.classify_text(sym_text)
 
@@ -266,6 +319,9 @@ class Classifier:
                     file_ir.symbols.append(sym_class)
 
             ir.files.append(file_ir)
+
+        if progress_callback:
+            progress_callback(total, total, "classification complete")
 
         return ir
 

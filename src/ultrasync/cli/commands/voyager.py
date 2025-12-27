@@ -96,11 +96,20 @@ class Voyager:
                 if graph is None:
                     entries = manager.export_entries_for_taxonomy(root_path)
                     if entries:
-                        print("classifying files...")
+                        # progress callback for classification
+                        def show_progress(
+                            current: int, total: int, message: str
+                        ) -> None:
+                            print(f"\r  {message:<50}", end="", flush=True)
+
+                        print(f"classifying {len(entries)} files...")
                         classifier = Classifier(embedder, threshold=0.1)
                         ir = classifier.classify_entries(
-                            entries, include_symbols=True
+                            entries,
+                            include_symbols=True,
+                            progress_callback=show_progress,
                         )
+                        print()  # newline after progress
                         ir.root = str(root_path)
 
                         print("building call graph...")
