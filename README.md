@@ -164,21 +164,43 @@ memory integration (prior decisions/constraints).
 
 ## Installation
 
+We recommend installing `ultrasync` as a tool with `uv tool` or `uvx`.
+
 ```bash
-uv sync
+# install with CLI and lexical+hybrid search support (recommended)
+uv tool install ultrasync[cli,lexical]
+```
+
+### MCP Installation
+
+Add the following to your `mcpServers` or equivalent configuration:
+
+```json
+{
+  "ultrasync": {
+    "type": "stdio",
+    "command": "/path/to/uv",
+    "args": [
+      "tool",
+      "run",
+      "ultrasync",
+      "mcp"
+    ]
+  }
+}
 ```
 
 ## Usage
 
 ```bash
 # Start MCP server
-uv run ultrasync serve
+uv tool run ultrasync serve
 
 # Index a directory
-uv run ultrasync index .
+uv tool run ultrasync index .
 
 # Interactive TUI
-uv run ultrasync voyager
+uv tool run ultrasync voyager
 ```
 
 ## Development
