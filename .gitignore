@@ -19,3 +19,9 @@ Cargo.lock
 .ultrasync/
 .infinity_cache/
 benchmarks/results/
+
+# Tantivy/lexical index
+lexical/
+
+# Graph diagrams
+*.dot
