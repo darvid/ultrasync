@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -449,7 +449,7 @@ class SyncClient:
                         progress.errors.append(
                             {
                                 "index": -1,
-                                "error": f"token verification failed: {resp.status}",
+                                "error": f"token verify failed: {resp.status}",
                             }
                         )
                         if on_progress:
@@ -494,11 +494,9 @@ class SyncClient:
                     ) as resp:
                         if resp.status != 200:
                             error_text = await resp.text()
+                            err = f"{resp.status}: {error_text[:50]}"
                             progress.errors.append(
-                                {
-                                    "index": i * batch_size,
-                                    "error": f"HTTP {resp.status}: {error_text[:100]}",
-                                }
+                                {"index": i * batch_size, "error": err}
                             )
                             logger.warning(
                                 "bulk sync batch %d failed: %s",
@@ -551,6 +549,223 @@ class SyncClient:
             on_progress(progress)
 
         return progress
+
+    async def bulk_sync_streaming(
+        self,
+        item_iterator: Iterator[tuple[dict[str, Any], str]],
+        batch_size: int = 50,
+        on_progress: Callable[[BulkSyncProgress], None] | None = None,
+    ) -> BulkSyncProgress:
+        """Stream bulk sync from an iterator - memory efficient for monorepos.
+
+        Unlike bulk_sync which requires all items upfront, this method
+        processes items from a generator in batches, never holding more
+        than batch_size items in memory at once.
+
+        Args:
+            item_iterator: Generator yielding (item_dict, item_type) tuples
+                where item_type is 'file', 'memory', or 'metadata'
+            batch_size: Number of items per batch (default 50)
+            on_progress: Optional callback for progress updates
+
+        Returns:
+            BulkSyncProgress with final state and item counts
+        """
+        import hashlib
+        from datetime import datetime, timezone
+
+        import aiohttp
+
+        progress = BulkSyncProgress(
+            state="syncing",
+            total=0,  # unknown upfront with streaming
+            synced=0,
+            current_batch=0,
+            total_batches=0,  # unknown upfront
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+        # track counts by type
+        files_count = 0
+        memories_count = 0
+
+        if on_progress:
+            on_progress(progress)
+
+        base_url = self.config.url.rstrip("/")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # verify token and get org/project IDs
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        progress.state = "error"
+                        progress.errors.append(
+                            {
+                                "index": -1,
+                                "error": f"token verify failed: {resp.status}",
+                            }
+                        )
+                        if on_progress:
+                            on_progress(progress)
+                        return progress
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+                    project_id = token_data.get("project_id")
+
+                    if self.config.project_name:
+                        clerk_user_id = token_data.get("clerk_user_id", "")
+                        combined = f"{clerk_user_id}:{self.config.project_name}"
+                        hash_bytes = bytearray(
+                            hashlib.sha256(combined.encode()).digest()[:16]
+                        )
+                        hash_bytes[6] = (hash_bytes[6] & 0x0F) | 0x40
+                        hash_bytes[8] = (hash_bytes[8] & 0x3F) | 0x80
+                        project_id = str(uuid.UUID(bytes=bytes(hash_bytes)))
+
+                bulk_url = f"{base_url}/api/sync/bulk/{org_id}/{project_id}"
+                logger.info("starting streaming bulk sync to %s", bulk_url)
+
+                # process iterator in batches
+                batch: list[dict[str, Any]] = []
+                batch_item_types: list[str] = []
+
+                for item, item_type in item_iterator:
+                    batch.append(item)
+                    batch_item_types.append(item_type)
+
+                    if len(batch) >= batch_size:
+                        # send this batch
+                        progress.current_batch += 1
+                        result = await self._send_batch(
+                            session, bulk_url, batch, progress
+                        )
+
+                        if result:
+                            # count by type
+                            for t in batch_item_types:
+                                if t == "file":
+                                    files_count += 1
+                                elif t == "memory":
+                                    memories_count += 1
+
+                        batch = []
+                        batch_item_types = []
+
+                        if on_progress:
+                            # attach counts to progress for callback
+                            progress.files_count = files_count  # type: ignore
+                            progress.memories_count = memories_count  # type: ignore
+                            on_progress(progress)
+
+                # send remaining items
+                if batch:
+                    progress.current_batch += 1
+                    result = await self._send_batch(
+                        session, bulk_url, batch, progress
+                    )
+                    if result:
+                        for t in batch_item_types:
+                            if t == "file":
+                                files_count += 1
+                            elif t == "memory":
+                                memories_count += 1
+
+            progress.state = "complete" if not progress.errors else "error"
+            progress.completed_at = datetime.now(timezone.utc).isoformat()
+            progress.total = progress.synced + len(progress.errors)
+            progress.total_batches = progress.current_batch
+
+            # attach final counts
+            progress.files_count = files_count  # type: ignore
+            progress.memories_count = memories_count  # type: ignore
+
+            logger.info(
+                "streaming sync complete: %d synced, %d files, %d memories",
+                progress.synced,
+                files_count,
+                memories_count,
+            )
+
+        except Exception as e:
+            progress.state = "error"
+            progress.errors.append({"index": -1, "error": str(e)})
+            logger.exception("streaming bulk sync failed: %s", e)
+
+        if on_progress:
+            on_progress(progress)
+
+        return progress
+
+    async def _send_batch(
+        self,
+        session: Any,  # aiohttp.ClientSession
+        url: str,
+        batch: list[dict[str, Any]],
+        progress: BulkSyncProgress,
+    ) -> bool:
+        """Send a single batch to the sync endpoint.
+
+        Returns True if successful, False otherwise.
+        Updates progress.synced and progress.errors in place.
+        """
+        try:
+            async with session.post(
+                url,
+                json={"items": batch},
+                headers={
+                    "Authorization": f"Bearer {self.config.token}",
+                    "Content-Type": "application/json",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    progress.errors.append(
+                        {
+                            "batch": progress.current_batch,
+                            "error": f"HTTP {resp.status}: {error_text[:100]}",
+                        }
+                    )
+                    logger.warning(
+                        "batch %d failed: HTTP %s",
+                        progress.current_batch,
+                        resp.status,
+                    )
+                    return False
+
+                result = await resp.json()
+                progress.synced += result.get("synced", 0)
+
+                for err in result.get("errors", []):
+                    progress.errors.append(
+                        {
+                            "batch": progress.current_batch,
+                            "error": err.get("error", "unknown"),
+                        }
+                    )
+
+                server_seq = result.get("server_seq", 0)
+                if server_seq > self._last_seq:
+                    self._last_seq = server_seq
+
+                logger.debug(
+                    "batch %d: synced %d items, seq=%d",
+                    progress.current_batch,
+                    result.get("synced", 0),
+                    server_seq,
+                )
+                return True
+
+        except Exception as e:
+            progress.errors.append(
+                {"batch": progress.current_batch, "error": str(e)}
+            )
+            logger.warning("batch %d failed: %s", progress.current_batch, e)
+            return False
 
     # Socket.IO event handlers
 
@@ -690,7 +905,7 @@ class SyncManager:
         Args:
             tracker: FileTracker instance for accessing indexed files/symbols
             config: Sync configuration (defaults to env-based config)
-            resync_interval: Seconds between periodic full resyncs (0 to disable)
+            resync_interval: Seconds between periodic resyncs (0 to disable)
             batch_size: Number of items per bulk sync batch
         """
         self.tracker = tracker
@@ -893,10 +1108,118 @@ class SyncManager:
 
         return connected
 
-    async def _do_full_sync(self) -> BulkSyncProgress:
-        """Perform a full sync of all indexed files and memories."""
+    def _iter_sync_items(
+        self,
+    ) -> Iterator[tuple[dict[str, Any], str]]:
+        """Generator that yields sync items without loading all into memory.
+
+        Yields:
+            Tuple of (item_dict, item_type) where item_type is 'file' or
+            'memory' for counting purposes.
+
+        This is memory-efficient for large monorepos - only holds one item
+        at a time rather than loading everything into a list.
+        """
+        import json as json_mod
         from datetime import datetime, timezone
         from pathlib import Path
+
+        # yield project metadata first
+        yield (
+            {
+                "namespace": "metadata",
+                "key": "project:info",
+                "op_type": "set",
+                "payload": {
+                    "project_name": self.config.project_name,
+                    "synced_at": datetime.now(timezone.utc).isoformat(),
+                },
+            },
+            "metadata",
+        )
+
+        # yield files one at a time
+        for file_record in self.tracker.iter_files():
+            path = file_record.path
+            if not path:
+                continue
+
+            symbols = self.tracker.get_symbols(Path(path))
+            symbol_data = [
+                {
+                    "name": s.name,
+                    "kind": s.kind,
+                    "line_start": s.line_start,
+                    "line_end": s.line_end,
+                }
+                for s in symbols
+            ]
+
+            # parse detected contexts from JSON string
+            detected_contexts: list[str] = []
+            if file_record.detected_contexts:
+                try:
+                    detected_contexts = json_mod.loads(
+                        file_record.detected_contexts
+                    )
+                except (json_mod.JSONDecodeError, TypeError):
+                    pass
+
+            yield (
+                {
+                    "namespace": "index",
+                    "key": f"file:{path}",
+                    "op_type": "set",
+                    "payload": {
+                        "path": path,
+                        "symbols": symbol_data,
+                        "size": file_record.size,
+                        "indexed_at": file_record.indexed_at,
+                        "detected_contexts": detected_contexts,
+                    },
+                },
+                "file",
+            )
+
+        # yield memories one at a time
+        for memory in self.tracker.iter_memories():
+            try:
+                insights = (
+                    json_mod.loads(memory.insights) if memory.insights else []
+                )
+            except (json_mod.JSONDecodeError, TypeError):
+                insights = []
+            try:
+                context = (
+                    json_mod.loads(memory.context) if memory.context else []
+                )
+            except (json_mod.JSONDecodeError, TypeError):
+                context = []
+
+            yield (
+                {
+                    "namespace": "metadata",
+                    "key": f"memory:{memory.id}",
+                    "op_type": "set",
+                    "payload": {
+                        "id": memory.id,
+                        "text": memory.text,
+                        "task": memory.task,
+                        "insights": insights,
+                        "context": context,
+                        "created_at": memory.created_at,
+                    },
+                },
+                "memory",
+            )
+
+    async def _do_full_sync(self) -> BulkSyncProgress:
+        """Perform a full sync of all indexed files and memories.
+
+        Uses streaming to handle large monorepos efficiently - never loads
+        all items into memory at once. Processes in batches of batch_size.
+        """
+        from datetime import datetime, timezone
 
         _debug_log(
             f"_do_full_sync called: client={self._client is not None} "
@@ -908,143 +1231,39 @@ class SyncManager:
             logger.warning("cannot sync - not connected")
             return BulkSyncProgress(state="error")
 
-        items: list[dict[str, Any]] = []
-
-        # add project metadata
-        items.append(
-            {
-                "namespace": "metadata",
-                "key": "project:info",
-                "op_type": "set",
-                "payload": {
-                    "project_name": self.config.project_name,
-                    "synced_at": datetime.now(timezone.utc).isoformat(),
-                },
-            }
-        )
-
-        # collect all indexed files
-        files_count = 0
-        try:
-            for file_record in self.tracker.iter_files():
-                path = file_record.path
-                if not path:
-                    continue
-
-                symbols = self.tracker.get_symbols(Path(path))
-                symbol_data = [
-                    {
-                        "name": s.name,
-                        "kind": s.kind,
-                        "line_start": s.line_start,
-                        "line_end": s.line_end,
-                    }
-                    for s in symbols
-                ]
-
-                items.append(
-                    {
-                        "namespace": "index",
-                        "key": f"file:{path}",
-                        "op_type": "set",
-                        "payload": {
-                            "path": path,
-                            "symbols": symbol_data,
-                            "size": file_record.size,
-                            "indexed_at": file_record.indexed_at,
-                        },
-                    }
-                )
-                files_count += 1
-
-        except Exception as e:
-            logger.warning("failed to collect files for sync: %s", e)
-            self.stats.errors.append(f"file collection failed: {e}")
-
-        # collect all memories
-        memories_count = 0
-        try:
-            import json
-
-            for memory in self.tracker.iter_memories():
-                # MemoryRecord stores insights/context as JSON strings
-                try:
-                    insights = (
-                        json.loads(memory.insights) if memory.insights else []
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    insights = []
-                try:
-                    context = (
-                        json.loads(memory.context) if memory.context else []
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    context = []
-
-                items.append(
-                    {
-                        "namespace": "metadata",
-                        "key": f"memory:{memory.id}",
-                        "op_type": "set",
-                        "payload": {
-                            "id": memory.id,
-                            "text": memory.text,
-                            "task": memory.task,
-                            "insights": insights,
-                            "context": context,
-                            "created_at": memory.created_at,
-                        },
-                    }
-                )
-                memories_count += 1
-
-        except Exception as e:
-            logger.warning("failed to collect memories for sync: %s", e)
-            self.stats.errors.append(f"memory collection failed: {e}")
-
-        _debug_log(
-            f"full sync collected: {files_count} files, "
-            f"{memories_count} memories, {len(items)} total items"
-        )
-        logger.info(
-            "full sync: %d files, %d memories, %d total items",
-            files_count,
-            memories_count,
-            len(items),
-        )
-
-        # do the bulk sync
-        def on_progress(p: BulkSyncProgress) -> None:
-            logger.debug(
-                "sync progress: %d/%d synced, batch %d/%d",
-                p.synced,
-                p.total,
-                p.current_batch,
-                p.total_batches,
-            )
-
-        progress = await self._client.bulk_sync(
-            items,
+        # stream sync with batching - memory efficient for large repos
+        progress = await self._client.bulk_sync_streaming(
+            item_iterator=self._iter_sync_items(),
             batch_size=self.batch_size,
-            on_progress=on_progress,
+            on_progress=lambda p: logger.debug(
+                "sync progress: %d synced, batch %d, files=%d memories=%d",
+                p.synced,
+                p.current_batch,
+                getattr(p, "files_count", 0),
+                getattr(p, "memories_count", 0),
+            ),
         )
 
-        # update stats
-        from datetime import datetime, timezone
-
+        # update stats from progress
         self.stats.last_sync_at = datetime.now(timezone.utc).isoformat()
-        self.stats.files_synced = files_count
-        self.stats.memories_synced = memories_count
+        self.stats.files_synced = getattr(progress, "files_count", 0)
+        self.stats.memories_synced = getattr(progress, "memories_count", 0)
         self.stats.total_syncs += 1
 
         if progress.errors:
-            for err in progress.errors[:5]:  # log first 5 errors
+            for err in progress.errors[:5]:
                 self.stats.errors.append(str(err))
 
+        _debug_log(
+            f"full sync complete: synced={progress.synced} "
+            f"files={self.stats.files_synced} "
+            f"memories={self.stats.memories_synced}"
+        )
         logger.info(
-            "full sync complete: %d/%d synced, %d errors",
+            "full sync complete: %d synced, %d files, %d memories, %d errors",
             progress.synced,
-            progress.total,
+            self.stats.files_synced,
+            self.stats.memories_synced,
             len(progress.errors),
         )
 
