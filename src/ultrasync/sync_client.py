@@ -1114,8 +1114,8 @@ class SyncManager:
         """Generator that yields sync items without loading all into memory.
 
         Yields:
-            Tuple of (item_dict, item_type) where item_type is 'file' or
-            'memory' for counting purposes.
+            Tuple of (item_dict, item_type) where item_type is 'file',
+            'memory', or 'insight' for counting purposes.
 
         This is memory-efficient for large monorepos - only holds one item
         at a time rather than loading everything into a list.
@@ -1212,6 +1212,135 @@ class SyncManager:
                 },
                 "memory",
             )
+
+        # yield context summaries (frontend, backend, auth, etc.)
+        # color mapping for catppuccin theme
+        context_styles: dict[str, tuple[str, str]] = {
+            "context:frontend": ("text-ctp-blue", "bg-ctp-blue/20"),
+            "context:backend": ("text-ctp-green", "bg-ctp-green/20"),
+            "context:api": ("text-ctp-sapphire", "bg-ctp-sapphire/20"),
+            "context:auth": ("text-ctp-mauve", "bg-ctp-mauve/20"),
+            "context:data": ("text-ctp-yellow", "bg-ctp-yellow/20"),
+            "context:testing": ("text-ctp-teal", "bg-ctp-teal/20"),
+            "context:ui": ("text-ctp-pink", "bg-ctp-pink/20"),
+            "context:billing": ("text-ctp-peach", "bg-ctp-peach/20"),
+            "context:infra": ("text-ctp-lavender", "bg-ctp-lavender/20"),
+            "context:iac": ("text-ctp-lavender", "bg-ctp-lavender/20"),
+            "context:k8s": ("text-ctp-sky", "bg-ctp-sky/20"),
+            "context:cloud-aws": ("text-ctp-peach", "bg-ctp-peach/20"),
+            "context:cloud-azure": ("text-ctp-blue", "bg-ctp-blue/20"),
+            "context:cloud-gcp": ("text-ctp-red", "bg-ctp-red/20"),
+            "context:cicd": ("text-ctp-green", "bg-ctp-green/20"),
+            "context:containers": ("text-ctp-sky", "bg-ctp-sky/20"),
+            "context:gitops": ("text-ctp-mauve", "bg-ctp-mauve/20"),
+            "context:observability": ("text-ctp-yellow", "bg-ctp-yellow/20"),
+            "context:service-mesh": ("text-ctp-teal", "bg-ctp-teal/20"),
+            "context:secrets": ("text-ctp-red", "bg-ctp-red/20"),
+            "context:serverless": ("text-ctp-flamingo", "bg-ctp-flamingo/20"),
+            "context:config-mgmt": (
+                "text-ctp-rosewater",
+                "bg-ctp-rosewater/20",
+            ),
+        }
+
+        context_stats = self.tracker.get_context_stats()
+        for context_type, count in context_stats.items():
+            # get display name (e.g., "context:frontend" -> "frontend")
+            display_name = context_type.replace("context:", "")
+            color, bg = context_styles.get(
+                context_type, ("text-ctp-blue", "bg-ctp-blue/20")
+            )
+
+            # collect files for this context
+            files_list = [
+                f.path
+                for f in self.tracker.iter_files_by_context(context_type)
+                if f.path
+            ]
+
+            # yield context summary
+            yield (
+                {
+                    "namespace": "metadata",
+                    "key": context_type,
+                    "op_type": "set",
+                    "payload": {
+                        "name": display_name,
+                        "count": count,
+                        "color": color,
+                        "bg": bg,
+                        "files": files_list,
+                    },
+                },
+                "context",
+            )
+
+        # yield code insights (TODOs, FIXMEs, etc.)
+        # color mapping for catppuccin theme
+        insight_styles: dict[str, tuple[str, str]] = {
+            "insight:todo": ("text-ctp-yellow", "bg-ctp-yellow/20"),
+            "insight:fixme": ("text-ctp-red", "bg-ctp-red/20"),
+            "insight:hack": ("text-ctp-peach", "bg-ctp-peach/20"),
+            "insight:bug": ("text-ctp-red", "bg-ctp-red/20"),
+            "insight:note": ("text-ctp-blue", "bg-ctp-blue/20"),
+            "insight:invariant": ("text-ctp-mauve", "bg-ctp-mauve/20"),
+            "insight:assumption": ("text-ctp-lavender", "bg-ctp-lavender/20"),
+            "insight:decision": ("text-ctp-green", "bg-ctp-green/20"),
+            "insight:constraint": ("text-ctp-maroon", "bg-ctp-maroon/20"),
+            "insight:pitfall": ("text-ctp-peach", "bg-ctp-peach/20"),
+            "insight:optimize": ("text-ctp-teal", "bg-ctp-teal/20"),
+            "insight:deprecated": ("text-ctp-overlay0", "bg-ctp-overlay0/20"),
+            "insight:security": ("text-ctp-red", "bg-ctp-red/20"),
+            "insight:change": ("text-ctp-sapphire", "bg-ctp-sapphire/20"),
+        }
+
+        insight_stats = self.tracker.get_insight_stats()
+        for insight_type, count in insight_stats.items():
+            # get display name (e.g., "insight:todo" -> "TODO")
+            display_name = insight_type.replace("insight:", "").upper()
+            color, bg = insight_styles.get(
+                insight_type, ("text-ctp-yellow", "bg-ctp-yellow/20")
+            )
+
+            # yield type summary
+            yield (
+                {
+                    "namespace": "metadata",
+                    "key": insight_type,
+                    "op_type": "set",
+                    "payload": {
+                        "type": display_name,
+                        "count": count,
+                        "color": color,
+                        "bg": bg,
+                    },
+                },
+                "insight",
+            )
+
+            # yield individual items
+            for record in self.tracker.iter_insights_by_type(insight_type):
+                # use the record name as the insight text
+                source_text = record.name or ""
+
+                # create unique key for this insight item
+                item_key = (
+                    f"{insight_type}:{record.file_path}:{record.line_start}"
+                )
+                yield (
+                    {
+                        "namespace": "metadata",
+                        "key": item_key,
+                        "op_type": "set",
+                        "payload": {
+                            "type": display_name,
+                            "text": source_text,
+                            "file": record.file_path,
+                            "line": record.line_start,
+                        },
+                    },
+                    "insight",
+                )
 
     async def _do_full_sync(self) -> BulkSyncProgress:
         """Perform a full sync of all indexed files and memories.
