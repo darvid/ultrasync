@@ -1350,11 +1350,6 @@ class SyncManager:
         """
         from datetime import datetime, timezone
 
-        _debug_log(
-            f"_do_full_sync called: client={self._client is not None} "
-            f"connected={self._client.connected if self._client else False}"
-        )
-
         if not self._client or not self._client.connected:
             _debug_log("_do_full_sync BAILING - not connected!")
             logger.warning("cannot sync - not connected")
@@ -1383,11 +1378,6 @@ class SyncManager:
             for err in progress.errors[:5]:
                 self.stats.errors.append(str(err))
 
-        _debug_log(
-            f"full sync complete: synced={progress.synced} "
-            f"files={self.stats.files_synced} "
-            f"memories={self.stats.memories_synced}"
-        )
         logger.info(
             "full sync complete: %d synced, %d files, %d memories, %d errors",
             progress.synced,
