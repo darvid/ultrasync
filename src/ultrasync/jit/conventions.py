@@ -9,7 +9,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import numpy as np
 import structlog
@@ -40,6 +40,14 @@ CONVENTION_CATEGORIES = {
 
 # Priority levels
 PRIORITY_LEVELS = ["required", "recommended", "optional"]
+
+
+class ConventionStats(TypedDict):
+    """Statistics about conventions."""
+
+    total: int
+    by_category: dict[str, int]
+    by_priority: dict[str, int]
 
 
 @dataclass
@@ -492,9 +500,26 @@ class ConventionManager:
         """Get total convention count."""
         return self.tracker.convention_count()
 
-    def get_stats(self) -> dict[str, int]:
-        """Get count of conventions by category."""
-        return self.tracker.get_convention_stats()
+    def get_stats(self) -> ConventionStats:
+        """Get convention statistics.
+
+        Returns:
+            ConventionStats with total, by_category, and by_priority counts
+        """
+        by_category = self.tracker.get_convention_stats()
+        total = sum(by_category.values())
+
+        # get priority breakdown
+        by_priority: dict[str, int] = {}
+        for conv in self.list(limit=10000):
+            pri = conv.priority
+            by_priority[pri] = by_priority.get(pri, 0) + 1
+
+        return ConventionStats(
+            total=total,
+            by_category=by_category,
+            by_priority=by_priority,
+        )
 
     def record_applied(self, conv_id: str) -> bool:
         """Record that a convention was surfaced/applied."""

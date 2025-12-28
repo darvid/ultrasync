@@ -467,6 +467,7 @@ class ServerState:
         self._watcher_lock_fd: IO[bytes] | None = None  # leader election lock
         self._persistent_thread_manager: "PersistentThreadManager | None" = None  # noqa: F821, UP037
         self._init_task: asyncio.Task[None] | None = None  # noqa: F821
+        self._sync_manager: "SyncManager | None" = None  # noqa: F821, UP037
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -743,6 +744,86 @@ class ServerState:
             return self._watcher.get_stats()
         return None
 
+    async def start_sync_manager(self) -> bool:
+        """Start the sync manager if configured.
+
+        Creates a SyncManager that handles:
+        1. Initial full sync on connect (all indexed files + memories)
+        2. Periodic re-syncs to catch any missed updates
+        3. Maintaining WebSocket connection for real-time ops
+
+        Returns:
+            True if started successfully, False if not enabled/configured
+        """
+        from ultrasync.sync_client import (
+            SyncConfig,
+            SyncManager,
+            is_remote_sync_enabled,
+        )
+
+        if self._sync_manager is not None:
+            logger.warning("sync manager already running")
+            return True
+
+        if not is_remote_sync_enabled():
+            logger.debug("remote sync not enabled")
+            return False
+
+        config = SyncConfig()
+        if not config.is_configured:
+            logger.warning(
+                "sync enabled but not configured - set "
+                "ULTRASYNC_SYNC_URL and ULTRASYNC_SYNC_TOKEN"
+            )
+            return False
+
+        # ensure index manager is ready (needed for tracker access)
+        await self._init_index_manager_async()
+        assert self._jit_manager is not None
+
+        self._sync_manager = SyncManager(
+            tracker=self._jit_manager.tracker,
+            config=config,
+            resync_interval=300,  # 5 minutes
+            batch_size=50,
+        )
+
+        started = await self._sync_manager.start()
+        if started:
+            logger.info(
+                "sync manager started: project=%s",
+                config.project_name,
+            )
+        return started
+
+    async def stop_sync_manager(self) -> None:
+        """Stop the sync manager if running."""
+        if self._sync_manager:
+            await self._sync_manager.stop()
+            self._sync_manager = None
+
+    @property
+    def sync_manager(self) -> "SyncManager | None":  # noqa: F821, UP037
+        """Get the sync manager instance."""
+        return self._sync_manager
+
+    @property
+    def sync_client(self) -> "SyncClient | None":  # noqa: F821, UP037
+        """Get the sync client from the sync manager.
+
+        This provides backward compatibility for tools that access
+        state.sync_client directly.
+        """
+        if self._sync_manager:
+            return self._sync_manager.client
+        return None
+
+    def get_sync_stats(self) -> "SyncManagerStats | None":  # noqa: F821, UP037
+        """Get sync manager statistics."""
+        if self._sync_manager:
+            return self._sync_manager.get_stats()
+        return None
+
 
 def create_server(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
@@ -803,6 +884,7 @@ def create_server(
         # model loading takes 5-10 seconds on first run, so we fire-and-forget
         init_task: asyncio.Task | None = None
         watcher_task: asyncio.Task | None = None
+        sync_task: asyncio.Task | None = None
 
         # eagerly initialize index manager in background if index exists
         if has_existing_index and not watch_transcripts:
@@ -814,6 +896,10 @@ def create_server(
         if watch_transcripts:
             logger.info("launching transcript watcher in background...")
             watcher_task = asyncio.create_task(state.start_watcher())
+
+        # launch sync manager in background (handles connect + initial sync)
+        logger.info("launching sync manager in background...")
+        sync_task = asyncio.create_task(state.start_sync_manager())
 
         # yield to event loop so tasks can start before MCP handshake
         await asyncio.sleep(0)
@@ -831,9 +917,19 @@ def create_server(
                 await watcher_task
             except Exception as e:
                 logger.error("watcher startup failed: %s", e)
+        if sync_task:
+            try:
+                await sync_task
+            except Exception as e:
+                logger.error("sync connect failed: %s", e)
         if state.watcher:
             logger.info("stopping transcript watcher...")
             await state.stop_watcher()
+
+        # stop sync manager on shutdown
+        if state.sync_manager:
+            logger.info("stopping sync manager...")
+            await state.stop_sync_manager()
 
     mcp = FastMCP(
         "ultrasync",
@@ -3013,10 +3109,7 @@ After writing code, validate against conventions:
             Dict with total count and counts by category
         """
         manager = state.jit_manager.conventions
-        return {
-            "total": manager.count(),
-            "by_category": manager.get_stats(),
-        }
+        return manager.get_stats()
 
     @mcp.tool()
     def convention_export(
@@ -3842,6 +3935,366 @@ After writing code, validate against conventions:
             }
             for rel_id, name in relations
         ]
+
+    # ── sync tools ──────────────────────────────────────────────────────
+    #
+    # Remote sync is gated by ULTRASYNC_REMOTE_SYNC=true env var.
+    # Additional config: ULTRASYNC_SYNC_URL, ULTRASYNC_SYNC_TOKEN
+    # Project name is auto-detected from git remote or can be set via
+    # ULTRASYNC_SYNC_PROJECT_NAME
+    #
+    # Example MCP config:
+    #   "env": {
+    #     "ULTRASYNC_REMOTE_SYNC": "true",
+    #     "ULTRASYNC_SYNC_URL": "https://sync.example.com",
+    #     "ULTRASYNC_SYNC_TOKEN": "your-auth-token"
+    #   }
+
+    @mcp.tool()
+    async def sync_connect(
+        url: str | None = None,
+        token: str | None = None,
+        project_name: str | None = None,
+        auto_sync: bool = True,
+    ) -> dict[str, Any]:
+        """Connect to the ultrasync.web sync server.
+
+        Requires ULTRASYNC_REMOTE_SYNC=true to be set in env.
+
+        Establishes a WebSocket connection for real-time sync of index
+        and memory data across team members. By default, performs a full
+        sync of all indexed files after connecting.
+
+        Args:
+            url: Sync server URL (default: from ULTRASYNC_SYNC_URL env)
+            token: Auth token (default: from ULTRASYNC_SYNC_TOKEN env)
+            project_name: Project/repo name for isolation (default: auto-detect
+                from git remote or ULTRASYNC_SYNC_PROJECT_NAME env)
+            auto_sync: Automatically sync all indexed files on connect (default True)
+
+        Returns:
+            Connection status with client_id, project_name, and sync progress
+        """
+        try:
+            from ultrasync.sync_client import (
+                SyncConfig,
+                SyncManager,
+                is_remote_sync_enabled,
+            )
+        except ImportError:
+            return {
+                "connected": False,
+                "error": "sync not installed - run: uv sync --extra sync",
+            }
+
+        if not is_remote_sync_enabled():
+            return {
+                "connected": False,
+                "error": "sync disabled - set ULTRASYNC_REMOTE_SYNC=true",
+            }
+
+        # already connected via sync manager?
+        if state.sync_manager and state.sync_manager.connected:
+            config = state.sync_manager.config
+            return {
+                "connected": True,
+                "url": config.url,
+                "project_name": config.project_name,
+                "client_id": config.client_id,
+                "actor_id": config.actor_id,
+                "message": "already connected via sync manager",
+            }
+
+        # build config with overrides
+        config = SyncConfig()
+        if url:
+            config.url = url
+        if token:
+            config.token = token
+        if project_name:
+            config.project_name = project_name
+
+        if not config.is_configured:
+            return {
+                "connected": False,
+                "error": "sync not configured - set url and token",
+            }
+
+        # ensure tracker is ready
+        await state._init_index_manager_async()
+        if state._jit_manager is None:
+            return {
+                "connected": False,
+                "error": "jit manager not initialized",
+            }
+
+        # create and start sync manager
+        state._sync_manager = SyncManager(
+            tracker=state._jit_manager.tracker,
+            config=config,
+            resync_interval=300,  # 5 minutes
+            batch_size=50,
+        )
+
+        started = await state._sync_manager.start()
+
+        if started:
+            result = {
+                "connected": True,
+                "url": config.url,
+                "project_name": config.project_name,
+                "client_id": config.client_id,
+                "actor_id": config.actor_id,
+            }
+
+            # get sync stats (initial sync happens in start())
+            stats = state._sync_manager.get_stats()
+            if stats:
+                result["initial_sync"] = {
+                    "files_synced": stats.files_synced,
+                    "memories_synced": stats.memories_synced,
+                    "initial_sync_done": stats.initial_sync_done,
+                }
+
+            return result
+        else:
+            state._sync_manager = None
+            return {
+                "connected": False,
+                "error": "failed to start sync manager",
+            }
+
+    @mcp.tool()
+    async def sync_disconnect() -> dict[str, Any]:
+        """Disconnect from the sync server.
+
+        Returns:
+            Disconnection status
+        """
+        if state.sync_manager is None:
+            return {"disconnected": True, "was_connected": False}
+
+        await state.stop_sync_manager()
+        return {"disconnected": True, "was_connected": True}
+
+    @mcp.tool()
+    def sync_status() -> dict[str, Any]:
+        """Get current sync connection status.
+
+        Returns:
+            Connection status and configuration
+        """
+        try:
+            from ultrasync.sync_client import is_remote_sync_enabled
+        except ImportError:
+            return {
+                "enabled": False,
+                "connected": False,
+                "error": "sync not installed",
+            }
+
+        enabled = is_remote_sync_enabled()
+        manager = state.sync_manager
+
+        if manager is None:
+            return {
+                "enabled": enabled,
+                "connected": False,
+                "configured": False,
+            }
+
+        stats = manager.get_stats()
+        client = manager.client
+
+        result = {
+            "enabled": enabled,
+            "connected": manager.connected,
+            "configured": manager.config.is_configured,
+            "url": manager.config.url if manager.config.is_configured else None,
+            "project_name": (
+                manager.config.project_name
+                if manager.config.is_configured
+                else None
+            ),
+        }
+
+        # add stats from sync manager
+        if stats:
+            result["stats"] = {
+                "running": stats.running,
+                "initial_sync_done": stats.initial_sync_done,
+                "last_sync_at": stats.last_sync_at,
+                "files_synced": stats.files_synced,
+                "memories_synced": stats.memories_synced,
+                "total_syncs": stats.total_syncs,
+                "resync_interval_seconds": stats.resync_interval_seconds,
+                "errors": stats.errors[-5:] if stats.errors else [],
+            }
+
+        # add last_seq from client if available
+        if client:
+            result["last_seq"] = client._last_seq
+
+        return result
+
+    @mcp.tool()
+    async def sync_push_file(
+        path: str,
+        symbols: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Push a file's index data to the sync server.
+
+        Syncs the file's symbols and metadata with team members.
+
+        Args:
+            path: File path to sync
+            symbols: Optional symbol list (auto-extracted if not provided)
+
+        Returns:
+            Sync result with server_seq
+        """
+        client = state.sync_client
+        if client is None or not client.connected:
+            return {"synced": False, "error": "not connected"}
+
+        # get symbols from index if not provided
+        if symbols is None:
+            file_key = hash64_file_key(path)
+            file_rec = state.jit_manager.tracker.get_by_key(file_key)
+            if file_rec:
+                symbols = [
+                    {
+                        "name": s.name,
+                        "kind": s.kind,
+                        "line_start": s.line_start,
+                        "line_end": s.line_end,
+                    }
+                    for s in state.jit_manager.tracker.get_symbols(file_key)
+                ]
+            else:
+                symbols = []
+
+        result = await client.push_file_indexed(path, symbols)
+        if result:
+            return {
+                "synced": True,
+                "server_seq": result.get("server_seq"),
+                "op_id": result.get("op", {}).get("op_id"),
+            }
+        else:
+            return {"synced": False, "error": "no ack received"}
+
+    @mcp.tool()
+    async def sync_push_memory(
+        memory_id: str,
+    ) -> dict[str, Any]:
+        """Push a memory entry to the sync server.
+
+        Syncs decisions, constraints, and findings with team members.
+
+        Args:
+            memory_id: Memory ID (e.g., "mem:abc123")
+
+        Returns:
+            Sync result with server_seq
+        """
+        client = state.sync_client
+        if client is None or not client.connected:
+            return {"synced": False, "error": "not connected"}
+
+        # get memory from index
+        entry = state.jit_manager.memory.get(memory_id)
+        if entry is None:
+            return {"synced": False, "error": "memory not found"}
+
+        result = await client.push_memory(
+            memory_id=entry.id,
+            text=entry.text,
+            task=entry.task,
+            insights=entry.insights,
+            context=entry.context,
+        )
+
+        if result:
+            return {
+                "synced": True,
+                "server_seq": result.get("server_seq"),
+                "op_id": result.get("op", {}).get("op_id"),
+            }
+        else:
+            return {"synced": False, "error": "no ack received"}
+
+    @mcp.tool()
+    async def sync_push_presence(
+        file: str | None = None,
+        line: int | None = None,
+        activity: str | None = None,
+    ) -> dict[str, Any]:
+        """Push presence/cursor info to sync server.
+
+        Share your current location and activity with team members.
+
+        Args:
+            file: Current file being viewed
+            line: Current line number
+            activity: Current activity (editing, searching, reviewing, etc.)
+
+        Returns:
+            Sync result
+        """
+        client = state.sync_client
+        if client is None or not client.connected:
+            return {"synced": False, "error": "not connected"}
+
+        result = await client.push_presence(
+            cursor_file=file,
+            cursor_line=line,
+            activity=activity,
+        )
+
+        if result:
+            return {"synced": True, "server_seq": result.get("server_seq")}
+        else:
+            return {"synced": False, "error": "no ack received"}
+
+    @mcp.tool()
+    async def sync_full(
+        include_memories: bool = True,
+        batch_size: int = 50,
+    ) -> dict[str, Any]:
+        """Push all indexed files and memories to the sync server.
+
+        Performs a full sync of the local index to the remote server.
+        This is useful for initial sync or to ensure everything is
+        up to date.
+
+        Args:
+            include_memories: Also sync all stored memories (default True)
+            batch_size: Number of items per batch (default 50)
+
+        Returns:
+            Sync progress with total, synced, errors
+        """
+        manager = state.sync_manager
+        if manager is None or not manager.connected:
+            return {
+                "synced": False,
+                "error": "not connected - call sync_connect first",
+            }
+
+        # delegate to sync manager's full sync
+        progress = await manager._do_full_sync()
+
+        return {
+            "synced": progress.state == "complete",
+            "state": progress.state,
+            "total": progress.total,
+            "synced_count": progress.synced,
+            "errors": len(progress.errors),
+            "error_details": progress.errors[:5] if progress.errors else [],
+            "started_at": progress.started_at,
+            "completed_at": progress.completed_at,
+        }
 
     return mcp
 
