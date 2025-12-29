@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from ultrasync.events import EventType, SessionEvent
 from ultrasync.file_registry import FileRegistry
+from ultrasync.jit.conventions import ConventionStats
 from ultrasync.keys import hash64, hash64_file_key, hash64_sym_key
 from ultrasync.logging_config import configure_logging, get_logger
 from ultrasync.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
@@ -508,6 +509,7 @@ class ServerState:
         if self._jit_manager is None:
             from ultrasync.jit.manager import JITIndexManager
 
+            assert self._embedder is not None
             self._jit_manager = JITIndexManager(
                 data_dir=self._jit_data_dir,
                 embedding_provider=self._embedder,
@@ -2052,7 +2054,7 @@ After writing code, validate against conventions:
             # collect unique contexts from results
             contexts: set[str] = set()
             for r in filtered_results:
-                if r.path:
+                if r.path and r.key_hash is not None:
                     file_record = jit_manager.tracker.get_file_by_key(
                         r.key_hash
                     )
@@ -3223,7 +3225,7 @@ After writing code, validate against conventions:
         ]
 
     @mcp.tool()
-    def convention_stats() -> dict[str, Any]:
+    def convention_stats() -> ConventionStats:
         """Get convention statistics.
 
         Returns:
@@ -3391,11 +3393,11 @@ After writing code, validate against conventions:
         Returns:
             Status with number of positions cleared
         """
-        if not state.manager:
+        if not state.jit_manager:
             return {"status": "error", "reason": "no manager initialized"}
 
         # clear stored positions
-        cleared = state.manager.tracker.clear_transcript_positions()
+        cleared = state.jit_manager.tracker.clear_transcript_positions()
 
         # stop and restart watcher to pick up cleared positions
         await state.stop_watcher()
@@ -4043,19 +4045,18 @@ After writing code, validate against conventions:
         graph = GraphMemory(state.jit_manager.tracker)
         relations = graph.relations.all_relations()
 
-        return [
-            {
-                "id": rel_id,
-                "name": name,
-                "builtin": rel_id < 1000,
-                "description": (
-                    graph.relations.info(rel_id).description
-                    if graph.relations.info(rel_id)
-                    else None
-                ),
-            }
-            for rel_id, name in relations
-        ]
+        result = []
+        for rel_id, name in relations:
+            info = graph.relations.info(rel_id)
+            result.append(
+                {
+                    "id": rel_id,
+                    "name": name,
+                    "builtin": rel_id < 1000,
+                    "description": info.description if info else None,
+                }
+            )
+        return result
 
     # ── sync tools ──────────────────────────────────────────────────────
     #
@@ -4281,7 +4282,7 @@ After writing code, validate against conventions:
         # get symbols from index if not provided
         if symbols is None:
             file_key = hash64_file_key(path)
-            file_rec = state.jit_manager.tracker.get_by_key(file_key)
+            file_rec = state.jit_manager.tracker.get_file_by_key(file_key)
             if file_rec:
                 symbols = [
                     {
@@ -4290,7 +4291,7 @@ After writing code, validate against conventions:
                         "line_start": s.line_start,
                         "line_end": s.line_end,
                     }
-                    for s in state.jit_manager.tracker.get_symbols(file_key)
+                    for s in state.jit_manager.tracker.get_symbols(Path(path))
                 ]
             else:
                 symbols = []
@@ -4517,7 +4518,7 @@ After writing code, validate against conventions:
                 continue
 
             try:
-                state.tracker.import_team_file(
+                state.jit_manager.tracker.import_team_file(
                     path=path,
                     size=file_data.get("size"),
                     indexed_at=file_data.get("indexed_at"),
@@ -4541,7 +4542,7 @@ After writing code, validate against conventions:
 def run_server(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
     root: Path | None = None,
-    transport: str = "stdio",
+    transport: Literal["stdio", "sse", "streamable-http"] = "stdio",
     watch_transcripts: bool | None = None,
     agent: str | None = None,
     enable_learning: bool = True,
