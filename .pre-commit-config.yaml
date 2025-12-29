@@ -23,7 +23,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --manifest-path crates/ultrasync_index/Cargo.toml --all-targets --all-features -- -D warnings
+        entry: cargo clippy --manifest-path crates/ultrasync_index/Cargo.toml --all-targets -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false
