@@ -68,7 +68,9 @@ class Stats:
         aot_count = 0
         aot_capacity = 0
         try:
-            from ultrasync_index import MutableGlobalIndex
+            from ultrasync_index import (
+                MutableGlobalIndex,  # type: ignore[import-not-found]
+            )
 
             if index_file.exists():
                 aot = MutableGlobalIndex.open(str(index_file))

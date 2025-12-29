@@ -304,7 +304,7 @@ def main() -> int:
 
     try:
         cmd = tyro.cli(
-            Command,
+            Command,  # type: ignore[arg-type]
             prog="ultrasync",
             description="Index and query codebases with semantic search.",
         )

@@ -549,7 +549,9 @@ class GraphExport:
     def run(self) -> int:
         """Execute the graph export command."""
         try:
-            from ultrasync_index import export_graph_snapshot
+            from ultrasync_index import (
+                export_graph_snapshot,  # type: ignore[import-not-found]
+            )
         except ImportError:
             console.error("ultrasync_index not built (run maturin develop)")
             return 1

@@ -9,7 +9,7 @@ from __future__ import annotations
 import struct
 import time
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgpack
 
@@ -139,10 +139,11 @@ class GraphMemory:
         from ultrasync.jit.lmdb_tracker import GraphNodeRecord
 
         ts = ts or time.time()
+        payload_bytes: bytes
         if payload is None:
             payload_bytes = b""
         elif isinstance(payload, dict):
-            payload_bytes = msgpack.packb(payload)
+            payload_bytes = cast(bytes, msgpack.packb(payload))
         else:
             payload_bytes = payload
 
@@ -255,10 +256,11 @@ class GraphMemory:
         else:
             rel_id = rel
 
+        payload_bytes: bytes
         if payload is None:
             payload_bytes = b""
         elif isinstance(payload, dict):
-            payload_bytes = msgpack.packb(payload)
+            payload_bytes = cast(bytes, msgpack.packb(payload))
         else:
             payload_bytes = payload
 
@@ -498,8 +500,9 @@ class GraphMemory:
         from ultrasync.jit.lmdb_tracker import GraphPolicyRecord
 
         ts = ts or time.time()
+        payload_bytes: bytes
         if isinstance(payload, dict):
-            payload_bytes = msgpack.packb(payload)
+            payload_bytes = cast(bytes, msgpack.packb(payload))
         else:
             payload_bytes = payload
 
@@ -558,13 +561,19 @@ class GraphMemory:
         namespace: str,
         key: str,
         rev: int,
-    ) -> bytes | None:
-        """Get policy payload at specific revision."""
+    ) -> GraphPolicyRecord | None:
+        """Get policy record at specific revision."""
+        from ultrasync.jit.lmdb_tracker import GraphPolicyRecord
+
         db = self._db(b"graph_policy_hist")
         hist_key = _composite_key(scope, namespace, key, rev)
 
         with self.tracker.env.begin() as txn:
-            return txn.get(hist_key, db=db)
+            data = txn.get(hist_key, db=db)
+            if data is None:
+                return None
+            d = msgpack.unpackb(data)
+            return GraphPolicyRecord(**d)
 
     def list_kv(
         self,

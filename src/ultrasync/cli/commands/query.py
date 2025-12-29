@@ -302,6 +302,7 @@ class Query:
         from ultrasync.graph.bootstrap import is_bootstrapped
         from ultrasync.jit import FileTracker
 
+        assert self.dot is not None, "dot path must be set"
         tracker = FileTracker(data_dir / "tracker.db")
 
         if not is_bootstrapped(tracker):

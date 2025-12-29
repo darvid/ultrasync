@@ -211,13 +211,18 @@ class PersistentThreadManager:
             self._vector_cache.put(thread.id, query_vec)
             best_id = thread.id
 
+        # at this point best_id is guaranteed to be set
+        assert best_id is not None, "best_id should be set after thread routing"
+
         # record the query
         self._tracker.add_thread_query(best_id, query_text)
 
         # update current thread
         self._current_thread_id = best_id
 
-        return self._tracker.get_thread(best_id), is_new
+        result = self._tracker.get_thread(best_id)
+        assert result is not None, "thread should exist after routing"
+        return result, is_new
 
     def _generate_title(self, query_text: str, max_len: int = 50) -> str:
         """Generate a thread title from the first query."""

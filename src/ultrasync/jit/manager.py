@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ultrasync.file_scanner import FileScanner
+from ultrasync.file_scanner import FileMetadata, FileScanner
 from ultrasync.git import get_tracked_files, should_ignore_path
 from ultrasync.graph import GraphMemory, Relation
 from ultrasync.graph.bootstrap import is_bootstrapped
@@ -25,9 +25,11 @@ from ultrasync.keys import hash64, hash64_file_key, hash64_sym_key
 from ultrasync.patterns import PatternSetManager
 
 try:
-    from ultrasync_index import MutableGlobalIndex
+    from ultrasync_index import (
+        MutableGlobalIndex,  # type: ignore[import-not-found]
+    )
 except ImportError:
-    MutableGlobalIndex = None  # type: ignore
+    MutableGlobalIndex = None  # type: ignore[assignment]
 
 # Optional lexical index (tantivy)
 try:
@@ -497,7 +499,7 @@ class JITIndexManager:
         ]
         scan_results = self.scanner.scan_batch_with_content(items_for_scan)
         # Convert Rust metadata to Python format
-        scan_map: dict[str, object] = {}
+        scan_map: dict[str, FileMetadata] = {}
         for r in scan_results:
             if r.metadata is not None:
                 # Convert Rust FileMetadata to Python format
@@ -2552,7 +2554,7 @@ class JITIndexManager:
             # For symbols, look up parent file
             sym_record = self.tracker.get_symbol_by_key(key_hash)
             if sym_record:
-                file_record = self.tracker.get_file(sym_record.file_path)
+                file_record = self.tracker.get_file(Path(sym_record.file_path))
                 if file_record:
                     return file_record.mtime
 

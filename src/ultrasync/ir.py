@@ -1956,8 +1956,9 @@ class AppIRExtractor:
         # Detect external services using multi-signal approach
         # This uses AST parsing, package manifests, and confidence scoring
         # to avoid false positives from pattern definition files
+        valid_files = [(p, c) for p, c in file_contents if c is not None]
         service_matches = self.service_detector.detect_all(
-            file_contents, min_confidence=0.5
+            valid_files, min_confidence=0.5
         )
         services: list[ExternalService] = []
         for match in service_matches:

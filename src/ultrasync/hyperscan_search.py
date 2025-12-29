@@ -1,4 +1,4 @@
-from collections.abc import Buffer
+from collections.abc import Buffer  # type: ignore[attr-defined]
 
 import hyperscan
 

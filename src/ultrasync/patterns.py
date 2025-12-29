@@ -1,4 +1,4 @@
-from collections.abc import Buffer
+from collections.abc import Buffer  # type: ignore[attr-defined]
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -1915,7 +1915,7 @@ class PatternSetManager:
                 )
             return 0
 
-        self._unified_db.scan(data_bytes, match_event_handler=on_match)
+        self._unified_db.scan(data_bytes, match_event_handler=on_match)  # type: ignore[arg-type]
 
         # Process matches into contexts and insights
         context_counts: dict[str, int] = {}

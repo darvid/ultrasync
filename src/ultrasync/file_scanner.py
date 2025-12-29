@@ -3,6 +3,7 @@ import re
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ultrasync.regex_safety import RegexTimeout, safe_compile
 
@@ -88,16 +89,14 @@ class FileScanner:
             self._use_rust = False
 
         if self._use_rust:
-            self._rust_scanner = _rust_scanner.TreeSitterScanner()
+            self._rust_scanner = _rust_scanner.TreeSitterScanner()  # type: ignore[union-attr]
 
     @classmethod
     def has_rust_backend(cls) -> bool:
         """Check if the fast Rust scanner is available."""
         return _HAS_RUST_SCANNER
 
-    def _convert_rust_result(
-        self, rust_meta: "_rust_scanner.FileMetadata"
-    ) -> FileMetadata:
+    def _convert_rust_result(self, rust_meta: Any) -> FileMetadata:
         """Convert Rust FileMetadata to Python FileMetadata."""
         symbols = [
             SymbolInfo(
@@ -197,7 +196,7 @@ class FileScanner:
         if self._use_rust:
             # Use fast parallel Rust scanner
             str_paths = [str(p) for p in paths]
-            results = _rust_scanner.batch_scan_files(str_paths)
+            results = _rust_scanner.batch_scan_files(str_paths)  # type: ignore[union-attr]
             return [
                 self._convert_rust_result(r.metadata)
                 for r in results
@@ -209,7 +208,7 @@ class FileScanner:
 
     def scan_batch_with_content(
         self, items: list[tuple[str, bytes]]
-    ) -> list["_rust_scanner.ScanResult"]:
+    ) -> list[Any]:
         """Scan files with pre-read content in parallel.
 
         More efficient when content is already in memory - avoids
@@ -222,7 +221,7 @@ class FileScanner:
             List of ScanResult objects from Rust
         """
         if self._use_rust:
-            return _rust_scanner.batch_scan_files_with_content(items)
+            return _rust_scanner.batch_scan_files_with_content(items)  # type: ignore[union-attr]
         else:
             # Fallback: scan each file sequentially
             from dataclasses import dataclass

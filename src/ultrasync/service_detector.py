@@ -252,6 +252,7 @@ class ServiceDetector:
                 self._package_json_cache = {}
         else:
             self._package_json_cache = {}
+        assert self._package_json_cache is not None
         return self._package_json_cache
 
     def _load_pyproject(self) -> dict:

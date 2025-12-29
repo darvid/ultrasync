@@ -560,9 +560,8 @@ class ConventionsCheck:
             return 1
 
         code = file_path.read_text()
-        contexts = [self.context] if self.context else None
 
-        violations = manager.conventions.check_code(code, contexts=contexts)
+        violations = manager.conventions.check_code(code, context=self.context)
 
         if not violations:
             print("✓ no convention violations found")
@@ -571,18 +570,23 @@ class ConventionsCheck:
         print(f"found {len(violations)} violation(s):\n")
 
         for v in violations:
+            priority = v.convention.priority
             priority_icon = (
                 "🔴"
-                if v.priority == "required"
-                else ("🟡" if v.priority == "recommended" else "🔵")
+                if priority == "required"
+                else ("🟡" if priority == "recommended" else "🔵")
             )
-            print(f"{priority_icon} [{v.priority}] {v.convention_name}")
-            print(f"   {v.convention_description}")
+            print(f"{priority_icon} [{priority}] {v.convention.name}")
+            print(f"   {v.convention.description}")
             if v.matches:
                 print(f"   matches: {v.matches[:3]}")
             print()
 
-        return 1 if any(v.priority == "required" for v in violations) else 0
+        return (
+            1
+            if any(v.convention.priority == "required" for v in violations)
+            else 0
+        )
 
 
 @dataclass
@@ -615,12 +619,10 @@ class ConventionsExport:
         suffix = self.output.suffix.lower()
         if suffix in (".yaml", ".yml"):
             content = manager.conventions.export_yaml(
-                category=self.category,
                 org_id=self.org_id,
             )
         elif suffix == ".json":
             content = manager.conventions.export_json(
-                category=self.category,
                 org_id=self.org_id,
             )
         else:

@@ -448,6 +448,10 @@ def _grep_fallback(
 
     found_files: list[tuple[Path, str]] = []
 
+    # ensure grep_sources is initialized (caller should set this)
+    if stats.grep_sources is None:
+        stats.grep_sources = []
+
     def run_cmd(cmd: list[str], timeout: int = 5) -> list[str]:
         try:
             result = subprocess.run(

@@ -213,7 +213,7 @@ class RustEmbedderProvider:
             model=model,
             device=device_str,
         )
-        self._embedder = _rust_index.RustEmbedder(
+        self._embedder = _rust_index.RustEmbedder(  # type: ignore[union-attr]
             model_id=model,
             device=device_str,
             max_chars=max_chars,

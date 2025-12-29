@@ -212,7 +212,7 @@ def configure_logging(
             stdlib_logger.addHandler(file_handler)
         except (OSError, PermissionError) as e:
             stdlib_logger.warning(
-                "failed to open log file", path=str(log_file), error=str(e)
+                "failed to open log file: %s - %s", str(log_file), str(e)
             )
 
     # don't propagate to root logger
