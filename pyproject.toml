@@ -28,7 +28,7 @@ dependencies = [
   "sentence-transformers>=3",
   "structlog>=24.0",
   "tyro>=0.9",
-  "ultrascan-mcp-index",
+  "ultrasync-index",
   "urllib3>=2.6.0",
 ]
 
@@ -102,7 +102,7 @@ indent-style = "space"
 docstring-code-format = true
 
 [tool.uv.sources]
-ultrascan-mcp-index = { path = "crates/ultrasync_index", editable = true }
+ultrasync-index = { path = "crates/ultrasync_index", editable = true }
 
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]
