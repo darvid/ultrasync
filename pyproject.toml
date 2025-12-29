@@ -102,3 +102,7 @@ docstring-code-format = true
 
 [tool.uv.sources]
 ultrasync-index = { path = "crates/ultrasync_index", editable = true }
+
+[tool.bandit]
+exclude_dirs = ["tests", "venv", ".venv"]
+skips = ["B101"]  # skip assert warnings (used in tests)
