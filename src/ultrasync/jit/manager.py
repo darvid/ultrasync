@@ -100,7 +100,7 @@ class JITIndexManager:
     def __init__(
         self,
         data_dir: Path,
-        embedding_provider: EmbeddingProvider,
+        embedding_provider: EmbeddingProvider | None = None,
         max_vector_cache_mb: int = 256,
         embed_batch_size: int = 32,
         enable_lexical: bool = True,
@@ -113,21 +113,28 @@ class JITIndexManager:
         self.blob = BlobAppender(data_dir / "blob.dat")
         self.vector_store = VectorStore(data_dir / "vectors.dat")
         self.vector_cache = VectorCache(max_vector_cache_mb * 1024 * 1024)
-        self.embed_queue = EmbedQueue(embedding_provider, embed_batch_size)
         self.scanner = FileScanner()
         self.provider = embedding_provider
-        self.memory = MemoryManager(
-            tracker=self.tracker,
-            blob=self.blob,
-            vector_cache=self.vector_cache,
-            embedding_provider=embedding_provider,
-        )
-        self.conventions = ConventionManager(
-            tracker=self.tracker,
-            blob=self.blob,
-            vector_cache=self.vector_cache,
-            embedding_provider=embedding_provider,
-        )
+
+        # Embedding-dependent components - only initialized if provider given
+        self.embed_queue: EmbedQueue | None = None
+        self.memory: MemoryManager | None = None
+        self.conventions: ConventionManager | None = None
+
+        if embedding_provider is not None:
+            self.embed_queue = EmbedQueue(embedding_provider, embed_batch_size)
+            self.memory = MemoryManager(
+                tracker=self.tracker,
+                blob=self.blob,
+                vector_cache=self.vector_cache,
+                embedding_provider=embedding_provider,
+            )
+            self.conventions = ConventionManager(
+                tracker=self.tracker,
+                blob=self.blob,
+                vector_cache=self.vector_cache,
+                embedding_provider=embedding_provider,
+            )
 
         # Pattern manager for context detection
         self.pattern_manager = PatternSetManager(data_dir)
@@ -169,13 +176,22 @@ class JITIndexManager:
     async def start(self) -> None:
         if self._started:
             return
-        await self.embed_queue.start()
+        if self.embed_queue is not None:
+            await self.embed_queue.start()
         self._started = True
 
     async def stop(self) -> None:
         if not self._started:
             return
-        await self.embed_queue.stop()
+        if self.embed_queue is not None:
+            await self.embed_queue.stop()
+        if self.lexical is not None:
+            self.lexical.close()
+        self.tracker.close()
+        self._started = False
+
+    def close(self) -> None:
+        """Synchronous close for non-async contexts."""
         if self.lexical is not None:
             self.lexical.close()
         self.tracker.close()

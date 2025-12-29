@@ -18,6 +18,7 @@ from ultrasync.cli._common import (
     resolve_data_dir,
 )
 from ultrasync.jit.manager import JITIndexManager
+from ultrasync.jit.memory import MemoryEntry
 from ultrasync.jit.search import search
 from ultrasync.keys import hash64
 
@@ -99,6 +100,7 @@ class Query:
 
     def _key_lookup(self, data_dir: Path) -> int:
         """Direct key lookup mode."""
+        assert self.key is not None, "key required for key lookup"
         manager = JITIndexManager(
             data_dir=data_dir,
             embedding_provider=None,
@@ -130,6 +132,7 @@ class Query:
 
     def _semantic_search(self, root: Path, data_dir: Path) -> int:
         """Semantic search mode."""
+        assert self.query_text is not None, "query text required for search"
         EmbeddingProvider = get_embedder_class()
 
         with console.status(f"loading model ({self.model})..."):
@@ -371,7 +374,7 @@ class Query:
 
         # Also add relevant memories directly (not via BFS)
         # Track memory entries for edge creation later
-        memory_entries: dict[int, object] = {}  # key_hash -> MemoryEntry
+        memory_entries: dict[int, MemoryEntry] = {}  # key_hash -> MemoryEntry
         if self.dot_memories:
             for mem_id in relevant_memories:
                 nodes_to_include.add(mem_id)
