@@ -71,18 +71,19 @@ jobs:
       - name: Run cargo-audit
         run: cargo audit --file crates/ultrasync_index/Cargo.lock
 
-  codeql:
-    name: CodeQL analysis
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: python
-
-      - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@v3
+  # TODO: enable CodeQL when repo is public
+  # codeql:
+  #   name: CodeQL analysis
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     security-events: write
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Initialize CodeQL
+  #       uses: github/codeql-action/init@v3
+  #       with:
+  #         languages: python
+  #
+  #     - name: Perform CodeQL analysis
+  #       uses: github/codeql-action/analyze@v3
