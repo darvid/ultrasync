@@ -26,8 +26,11 @@ logger = get_logger("sync_client")
 def _debug_log(msg: str) -> None:
     """Write debug messages to a file for troubleshooting sync issues."""
     import datetime
+    import tempfile
+    from pathlib import Path
 
-    with open("/tmp/ultrasync_sync_debug.log", "a") as f:
+    log_path = Path(tempfile.gettempdir()) / "ultrasync_sync_debug.log"
+    with open(log_path, "a") as f:
         ts = datetime.datetime.now().isoformat()
         f.write(f"[{ts}] {msg}\n")
         f.flush()

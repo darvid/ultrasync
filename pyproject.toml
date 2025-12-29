@@ -105,4 +105,13 @@ ultrasync-index = { path = "crates/ultrasync_index", editable = true }
 
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]
-skips = ["B101"]  # skip assert warnings (used in tests)
+skips = [
+  "B101",  # assert used for internal checks
+  "B105",  # false positives on env var names (ULTRASYNC_*_TOKEN etc)
+  "B110",  # try/except/pass is intentional for optional features
+  "B112",  # try/except/continue is intentional for batch processing
+  "B404",  # subprocess import is required for git operations
+  "B603",  # subprocess calls are safe (hardcoded git commands)
+  "B606",  # os.execv with known paths is intentional
+  "B607",  # partial paths to git are acceptable
+]
