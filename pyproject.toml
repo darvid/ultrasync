@@ -89,6 +89,9 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "TID252"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["ultrasync", "ultrasync_index"]
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402"]  # allow imports after warnings filter
 

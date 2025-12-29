@@ -2,7 +2,7 @@
 
 ## scope
 this document specifies the **server-authoritative hub-and-spoke sync server**
-for the managed saas version of ultrasync.  
+for the managed saas version of ultrasync.
 target consumers: coding agents (claude code, codex).
 
 ---

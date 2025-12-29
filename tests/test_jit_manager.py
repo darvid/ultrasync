@@ -476,6 +476,7 @@ def multiply(a, b):
         assert record is not None
         assert record.detected_contexts is not None
         import json
+
         contexts = json.loads(record.detected_contexts)
         assert "context:auth" in contexts
 
@@ -488,6 +489,7 @@ def multiply(a, b):
         assert record is not None
         assert record.detected_contexts is not None
         import json
+
         contexts = json.loads(record.detected_contexts)
         assert "context:frontend" in contexts
 
@@ -500,6 +502,7 @@ def multiply(a, b):
         assert record is not None
         assert record.detected_contexts is not None
         import json
+
         contexts = json.loads(record.detected_contexts)
         assert "context:testing" in contexts
 
@@ -512,8 +515,7 @@ def multiply(a, b):
         assert record is not None
         # Should be None or empty since no patterns matched
         assert (
-            record.detected_contexts is None
-            or record.detected_contexts == "[]"
+            record.detected_contexts is None or record.detected_contexts == "[]"
         )
 
     def test_iter_files_by_context(self, manager, auth_file, plain_file):
@@ -522,9 +524,7 @@ def multiply(a, b):
         manager.register_file(plain_file)
 
         # Query for auth files
-        auth_files = list(
-            manager.tracker.iter_files_by_context("context:auth")
-        )
+        auth_files = list(manager.tracker.iter_files_by_context("context:auth"))
         assert len(auth_files) == 1
         assert auth_files[0].path == str(auth_file.resolve())
 
@@ -566,6 +566,7 @@ def logout():
 
         record = manager.tracker.get_file(f)
         import json
+
         contexts = json.loads(record.detected_contexts)
         # Should have both auth and backend contexts
         assert "context:auth" in contexts
@@ -702,9 +703,7 @@ class Calculator:
         """Should be able to iterate over insights of a specific type."""
         manager.register_file(file_with_todos)
 
-        todos = list(
-            manager.tracker.iter_insights_by_type("insight:todo")
-        )
+        todos = list(manager.tracker.iter_insights_by_type("insight:todo"))
         assert len(todos) >= 1
         assert todos[0].kind == "insight:todo"
         assert todos[0].line_start > 0
@@ -713,9 +712,7 @@ class Calculator:
         """Insight symbols should contain the line text."""
         manager.register_file(file_with_todos)
 
-        todos = list(
-            manager.tracker.iter_insights_by_type("insight:todo")
-        )
+        todos = list(manager.tracker.iter_insights_by_type("insight:todo"))
         assert len(todos) >= 1
         # The name field contains the insight text
         assert "TODO" in todos[0].name or "validation" in todos[0].name
@@ -724,17 +721,13 @@ class Calculator:
         """Insights should have accurate line numbers."""
         manager.register_file(file_with_todos)
 
-        insights = list(
-            manager.tracker.iter_insights_by_type("insight:todo")
-        )
+        insights = list(manager.tracker.iter_insights_by_type("insight:todo"))
         assert len(insights) >= 1
         # Line numbers should be positive
         for insight in insights:
             assert insight.line_start > 0
 
-    def test_multiple_insight_types_in_one_file(
-        self, manager, file_with_todos
-    ):
+    def test_multiple_insight_types_in_one_file(self, manager, file_with_todos):
         """A single file can have multiple types of insights."""
         manager.register_file(file_with_todos)
 

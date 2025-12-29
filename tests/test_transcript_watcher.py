@@ -501,9 +501,7 @@ class TestCodexParserToolCallCorrelation:
                 "type": "function_call",
                 "name": "shell",
                 "call_id": "call_pending_123",
-                "arguments": json.dumps(
-                    {"command": ["bash", "-lc", "ls"]}
-                ),
+                "arguments": json.dumps({"command": ["bash", "-lc", "ls"]}),
             }
         )
 
@@ -520,9 +518,7 @@ class TestCodexParserToolCallCorrelation:
                 "type": "function_call",
                 "name": "shell",
                 "call_id": "call_match_456",
-                "arguments": json.dumps(
-                    {"command": ["bash", "-lc", "ls"]}
-                ),
+                "arguments": json.dumps({"command": ["bash", "-lc", "ls"]}),
             }
         )
         parser.parse_tool_calls(call_line)

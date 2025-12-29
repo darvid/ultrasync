@@ -1,8 +1,8 @@
 # ADR-001: Multiplayer Sync Architecture
 
-**Status**: Accepted  
-**Date**: 2025-12-28  
-**Deciders**: @david  
+**Status**: Accepted
+**Date**: 2025-12-28
+**Deciders**: @david
 
 ## Context
 
@@ -146,6 +146,6 @@ deterministic (same file = same symbols).
 ## References
 
 - Figma multiplayer architecture
-- Linear's shared workspace model  
+- Linear's shared workspace model
 - Cody (Sourcegraph) team codebase indexing
 - CRDT literature for conflict resolution

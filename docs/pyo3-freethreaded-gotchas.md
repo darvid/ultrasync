@@ -18,7 +18,7 @@ Python.
 ### Symptoms
 
 - `cargo check` passes with no errors
-- `cargo clippy` shows no warnings  
+- `cargo clippy` shows no warnings
 - The `.so` binary contains the class name in `strings` output
 - Python import works but the class isn't in `dir(module)`
 - Direct import raises `ImportError: cannot import name 'ClassName'`
@@ -60,7 +60,7 @@ For types using `RwLock`, `Mutex`, or `Arc` for interior mutability, the
 ### Checklist for Freethreaded pyo3
 
 1. Module uses `#[pymodule(gil_used = false)]`
-2. ALL `#[pyclass]` types have `unsafe impl Send` 
+2. ALL `#[pyclass]` types have `unsafe impl Send`
 3. ALL `#[pyclass]` types have `unsafe impl Sync`
 4. Interior mutability uses thread-safe primitives (`RwLock`, `Mutex`, etc.)
 5. No raw pointers without careful lifetime management

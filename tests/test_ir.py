@@ -394,9 +394,8 @@ class TestEntityExtractor:
         entity = extractor.extract_from_anchor(anchor, content)
         assert entity is not None
         # should detect relationship via foreign key or relationship()
-        assert (
-            len(entity.relationships) >= 1
-            or any(f.references for f in entity.fields)
+        assert len(entity.relationships) >= 1 or any(
+            f.references for f in entity.fields
         )
 
 
