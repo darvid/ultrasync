@@ -54,7 +54,7 @@ class HyperscanSearch:
             MatchLimitExceeded: If match_limit is exceeded and limit > 0.
         """
         # wrap buffer protocol objects in memoryview for zerocopy access
-        if not isinstance(data, (bytes, memoryview)):
+        if not isinstance(data, bytes | memoryview):
             data = memoryview(data)
 
         limit = (

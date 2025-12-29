@@ -1,0 +1,15 @@
+{
+  "include": ["src/ultrasync"],
+  "exclude": ["**/__pycache__", "**/node_modules"],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.10",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "reportMissingTypeArgument": "warning",
+  "reportConstantRedefinition": "none",
+  "reportUnusedImport": "warning",
+  "reportUnusedVariable": "warning",
+  "reportUndefinedVariable": "error",
+  "reportOptionalMemberAccess": "warning",
+  "reportPossiblyUnboundVariable": "warning"
+}

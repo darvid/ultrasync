@@ -1650,7 +1650,7 @@ class ConventionDiscovery:
             eslint_rules = config.get("rules", {})
             for rule_id, rule_config in eslint_rules.items():
                 # normalize rule config (can be string, number, or array)
-                if isinstance(rule_config, (str, int)):
+                if isinstance(rule_config, str | int):
                     severity = self._normalize_severity(rule_config)
                     options = {}
                 elif isinstance(rule_config, list) and rule_config:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
 import time
@@ -10,6 +11,10 @@ from typing import IO, TYPE_CHECKING, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from ultrasync.jit.session_threads import PersistentThreadManager
+    from ultrasync.sync_client import SyncClient, SyncManager, SyncManagerStats
 
 from ultrasync.events import EventType, SessionEvent
 from ultrasync.file_registry import FileRegistry

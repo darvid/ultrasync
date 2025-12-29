@@ -1767,7 +1767,7 @@ class PatternSetManager:
         if not ps or not ps.compiled_db:
             raise ValueError(f"Pattern set not found: {pattern_set_id}")
 
-        if not isinstance(data, (bytes, memoryview)):
+        if not isinstance(data, bytes | memoryview):
             data = memoryview(data)
 
         matches: list[PatternMatch] = []
