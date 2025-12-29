@@ -2823,7 +2823,7 @@ class FileTracker:
             "last_txnid": info["last_txnid"],
             "page_size": page_size,
             "entries": stat["entries"],
-            "file_size": file_size,  # apparent size (sparse files show full size)
+            "file_size": file_size,  # apparent size (sparse)
             "disk_usage": disk_usage,  # actual bytes on disk
             "estimated_used": estimated_used,
             "estimated_waste": max(0, file_size - estimated_used),
