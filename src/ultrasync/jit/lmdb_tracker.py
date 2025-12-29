@@ -70,6 +70,9 @@ class MemoryRecord:
     # Usage tracking for smart eviction
     access_count: int = 0
     last_accessed: float | None = None
+    # Team sync fields
+    owner_id: str | None = None  # user who created/shared this memory
+    is_team: bool = False  # True if synced from team (not local)
 
 
 @dataclass
@@ -1215,6 +1218,8 @@ class FileTracker:
         blob_offset: int,
         blob_length: int,
         key_hash: int,
+        owner_id: str | None = None,
+        is_team: bool = False,
     ) -> None:
         """Insert or update a memory record."""
         now = time.time()
@@ -1250,6 +1255,8 @@ class FileTracker:
                 "updated_at": now if existing else None,
                 "vector_offset": None,
                 "vector_length": None,
+                "owner_id": owner_id,
+                "is_team": is_team,
             }
 
             txn.put(id_key, msgpack.packb(record), db=memories_db)
@@ -1295,6 +1302,8 @@ class FileTracker:
             vector_length=r.get("vector_length"),
             access_count=r.get("access_count", 0),
             last_accessed=r.get("last_accessed"),
+            owner_id=r.get("owner_id"),
+            is_team=r.get("is_team", False),
         )
 
     def query_memories(

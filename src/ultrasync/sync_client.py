@@ -531,6 +531,58 @@ class SyncClient:
             logger.exception("share_memory error: %s", e)
             return None
 
+    async def fetch_team_memories(self) -> list[dict] | None:
+        """Fetch all team-shared memories from the sync server.
+
+        Returns a list of memory payloads that can be imported locally.
+        Returns None if fetch fails.
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot fetch team memories")
+            return None
+
+        try:
+            base_url = self.config.url.rstrip("/")
+
+            async with aiohttp.ClientSession() as session:
+                # verify token and get org/project IDs
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+
+                    # derive shared project_id from git_remote
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                # fetch team memories
+                async with session.get(
+                    f"{base_url}/api/team-memories/{org_id}/{project_id}",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error(
+                            "fetch_team_memories failed: %s", error[:100]
+                        )
+                        return None
+
+                    data = await resp.json()
+                    return data.get("memories", [])
+
+        except Exception as e:
+            logger.exception("fetch_team_memories error: %s", e)
+            return None
+
     async def push_presence(
         self,
         cursor_file: str | None = None,
@@ -1072,6 +1124,7 @@ class SyncManager:
         config: SyncConfig | None = None,
         resync_interval: int = 300,  # seconds between periodic resyncs
         batch_size: int = 50,
+        on_team_memory: Callable[[dict], None] | None = None,
     ) -> None:
         """Initialize the sync manager.
 
@@ -1080,11 +1133,15 @@ class SyncManager:
             config: Sync configuration (defaults to env-based config)
             resync_interval: Seconds between periodic resyncs (0 to disable)
             batch_size: Number of items per bulk sync batch
+            on_team_memory: Callback invoked when team memory ops are received
+                Signature: (payload: dict) -> None
+                payload contains: id, text, task, insights, context, owner_id
         """
         self.tracker = tracker
         self.config = config or SyncConfig()
         self.resync_interval = resync_interval
         self.batch_size = batch_size
+        self._on_team_memory = on_team_memory
 
         self._client: SyncClient | None = None
         self._sync_task: asyncio.Task | None = None
@@ -1147,8 +1204,8 @@ class SyncManager:
         self._stop_event.clear()
         self.stats.running = True
 
-        # create client and connect
-        self._client = SyncClient(self.config)
+        # create client with ops handler and connect
+        self._client = SyncClient(self.config, on_ops=self._handle_ops)
         connected = await self._client.connect()
         _debug_log(f"SyncManager.start() - connected={connected}")
 
@@ -1210,6 +1267,37 @@ class SyncManager:
 
         self.stats.connected = False
         logger.info("sync manager stopped")
+
+    def _handle_ops(self, ops: list[dict]) -> None:
+        """Handle incoming ops from the sync server.
+
+        Filters for team memory ops and invokes the callback if set.
+        Team memories have keys like "memory:team:{memory_id}".
+        """
+        for op in ops:
+            key = op.get("key", "")
+            payload = op.get("payload", {})
+
+            # check if this is a team memory op
+            if key.startswith("memory:team:") and self._on_team_memory:
+                # don't import our own shared memories back
+                owner_id = payload.get("owner_id")
+                my_id = self.config.user_id or self.config.clerk_user_id
+                if owner_id and owner_id == my_id:
+                    logger.debug(
+                        "skipping own team memory: %s", payload.get("id")
+                    )
+                    continue
+
+                logger.info(
+                    "received team memory from %s: %s",
+                    owner_id,
+                    payload.get("id"),
+                )
+                try:
+                    self._on_team_memory(payload)
+                except Exception as e:
+                    logger.exception("error handling team memory: %s", e)
 
     async def _sync_loop(self) -> None:
         """Main sync loop - handles initial sync and periodic resyncs."""

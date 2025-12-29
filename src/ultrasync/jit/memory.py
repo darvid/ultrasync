@@ -38,6 +38,9 @@ class MemoryEntry:
     # Usage tracking
     access_count: int = 0
     last_accessed: str | None = None
+    # Team sync fields
+    owner_id: str | None = None  # user who created/shared this memory
+    is_team: bool = False  # True if synced from team (not local)
 
 
 @dataclass
@@ -114,6 +117,8 @@ class MemoryManager:
                 if record.last_accessed
                 else None
             ),
+            owner_id=record.owner_id,
+            is_team=record.is_team,
         )
 
     def _compute_eviction_score(self, mem: MemoryRecord) -> float:
@@ -249,6 +254,107 @@ class MemoryManager:
             text=text,
             tags=tags or [],
             created_at=entry_data["created_at"],
+        )
+
+    def import_memory(
+        self,
+        memory_id: str,
+        text: str,
+        task: str | None = None,
+        insights: list[str] | None = None,
+        context: list[str] | None = None,
+        tags: list[str] | None = None,
+        owner_id: str | None = None,
+        created_at: str | None = None,
+    ) -> MemoryEntry:
+        """Import a memory from sync server (team shared memory).
+
+        Unlike write(), this preserves the original memory ID and metadata
+        from the sync server. Used for importing team-shared memories.
+
+        Args:
+            memory_id: Original memory ID from sync (e.g., "mem:abc123")
+            text: Memory content
+            task: Task type
+            insights: Insight tags
+            context: Context tags
+            tags: Free-form tags
+            owner_id: Original owner's user ID
+            created_at: Original creation timestamp
+
+        Returns:
+            MemoryEntry with the imported data
+        """
+        # Check for eviction (same as write)
+        current_count = self.count()
+        if current_count >= self.max_memories:
+            to_evict = current_count - self.max_memories + 1
+            evicted = self._evict_coldest(to_evict)
+            logger.info(
+                "evicted cold memories for import",
+                evicted=evicted,
+                max_memories=self.max_memories,
+            )
+
+        # Use the provided ID, compute key hash from it
+        key_hash = hash64(memory_id)
+
+        # Check if we already have this memory (idempotent)
+        existing = self.tracker.get_memory(memory_id)
+        if existing:
+            logger.debug("memory already exists, skipping import", id=memory_id)
+            return self._record_to_entry(existing)
+
+        ts = created_at or datetime.now(timezone.utc).isoformat()
+
+        entry_data = {
+            "id": memory_id,
+            "task": task,
+            "insights": insights or [],
+            "context": context or [],
+            "symbol_keys": [],
+            "text": text,
+            "tags": tags or [],
+            "created_at": ts,
+            "owner_id": owner_id,
+            "synced": True,  # mark as synced from server
+        }
+
+        content = json.dumps(entry_data).encode("utf-8")
+        blob_entry = self.blob.append(content)
+
+        embedding = self.provider.embed(text)
+        self.vector_cache.put(key_hash, embedding)
+
+        self.tracker.upsert_memory(
+            id=memory_id,
+            task=task,
+            insights=json.dumps(insights or []),
+            context=json.dumps(context or []),
+            symbol_keys=json.dumps([]),
+            text=text,
+            tags=json.dumps(tags or []),
+            blob_offset=blob_entry.offset,
+            blob_length=blob_entry.length,
+            key_hash=key_hash,
+            owner_id=owner_id,
+            is_team=True,
+        )
+
+        logger.info("imported team memory", id=memory_id, owner=owner_id)
+
+        return MemoryEntry(
+            id=memory_id,
+            key_hash=key_hash,
+            task=task,
+            insights=insights or [],
+            context=context or [],
+            symbol_keys=[],
+            text=text,
+            tags=tags or [],
+            created_at=ts,
+            owner_id=owner_id,
+            is_team=True,
         )
 
     def get(self, memory_id: str) -> MemoryEntry | None:

@@ -49,11 +49,15 @@ def _format_search_results_tsv(
     hint: str | None = None,
     prior_context: list[dict] | None = None,
     related_memories: list[dict] | None = None,
+    team_updates: list[dict] | None = None,
 ) -> str:
     """Format search results as compact TSV for reduced token usage.
 
     Format:
-        # PRIOR CONTEXT (from previous sessions) - shown FIRST if present
+        # TEAM UPDATES - shown FIRST (notify user about teammate context)
+        T  mem:xyz789  owner123  task:debug  0.70  <teammate shared this>
+
+        # PRIOR CONTEXT (from previous sessions)
         M  mem:abc123  task:debug  0.65  <high relevance memory>
 
         # search <elapsed>ms src=<source>
@@ -68,7 +72,22 @@ def _format_search_results_tsv(
     """
     lines = []
 
-    # PRIOR CONTEXT shown FIRST - high relevance memories from previous work
+    # TEAM UPDATES shown FIRST - memories shared by teammates
+    if team_updates:
+        lines.append("# TEAM UPDATES - context shared by teammates:")
+        lines.append(
+            "# IMPORTANT: Review and notify user about relevant team context"
+        )
+        lines.append("# id\towner\ttask\tscore\ttext")
+        for m in team_updates:
+            text = m.get("text", "")[:150].replace("\n", " ")
+            task = m.get("task") or "-"
+            owner = m.get("owner_id", "teammate")[:8]  # truncate owner id
+            score = m.get("score", 0)
+            lines.append(f"T\t{m['id']}\t{owner}\t{task}\t{score:.2f}\t{text}")
+        lines.append("")  # blank line separator
+
+    # PRIOR CONTEXT - high relevance memories from previous work
     if prior_context:
         lines.append("# PRIOR CONTEXT (from previous sessions):")
         lines.append(
@@ -781,11 +800,30 @@ class ServerState:
         await self._init_index_manager_async()
         assert self._jit_manager is not None
 
+        # callback for importing team memories received via sync
+        def on_team_memory(payload: dict) -> None:
+            if self._jit_manager is None:
+                return
+            try:
+                self._jit_manager.memory.import_memory(
+                    memory_id=payload.get("id", ""),
+                    text=payload.get("text", ""),
+                    task=payload.get("task"),
+                    insights=payload.get("insights"),
+                    context=payload.get("context"),
+                    tags=payload.get("tags"),
+                    owner_id=payload.get("owner_id"),
+                    created_at=payload.get("created_at"),
+                )
+            except Exception as e:
+                logger.exception("failed to import team memory: %s", e)
+
         self._sync_manager = SyncManager(
             tracker=self._jit_manager.tracker,
             config=config,
             resync_interval=300,  # 5 minutes
             batch_size=50,
+            on_team_memory=on_team_memory,
         )
 
         started = await self._sync_manager.start()
@@ -1968,13 +2006,15 @@ After writing code, validate against conventions:
 
         # search memories for relevant context (shared by both formats)
         # split into tiers: high relevance (prior context) vs medium (related)
+        # also track team memories separately for notification
         prior_context: list[dict[str, Any]] = []
         related_memories: list[dict[str, Any]] = []
+        team_updates: list[dict[str, Any]] = []
         if include_memories:
             try:
                 mem_results = state.jit_manager.memory.search(
                     query=query,
-                    top_k=5,  # get more to allow for tiering
+                    top_k=10,  # get more to allow for tiering + team
                 )
                 for m in mem_results:
                     if m.score < MEMORY_MEDIUM_RELEVANCE_THRESHOLD:
@@ -1987,9 +2027,14 @@ After writing code, validate against conventions:
                         "context": m.entry.context,
                         "text": m.entry.text[:300],  # truncate for display
                         "score": round(m.score, 3),
+                        "is_team": m.entry.is_team,
+                        "owner_id": m.entry.owner_id,
                     }
 
-                    if m.score >= MEMORY_HIGH_RELEVANCE_THRESHOLD:
+                    # team memories go to a special section
+                    if m.entry.is_team:
+                        team_updates.append(mem_dict)
+                    elif m.score >= MEMORY_HIGH_RELEVANCE_THRESHOLD:
                         prior_context.append(mem_dict)
                     else:
                         related_memories.append(mem_dict)
@@ -2042,6 +2087,7 @@ After writing code, validate against conventions:
                 hint,
                 prior_context,
                 related_memories,
+                team_updates,
             )
 
         # verbose JSON format
@@ -2050,7 +2096,16 @@ After writing code, validate against conventions:
             "source": primary_source,
         }
 
-        # prior context shown FIRST - high relevance memories from previous work
+        # team updates shown FIRST - memories shared by teammates
+        # IMPORTANT: Agent should notify user about relevant team context
+        if team_updates:
+            response["team_updates"] = team_updates
+            response["_team_updates_hint"] = (
+                "Teammates have shared relevant context. "
+                "Consider notifying the user about these updates."
+            )
+
+        # prior context - high relevance memories from previous work
         if prior_context:
             response["prior_context"] = prior_context
 
@@ -4355,6 +4410,67 @@ After writing code, validate against conventions:
             "error_details": progress.errors[:5] if progress.errors else [],
             "started_at": progress.started_at,
             "completed_at": progress.completed_at,
+        }
+
+    @mcp.tool()
+    async def sync_fetch_team_memories() -> dict[str, Any]:
+        """Fetch and import team-shared memories from the sync server.
+
+        Downloads all team memories shared by teammates and imports them
+        into the local memory index. Memories are deduplicated - already
+        imported memories are skipped.
+
+        Use this to:
+        - Get team context when starting work on a shared project
+        - Sync decisions and constraints shared by teammates
+        - Access debugging findings from team members
+
+        Returns:
+            Dict with fetched count, imported count, and any errors
+        """
+        client = state.sync_client
+        if client is None:
+            return {"success": False, "error": "sync not configured"}
+
+        # fetch team memories from server
+        memories = await client.fetch_team_memories()
+        if memories is None:
+            return {"success": False, "error": "failed to fetch team memories"}
+
+        # import each memory locally
+        imported = 0
+        skipped = 0
+        errors = []
+
+        for mem in memories:
+            # skip our own memories
+            owner_id = mem.get("owner_id")
+            my_id = client.config.user_id or client.config.clerk_user_id
+            if owner_id and owner_id == my_id:
+                skipped += 1
+                continue
+
+            try:
+                state.jit_manager.memory.import_memory(
+                    memory_id=mem.get("id", ""),
+                    text=mem.get("text", ""),
+                    task=mem.get("task"),
+                    insights=mem.get("insights"),
+                    context=mem.get("context"),
+                    tags=mem.get("tags"),
+                    owner_id=owner_id,
+                    created_at=mem.get("created_at"),
+                )
+                imported += 1
+            except Exception as e:
+                errors.append({"id": mem.get("id"), "error": str(e)})
+
+        return {
+            "success": True,
+            "fetched": len(memories),
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors[:5] if errors else [],
         }
 
     return mcp
