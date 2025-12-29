@@ -58,6 +58,65 @@ def is_remote_sync_enabled() -> bool:
     return val in ("true", "1", "yes", "on")
 
 
+def _get_git_remote() -> str:
+    """Get full git remote origin URL for shared project derivation.
+
+    Returns the normalized git remote URL. All team members on the same
+    repo will get the same URL, enabling shared project IDs.
+
+    Normalization:
+    - Strips .git suffix
+    - Lowercases
+    - Removes protocol prefix (https://, git@)
+    - Converts git@ style to path style (github.com/user/repo)
+    """
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            return _normalize_git_remote(url)
+    except Exception:
+        pass
+
+    # fallback to current directory name
+    return os.path.basename(os.getcwd())
+
+
+def _normalize_git_remote(url: str) -> str:
+    """Normalize git remote URL for consistent project ID derivation.
+
+    Examples:
+        git@github.com:acme/backend.git -> github.com/acme/backend
+        https://github.com/acme/backend.git -> github.com/acme/backend
+        https://github.com/acme/backend -> github.com/acme/backend
+        ssh://git@github.com/acme/backend.git -> github.com/acme/backend
+    """
+    import re
+
+    normalized = url.lower().strip()
+
+    # strip .git suffix
+    if normalized.endswith(".git"):
+        normalized = normalized[:-4]
+
+    # remove protocol prefixes
+    normalized = re.sub(r"^(https?://|ssh://|git://)", "", normalized)
+
+    # handle git@ style: git@github.com:user/repo -> github.com/user/repo
+    if normalized.startswith("git@"):
+        normalized = normalized[4:]  # remove git@
+        normalized = normalized.replace(":", "/", 1)  # first : becomes /
+
+    return normalized
+
+
 def _get_project_name() -> str:
     """Get project name from env or auto-detect from git.
 
@@ -65,6 +124,9 @@ def _get_project_name() -> str:
     1. ULTRASYNC_SYNC_PROJECT_NAME env var if set
     2. Git remote origin URL (extracts repo name)
     3. Current directory name as fallback
+
+    Note: For multiplayer sync, use _get_git_remote() instead to get
+    the full normalized remote URL for shared project ID derivation.
     """
     # explicit env var takes precedence
     env_name = os.environ.get(ENV_SYNC_PROJECT_NAME, "")
@@ -97,6 +159,32 @@ def _get_project_name() -> str:
     return os.path.basename(os.getcwd())
 
 
+def derive_shared_project_id(git_remote: str, org_id: str) -> str:
+    """Derive shared project ID from git remote and org.
+
+    All team members on the same repo within an org will get the same
+    project_id, enabling shared code index and collaboration.
+
+    Args:
+        git_remote: Normalized git remote URL (from _get_git_remote)
+        org_id: Organization ID from token claims
+
+    Returns:
+        UUID string for the shared project
+    """
+    import hashlib
+
+    # combine org + git remote for isolation between orgs
+    combined = f"{org_id}:{git_remote}"
+    hash_bytes = bytearray(hashlib.sha256(combined.encode()).digest()[:16])
+
+    # set UUID version 4 and variant bits
+    hash_bytes[6] = (hash_bytes[6] & 0x0F) | 0x40
+    hash_bytes[8] = (hash_bytes[8] & 0x3F) | 0x80
+
+    return str(uuid.UUID(bytes=bytes(hash_bytes)))
+
+
 @dataclass
 class SyncConfig:
     """Configuration for sync client.
@@ -108,8 +196,11 @@ class SyncConfig:
         ULTRASYNC_SYNC_PROJECT_NAME: Project/repo name for isolation
             (auto-detected from git if not set)
 
-    The server derives org_id and project_id from the token claims and
-    project_name, so you don't need to provide UUIDs explicitly.
+    Multiplayer Support:
+        For team collaboration, project_id is derived from the normalized
+        git remote URL + org_id. All team members on the same repo share
+        the same project_id for code index, while memories are namespaced
+        by user_id for privacy.
 
     Example MCP config (~/.claude/.claude.json):
         {
@@ -132,11 +223,14 @@ class SyncConfig:
         default_factory=lambda: os.environ.get(ENV_SYNC_TOKEN, "")
     )
     project_name: str = field(default_factory=_get_project_name)
+    git_remote: str = field(default_factory=_get_git_remote)
     actor_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     client_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     clerk_user_id: str | None = field(
         default_factory=lambda: os.environ.get(ENV_SYNC_CLERK_USER_ID)
     )
+    # user_id is set after token verification (from token claims)
+    user_id: str | None = field(default=None)
 
     @property
     def is_enabled(self) -> bool:
@@ -234,19 +328,21 @@ class SyncClient:
                 return False
 
             # send hello with token-based auth
-            # server derives org_id/project_id from token + project_name
+            # server derives shared project_id from git_remote + org_id
+            # for multiplayer support (all team members share same project)
             hello = {
                 "client_id": self.config.client_id,
                 "token": self.config.token,
                 "project_name": self.config.project_name,
+                "git_remote": self.config.git_remote,  # for shared project ID
                 "last_server_seq": self._last_seq,
                 "clerk_user_id": self.config.clerk_user_id,
             }
             await self._sio.emit("hello", hello)
             logger.info(
-                "sync client connected to %s (project: %s)",
+                "sync client connected to %s (git_remote: %s)",
                 self.config.url,
-                self.config.project_name,
+                self.config.git_remote,
             )
             return True
 
@@ -338,8 +434,9 @@ class SyncClient:
         task: str | None = None,
         insights: list[str] | None = None,
         context: list[str] | None = None,
+        visibility: str = "private",
     ) -> dict | None:
-        """Push a memory entry.
+        """Push a memory entry with visibility control.
 
         Args:
             memory_id: Unique memory ID (e.g., "mem:abc123")
@@ -347,10 +444,23 @@ class SyncClient:
             task: Task type
             insights: Insight tags
             context: Context tags
+            visibility: "private" (default) or "team" for shared memories
+
+        Key format based on visibility:
+            - private: memory:{user_id}:{memory_id} (only owner sees)
+            - team: memory:team:{memory_id} (all team members see)
         """
+        # determine key based on visibility
+        if visibility == "team":
+            key = f"memory:team:{memory_id}"
+        else:
+            # personal memory - namespaced by user_id
+            user_id = self.config.user_id or self.config.clerk_user_id or "anon"
+            key = f"memory:{user_id}:{memory_id}"
+
         return await self.push_op(
             namespace="metadata",
-            key=f"memory:{memory_id}",
+            key=key,
             op_type="set",
             payload={
                 "id": memory_id,
@@ -358,8 +468,68 @@ class SyncClient:
                 "task": task,
                 "insights": insights or [],
                 "context": context or [],
+                "visibility": visibility,
+                "owner_id": self.config.user_id or self.config.clerk_user_id,
             },
         )
+
+    async def share_memory(self, memory_id: str) -> dict | None:
+        """Promote a personal memory to team-shared.
+
+        Creates a copy in the team namespace. The original personal
+        memory is unchanged.
+
+        Args:
+            memory_id: Memory ID to share (without user prefix)
+
+        Returns:
+            The ack response if successful, None otherwise
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot share memory")
+            return None
+
+        try:
+            base_url = self.config.url.rstrip("/")
+            # we need org_id and project_id - verify token first
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+
+                    # derive shared project_id from git_remote
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                # call share endpoint
+                async with session.post(
+                    f"{base_url}/api/share-memory/{org_id}/{project_id}",
+                    json={"memory_id": memory_id},
+                    headers={
+                        "Authorization": f"Bearer {self.config.token}",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error("share_memory failed: %s", error[:100])
+                        return None
+
+                    return await resp.json()
+
+        except Exception as e:
+            logger.exception("share_memory error: %s", e)
+            return None
 
     async def push_presence(
         self,
@@ -860,6 +1030,7 @@ class SyncManagerStats:
     running: bool = False
     connected: bool = False
     project_name: str = ""
+    git_remote: str = ""  # normalized git remote for shared project ID
     sync_url: str = ""
     # sync stats
     initial_sync_done: bool = False
@@ -871,6 +1042,8 @@ class SyncManagerStats:
     errors: list[str] = field(default_factory=list)
     # resync config
     resync_interval_seconds: int = 0
+    # multiplayer info
+    user_id: str | None = None
 
 
 class SyncManager:
@@ -919,13 +1092,15 @@ class SyncManager:
 
         self.stats = SyncManagerStats(
             project_name=self.config.project_name,
+            git_remote=self.config.git_remote,
             sync_url=self.config.url,
             resync_interval_seconds=resync_interval,
+            user_id=self.config.user_id or self.config.clerk_user_id,
         )
 
         logger.info(
-            "sync manager initialized: project=%s url=%s resync=%ds",
-            self.config.project_name,
+            "sync manager initialized: git_remote=%s url=%s resync=%ds",
+            self.config.git_remote,
             self.config.url,
             resync_interval,
         )
@@ -1182,6 +1357,9 @@ class SyncManager:
             )
 
         # yield memories one at a time
+        # memories are namespaced by user_id for privacy (personal by default)
+        user_id = self.config.user_id or self.config.clerk_user_id or "anon"
+
         for memory in self.tracker.iter_memories():
             try:
                 insights = (
@@ -1196,10 +1374,20 @@ class SyncManager:
             except (json_mod.JSONDecodeError, TypeError):
                 context = []
 
+            # check if memory has visibility field, default to private
+            visibility = getattr(memory, "visibility", "private")
+
+            # determine key based on visibility
+            if visibility == "team":
+                key = f"memory:team:{memory.id}"
+            else:
+                # personal memory - namespaced by user_id
+                key = f"memory:{user_id}:{memory.id}"
+
             yield (
                 {
                     "namespace": "metadata",
-                    "key": f"memory:{memory.id}",
+                    "key": key,
                     "op_type": "set",
                     "payload": {
                         "id": memory.id,
@@ -1208,6 +1396,8 @@ class SyncManager:
                         "insights": insights,
                         "context": context,
                         "created_at": memory.created_at,
+                        "visibility": visibility,
+                        "owner_id": user_id,
                     },
                 },
                 "memory",

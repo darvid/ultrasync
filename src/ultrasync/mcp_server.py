@@ -2347,6 +2347,67 @@ After writing code, validate against conventions:
         ]
 
     @mcp.tool()
+    async def share_memory(memory_id: str) -> dict[str, Any]:
+        """Share a personal memory with your team.
+
+        Promotes a personal memory to team-shared visibility. The memory
+        will be visible to all team members working on the same repository.
+
+        This requires remote sync to be configured:
+        - ULTRASYNC_REMOTE_SYNC=true
+        - ULTRASYNC_SYNC_URL and ULTRASYNC_SYNC_TOKEN set
+
+        Args:
+            memory_id: The memory ID to share (e.g., "mem:a1b2c3d4")
+
+        Returns:
+            Status dict with shared=True on success, or error message
+        """
+        # check if sync is available
+        if state.sync_manager is None:
+            return {
+                "shared": False,
+                "error": "sync not configured - set ULTRASYNC_REMOTE_SYNC=true",
+            }
+
+        if not state.sync_manager.connected:
+            return {
+                "shared": False,
+                "error": "sync not connected to server",
+            }
+
+        # verify memory exists
+        entry = state.jit_manager.memory.get(memory_id)
+        if not entry:
+            return {
+                "shared": False,
+                "error": f"memory not found: {memory_id}",
+            }
+
+        # call sync client share_memory
+        client = state.sync_manager.client
+        if client is None:
+            return {
+                "shared": False,
+                "error": "sync client not initialized",
+            }
+
+        result = await client.share_memory(memory_id)
+
+        if result is None:
+            return {
+                "shared": False,
+                "error": "share_memory call failed - check logs",
+            }
+
+        return {
+            "shared": True,
+            "memory_id": memory_id,
+            "visibility": "team",
+            "message": "memory shared with team successfully",
+        }
+
+    @mcp.tool()
     def session_thread_list(
         session_id: str | None = None,
         limit: int = 20,

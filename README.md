@@ -171,6 +171,12 @@ We recommend installing `ultrasync` as a tool with `uv tool` or `uvx`.
 uv tool install ultrasync[cli,lexical]
 ```
 
+### Currently Supported Agents
+
+- Claude Code
+- OpenAI Codex
+- Others coming soon
+
 ### MCP Installation
 
 Add the following to your `mcpServers` or equivalent configuration:
