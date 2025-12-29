@@ -4473,6 +4473,63 @@ After writing code, validate against conventions:
             "errors": errors[:5] if errors else [],
         }
 
+    @mcp.tool()
+    async def sync_fetch_team_index() -> dict[str, Any]:
+        """Fetch and import team file index from the sync server.
+
+        Downloads file metadata indexed by teammates and imports them
+        into the local index. This enables searching across files that
+        other team members have indexed, even if you haven't opened them.
+
+        Team files are metadata-only - they show up in search results
+        but don't have local content. Local files are never overwritten.
+
+        Use this to:
+        - Discover files indexed by teammates
+        - Search across the entire team's indexed codebase
+        - Get context on files you haven't opened yet
+
+        Returns:
+            Dict with fetched count, imported count, and any errors
+        """
+        client = state.sync_client
+        if client is None:
+            return {"success": False, "error": "sync not configured"}
+
+        # fetch team index from server
+        files = await client.fetch_team_index()
+        if files is None:
+            return {"success": False, "error": "failed to fetch team index"}
+
+        # import each file locally
+        imported = 0
+        skipped = 0
+        errors = []
+
+        for file_data in files:
+            path = file_data.get("path", "")
+            if not path:
+                continue
+
+            try:
+                state.tracker.import_team_file(
+                    path=path,
+                    size=file_data.get("size"),
+                    indexed_at=file_data.get("indexed_at"),
+                    detected_contexts=file_data.get("contexts"),
+                )
+                imported += 1
+            except Exception as e:
+                errors.append({"path": path, "error": str(e)})
+
+        return {
+            "success": True,
+            "fetched": len(files),
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors[:5] if errors else [],
+        }
+
     return mcp
 
 

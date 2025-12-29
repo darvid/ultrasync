@@ -25,6 +25,7 @@ class FileRecord:
     vector_offset: int | None = None
     vector_length: int | None = None
     detected_contexts: str | None = None  # JSON array of context types
+    is_team: bool = False  # True if from team sync (remote file)
 
 
 @dataclass
@@ -576,6 +577,73 @@ class FileTracker:
                     for ctx in detected_contexts:
                         ctx_key = _composite_key(ctx, path_resolved)
                         txn.put(ctx_key, b"", db=context_idx_db)
+
+    def import_team_file(
+        self,
+        path: str,
+        size: int | None = None,
+        indexed_at: float | None = None,
+        detected_contexts: list[str] | None = None,
+    ) -> int:
+        """Import a team file from remote sync (no local file required).
+
+        Team files are metadata-only records that enable search across
+        files indexed by other team members. They don't have blob data.
+
+        Args:
+            path: File path (relative to repo root)
+            size: File size in bytes (optional)
+            indexed_at: When the file was indexed (optional)
+            detected_contexts: List of context types (optional)
+
+        Returns:
+            key_hash for the imported file
+        """
+        from ultrasync.jit.key_utils import compute_file_key
+
+        # compute key hash from path
+        key_hash = compute_file_key(path)
+        path_key = path.encode("utf-8")
+        contexts_json = (
+            json.dumps(detected_contexts) if detected_contexts else None
+        )
+
+        record = {
+            "path": path,
+            "mtime": 0.0,  # unknown for team files
+            "size": size or 0,
+            "content_hash": "",  # no content for team files
+            "blob_offset": 0,
+            "blob_length": 0,
+            "key_hash": key_hash,
+            "indexed_at": indexed_at or time.time(),
+            "vector_offset": None,
+            "vector_length": None,
+            "detected_contexts": contexts_json,
+            "is_team": True,
+        }
+
+        files_db = self._db(b"files")
+        files_by_key_db = self._db(b"files_by_key")
+        context_idx_db = self._db(b"context_index")
+
+        with self.env.begin(write=True) as txn:
+            # check if we already have this file locally (not a team file)
+            existing = txn.get(path_key, db=files_db)
+            if existing:
+                existing_rec = msgpack.unpackb(existing)
+                # don't overwrite local files with team files
+                if not existing_rec.get("is_team", False):
+                    return existing_rec["key_hash"]
+
+            txn.put(path_key, msgpack.packb(record), db=files_db)
+            txn.put(_pack_u64(key_hash), path_key, db=files_by_key_db)
+            if detected_contexts:
+                for ctx in detected_contexts:
+                    ctx_key = _composite_key(ctx, path)
+                    txn.put(ctx_key, b"", db=context_idx_db)
+
+        return key_hash
 
     def delete_file(self, path: Path) -> bool:
         """Delete a file and clean up indexes (including symbols)."""

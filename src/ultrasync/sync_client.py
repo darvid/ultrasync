@@ -583,6 +583,64 @@ class SyncClient:
             logger.exception("fetch_team_memories error: %s", e)
             return None
 
+    async def fetch_team_index(self) -> list[dict] | None:
+        """Fetch team file index from the sync server.
+
+        Returns a list of file entries with symbols that can be imported
+        locally. These are files indexed by other team members.
+
+        Returns None if fetch fails.
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot fetch team index")
+            return None
+
+        try:
+            base_url = self.config.url.rstrip("/")
+
+            async with aiohttp.ClientSession() as session:
+                # verify token and get org/project IDs
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+
+                    # derive shared project_id from git_remote
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                # fetch team files
+                async with session.get(
+                    f"{base_url}/api/files/{org_id}/{project_id}",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error("fetch_team_index failed: %s", error[:100])
+                        return None
+
+                    data = await resp.json()
+                    files = data.get("files", [])
+                    logger.info(
+                        "fetched team index: %d files, %d symbols",
+                        len(files),
+                        data.get("symbols_count", 0),
+                    )
+                    return files
+
+        except Exception as e:
+            logger.exception("fetch_team_index error: %s", e)
+            return None
+
     async def push_presence(
         self,
         cursor_file: str | None = None,
@@ -682,7 +740,18 @@ class SyncClient:
                     org_id = token_data.get("org_id")
                     project_id = token_data.get("project_id")
 
-                    if self.config.project_name:
+                    # Use shared project_id when git_remote is configured
+                    # This ensures bulk sync goes to same project as WebSocket
+                    if self.config.git_remote and org_id:
+                        project_id = derive_shared_project_id(
+                            self.config.git_remote, org_id
+                        )
+                        logger.debug(
+                            "using shared project_id for bulk sync: %s",
+                            project_id,
+                        )
+                    elif self.config.project_name:
+                        # Legacy: per-user project isolation
                         clerk_user_id = token_data.get("clerk_user_id", "")
                         combined = f"{clerk_user_id}:{self.config.project_name}"
                         hash_bytes = bytearray(
@@ -839,7 +908,18 @@ class SyncClient:
                     org_id = token_data.get("org_id")
                     project_id = token_data.get("project_id")
 
-                    if self.config.project_name:
+                    # Use shared project_id when git_remote is configured
+                    # This ensures bulk sync goes to same project as WebSocket
+                    if self.config.git_remote and org_id:
+                        project_id = derive_shared_project_id(
+                            self.config.git_remote, org_id
+                        )
+                        logger.debug(
+                            "using shared project_id for bulk sync: %s",
+                            project_id,
+                        )
+                    elif self.config.project_name:
+                        # Legacy: per-user project isolation
                         clerk_user_id = token_data.get("clerk_user_id", "")
                         combined = f"{clerk_user_id}:{self.config.project_name}"
                         hash_bytes = bytearray(
@@ -1664,7 +1744,48 @@ class SyncManager:
             len(progress.errors),
         )
 
+        # fetch team index (bidirectional sync)
+        await self._fetch_team_index()
+
         return progress
+
+    async def _fetch_team_index(self) -> None:
+        """Fetch and import team file index from the sync server."""
+        if not self._client:
+            return
+
+        try:
+            files = await self._client.fetch_team_index()
+            if files is None:
+                logger.warning("failed to fetch team index")
+                return
+
+            imported = 0
+            for file_data in files:
+                path = file_data.get("path", "")
+                if not path:
+                    continue
+
+                try:
+                    self.tracker.import_team_file(
+                        path=path,
+                        size=file_data.get("size"),
+                        indexed_at=file_data.get("indexed_at"),
+                        detected_contexts=file_data.get("contexts"),
+                    )
+                    imported += 1
+                except Exception as e:
+                    logger.debug("failed to import team file %s: %s", path, e)
+
+            if imported > 0:
+                logger.info(
+                    "imported %d team files from %d fetched",
+                    imported,
+                    len(files),
+                )
+
+        except Exception as e:
+            logger.exception("fetch_team_index error: %s", e)
 
     async def sync_file(self, path: str, symbols: list[dict]) -> bool:
         """Sync a single file immediately (for real-time updates).
