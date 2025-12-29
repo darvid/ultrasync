@@ -7,10 +7,13 @@ hub-and-spoke sync server and pushes index/memory changes as ops.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
+import tempfile
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import socketio
@@ -25,10 +28,6 @@ logger = get_logger("sync_client")
 
 def _debug_log(msg: str) -> None:
     """Write debug messages to a file for troubleshooting sync issues."""
-    import datetime
-    import tempfile
-    from pathlib import Path
-
     log_path = Path(tempfile.gettempdir()) / "ultrasync_sync_debug.log"
     with open(log_path, "a") as f:
         ts = datetime.datetime.now().isoformat()
