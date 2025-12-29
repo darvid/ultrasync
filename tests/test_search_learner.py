@@ -11,7 +11,6 @@ from ultrasync.search_learner import (
     DEFAULT_SESSION_TIMEOUT,
     FALLBACK_READ_TOOLS,
     FALLBACK_SEARCH_TOOLS,
-    GALAXYBRAIN_SEARCH_TOOLS,
     LearnerStats,
     SearchLearner,
     SearchSession,
@@ -410,7 +409,7 @@ class TestExtractSearchResults:
 
 class TestConstants:
     def test_ultrasync_search_tools(self):
-        assert "mcp__ultrasync__jit_search" in GALAXYBRAIN_SEARCH_TOOLS
+        assert "mcp__ultrasync__jit_search" in ULTRASYNC_SEARCH_TOOLS
 
     def test_fallback_read_tools(self):
         assert "Read" in FALLBACK_READ_TOOLS
