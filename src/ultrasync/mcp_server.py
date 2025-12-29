@@ -4084,9 +4084,9 @@ After writing code, validate against conventions:
         Args:
             url: Sync server URL (default: from ULTRASYNC_SYNC_URL env)
             token: Auth token (default: from ULTRASYNC_SYNC_TOKEN env)
-            project_name: Project/repo name for isolation (default: auto-detect
-                from git remote or ULTRASYNC_SYNC_PROJECT_NAME env)
-            auto_sync: Automatically sync all indexed files on connect (default True)
+            project_name: Project/repo name for isolation (default:
+                auto-detect from git remote or ULTRASYNC_SYNC_PROJECT_NAME)
+            auto_sync: Automatically sync all indexed files on connect
 
         Returns:
             Connection status with client_id, project_name, and sync progress

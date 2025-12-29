@@ -21,6 +21,7 @@ def _optimal_batch_size() -> int:
     # clamp to 64-512 range (512 was fastest in benchmarks)
     return max(64, min(batch_size, 512))
 
+
 # Try to import fast Rust embedder
 try:
     import ultrasync_index as _rust_index
@@ -200,7 +201,7 @@ class RustEmbedderProvider:
         if not _HAS_RUST_EMBEDDER:
             raise ImportError(
                 "Rust embedder not available. Install with: "
-                "uv run maturin develop -m crates/ultrasync_index/Cargo.toml --release"
+                "uv run maturin develop -m crates/ultrasync_index/Cargo.toml"
             )
 
         self._model_name = model
@@ -470,7 +471,7 @@ class InfinityAPIProvider:
 
     Example:
         # Start infinity server:
-        # infinity_emb v2 --model-id sentence-transformers/paraphrase-MiniLM-L3-v2
+        # infinity_emb v2 --model-id paraphrase-MiniLM-L3-v2
 
         provider = InfinityAPIProvider(base_url="http://localhost:7997")
         vec = provider.embed("hello world")
@@ -771,7 +772,7 @@ def create_provider(
             timeout=timeout,
         )
     else:
+        supported = "sentence-transformers, rust, infinity, infinity-api"
         raise ValueError(
-            f"Unknown embedding backend: {backend}. "
-            f"Supported: 'sentence-transformers', 'rust', 'infinity', 'infinity-api'"
+            f"Unknown embedding backend: {backend}. Supported: {supported}"
         )

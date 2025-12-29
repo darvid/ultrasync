@@ -361,9 +361,7 @@ class ConventionsStats:
             console.subheader("\nBy Priority")
             for pri, cnt in sorted(
                 stats["by_priority"].items(),
-                key=lambda x: (
-                    {"required": 0, "recommended": 1}.get(x[0], 2)
-                ),
+                key=lambda x: ({"required": 0, "recommended": 1}.get(x[0], 2)),
             ):
                 console.key_value(pri, cnt, indent=2)
 
@@ -573,8 +571,10 @@ class ConventionsCheck:
         print(f"found {len(violations)} violation(s):\n")
 
         for v in violations:
-            priority_icon = "🔴" if v.priority == "required" else (
-                "🟡" if v.priority == "recommended" else "🔵"
+            priority_icon = (
+                "🔴"
+                if v.priority == "required"
+                else ("🟡" if v.priority == "recommended" else "🔵")
             )
             print(f"{priority_icon} [{v.priority}] {v.convention_name}")
             print(f"   {v.convention_description}")

@@ -93,7 +93,7 @@ _BUILTIN_INFO: dict[int, RelationInfo] = {
         Relation.DOCUMENTS, "documents", "documentation covers code"
     ),
     Relation.ENRICHES: RelationInfo(
-        Relation.ENRICHES, "enriches", "semantic question enriches code understanding"
+        Relation.ENRICHES, "enriches", "question enriches code understanding"
     ),
 }
 
@@ -111,9 +111,7 @@ class RelationRegistry:
         self._by_id: dict[int, str] = {
             r.value: _BUILTIN_INFO[r.value].name for r in Relation
         }
-        self._by_name: dict[str, int] = {
-            v: k for k, v in self._by_id.items()
-        }
+        self._by_name: dict[str, int] = {v: k for k, v in self._by_id.items()}
         self._next_id = _CUSTOM_START
 
     def intern(self, name: str) -> int:

@@ -486,9 +486,7 @@ class JITIndexManager:
             if r.metadata is not None:
                 # Convert Rust FileMetadata to Python format
                 # Rust uses 'symbols', Python uses 'symbol_info'
-                scan_map[r.path] = self.scanner._convert_rust_result(
-                    r.metadata
-                )
+                scan_map[r.path] = self.scanner._convert_rust_result(r.metadata)
 
         t_scan = time.perf_counter()
 
@@ -1563,11 +1561,13 @@ class JITIndexManager:
                             blob_length=insight_blob.length,
                             key_hash=insight_key,
                         )
-                        aot_entries.append((
-                            insight_key,
-                            insight_blob.offset,
-                            insight_blob.length,
-                        ))
+                        aot_entries.append(
+                            (
+                                insight_key,
+                                insight_blob.offset,
+                                insight_blob.length,
+                            )
+                        )
 
                     # Collect embedding texts
                     file_text = metadata.to_embedding_text()
@@ -1681,7 +1681,8 @@ class JITIndexManager:
 
         if progress:
             progress.update_absolute("write", completed=len(vec_entries))
-            progress.complete_phase("write", f"Wrote {len(vec_entries)} vectors")
+            msg = f"Wrote {len(vec_entries)} vectors"
+            progress.complete_phase("write", msg)
 
     async def full_index(
         self,
@@ -1787,9 +1788,7 @@ class JITIndexManager:
                 files_to_process = all_files[start_idx:]
                 processed = 0
 
-                for batch_start in range(
-                    0, len(files_to_process), batch_size
-                ):
+                for batch_start in range(0, len(files_to_process), batch_size):
                     batch_end = min(
                         batch_start + batch_size, len(files_to_process)
                     )
@@ -1799,9 +1798,7 @@ class JITIndexManager:
 
                     for result in results:
                         if result.status == "error":
-                            errors.append(
-                                f"{result.path}: {result.reason}"
-                            )
+                            errors.append(f"{result.path}: {result.reason}")
                         processed += 1
 
                     current_idx = start_idx + batch_end

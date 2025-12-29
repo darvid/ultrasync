@@ -43,21 +43,19 @@ impl EmbedderInner {
         let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
 
         // Get paths to model files
-        let config_path = repo
-            .get("config.json")
-            .map_err(|e| format!("Failed to get config.json: {e}"))?;
-        let tokenizer_path = repo
-            .get("tokenizer.json")
-            .map_err(|e| format!("Failed to get tokenizer.json: {e}"))?;
+        let config_path =
+            repo.get("config.json").map_err(|e| format!("Failed to get config.json: {e}"))?;
+        let tokenizer_path =
+            repo.get("tokenizer.json").map_err(|e| format!("Failed to get tokenizer.json: {e}"))?;
         let weights_path = repo
             .get("model.safetensors")
             .map_err(|e| format!("Failed to get model.safetensors: {e}"))?;
 
         // Load config
-        let config_str =
-            std::fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {e}"))?;
-        let config: BertConfig =
-            serde_json::from_str(&config_str).map_err(|e| format!("Failed to parse config: {e}"))?;
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config: {e}"))?;
+        let config: BertConfig = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config: {e}"))?;
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
@@ -72,12 +70,7 @@ impl EmbedderInner {
         let model =
             BertModel::load(vb, &config).map_err(|e| format!("Failed to load BERT model: {e}"))?;
 
-        Ok(Self {
-            model,
-            tokenizer,
-            device,
-            max_chars,
-        })
+        Ok(Self { model, tokenizer, device, max_chars })
     }
 
     fn truncate(&self, text: &str) -> String {
@@ -103,11 +96,8 @@ impl EmbedderInner {
             .map_err(|e| format!("Tokenization failed: {e}"))?;
 
         // Find max length for padding
-        let max_len = encodings
-            .iter()
-            .map(|e| e.get_ids().len().min(MAX_SEQ_LEN))
-            .max()
-            .unwrap_or(0);
+        let max_len =
+            encodings.iter().map(|e| e.get_ids().len().min(MAX_SEQ_LEN)).max().unwrap_or(0);
 
         if max_len == 0 {
             return Ok(vec![vec![0.0; EMBEDDING_DIM]; texts.len()]);
@@ -159,12 +149,10 @@ impl EmbedderInner {
             .map_err(|e| format!("Failed to broadcast mask: {e}"))?;
 
         // Masked sum
-        let masked_embeddings = embeddings
-            .mul(&mask_expanded)
-            .map_err(|e| format!("Failed to apply mask: {e}"))?;
-        let sum_embeddings = masked_embeddings
-            .sum(1)
-            .map_err(|e| format!("Failed to sum embeddings: {e}"))?;
+        let masked_embeddings =
+            embeddings.mul(&mask_expanded).map_err(|e| format!("Failed to apply mask: {e}"))?;
+        let sum_embeddings =
+            masked_embeddings.sum(1).map_err(|e| format!("Failed to sum embeddings: {e}"))?;
 
         // Sum of mask for averaging
         let mask_sum = attention_mask_f32
@@ -176,9 +164,8 @@ impl EmbedderInner {
             .map_err(|e| format!("Failed to broadcast mask sum: {e}"))?;
 
         // Mean
-        let mean_embeddings = sum_embeddings
-            .div(&mask_sum)
-            .map_err(|e| format!("Failed to compute mean: {e}"))?;
+        let mean_embeddings =
+            sum_embeddings.div(&mask_sum).map_err(|e| format!("Failed to compute mean: {e}"))?;
 
         // L2 normalize
         let norm = mean_embeddings
@@ -193,9 +180,8 @@ impl EmbedderInner {
             .broadcast_as(mean_embeddings.shape())
             .map_err(|e| format!("Failed to broadcast norm: {e}"))?;
 
-        let normalized = mean_embeddings
-            .div(&norm)
-            .map_err(|e| format!("Failed to normalize: {e}"))?;
+        let normalized =
+            mean_embeddings.div(&norm).map_err(|e| format!("Failed to normalize: {e}"))?;
 
         // Convert to Vec<Vec<f32>>
         let flat: Vec<f32> = normalized
@@ -205,10 +191,8 @@ impl EmbedderInner {
             .flatten()
             .collect();
 
-        let results: Vec<Vec<f32>> = flat
-            .chunks(EMBEDDING_DIM)
-            .map(|chunk| chunk.to_vec())
-            .collect();
+        let results: Vec<Vec<f32>> =
+            flat.chunks(EMBEDDING_DIM).map(|chunk| chunk.to_vec()).collect();
 
         Ok(results)
     }
@@ -265,12 +249,9 @@ impl RustEmbedder {
         };
 
         let inner = EmbedderInner::new(model_id, device, max_chars)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-        Ok(Self {
-            inner: Arc::new(inner),
-            model_id: model_id.to_string(),
-        })
+        Ok(Self { inner: Arc::new(inner), model_id: model_id.to_string() })
     }
 
     /// Return the model ID.
@@ -303,7 +284,7 @@ impl RustEmbedder {
         let results = self
             .inner
             .embed_batch(&[text.to_string()])
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         Ok(results.into_iter().next().unwrap_or_default())
     }
@@ -312,10 +293,8 @@ impl RustEmbedder {
     ///
     /// Returns a list of embedding vectors.
     pub fn embed_batch(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Py<PyList>> {
-        let results = self
-            .inner
-            .embed_batch(&texts)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+        let results =
+            self.inner.embed_batch(&texts).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
         // Convert to Python list of lists
         let py_list = PyList::empty(py);

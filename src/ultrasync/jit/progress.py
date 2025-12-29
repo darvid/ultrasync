@@ -190,7 +190,9 @@ class IndexingProgress:
                 pct = int(100 * completed / total)
                 if pct >= self._last_pct + 10 or completed == total:
                     self._last_pct = pct
-                    rate_eta = self._format_rate_eta(completed, total, start_time)
+                    rate_eta = self._format_rate_eta(
+                        completed, total, start_time
+                    )
                     print(
                         f"  {completed}/{total}{rate_eta}",
                         file=sys.stderr,

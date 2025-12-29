@@ -389,7 +389,8 @@ class Query:
         for node_id in nodes_to_include:
             node = graph.get_node(node_id)
             if not node:
-                # Memory might exist in MemoryManager but not graph (created post-bootstrap)
+                # Memory might exist in MemoryManager but not graph
+                # (created post-bootstrap)
                 if node_id in relevant_memories and manager.memory:
                     mem_entry = memory_entries.get(node_id)
                     if mem_entry:
@@ -432,7 +433,9 @@ class Query:
             if mem_id in node_info and hasattr(entry, "symbol_keys"):
                 for sym_key in entry.symbol_keys:
                     if sym_key in node_info:
-                        edges_to_include.append((mem_id, DERIVED_FROM_REL, sym_key))
+                        edges_to_include.append(
+                            (mem_id, DERIVED_FROM_REL, sym_key)
+                        )
 
         # Output edges
         seen_edges: set[tuple[int, int, int]] = set()

@@ -12,7 +12,7 @@ import structlog
 from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
 from ultrasync.jit.lmdb_tracker import FileTracker, MemoryRecord
-from ultrasync.jit.secrets import ScanResult
+from ultrasync.jit.secrets import ScanResult, SecretScanner
 from ultrasync.keys import hash64, mem_key
 
 if TYPE_CHECKING:

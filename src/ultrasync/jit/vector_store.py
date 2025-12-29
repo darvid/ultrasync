@@ -143,7 +143,8 @@ class VectorStore:
                     length = len(header) + len(data)
                     f.write(header)
                     f.write(data)
-                    entries.append(VectorEntry(offset=offset, length=length, dim=dim))
+                    entry = VectorEntry(offset=offset, length=length, dim=dim)
+                    entries.append(entry)
                     offset += length
 
                 # Single fsync for all vectors!

@@ -68,15 +68,12 @@ class MemoryList:
             print("no memories found")
             return 0
 
-        print(
-            f"{'ID':<16}  {'Task':<20}  {'Created':<19}  Text"
-        )
+        print(f"{'ID':<16}  {'Task':<20}  {'Created':<19}  Text")
         print("-" * 100)
 
         for mem in memories:
-            created = (
-                datetime.fromisoformat(mem.created_at)
-                .strftime("%Y-%m-%d %H:%M:%S")
+            created = datetime.fromisoformat(mem.created_at).strftime(
+                "%Y-%m-%d %H:%M:%S"
             )
             task = mem.task or "-"
             task_short = task[:17] + "..." if len(task) > 20 else task
@@ -279,16 +276,12 @@ class MemoryStats:
 
         if tasks:
             console.subheader("\nBy Task")
-            for task, cnt in sorted(
-                tasks.items(), key=lambda x: -x[1]
-            )[:10]:
+            for task, cnt in sorted(tasks.items(), key=lambda x: -x[1])[:10]:
                 console.key_value(task, cnt, indent=2)
 
         if contexts:
             console.subheader("\nBy Context")
-            for ctx, cnt in sorted(
-                contexts.items(), key=lambda x: -x[1]
-            )[:10]:
+            for ctx, cnt in sorted(contexts.items(), key=lambda x: -x[1])[:10]:
                 console.key_value(ctx, cnt, indent=2)
 
         return 0

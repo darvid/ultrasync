@@ -431,6 +431,7 @@ class GraphKvGet:
         console.subheader("\nPayload")
         # Decode msgpack payload
         import msgpack
+
         payload = msgpack.unpackb(record.payload)
         print(json.dumps(payload, indent=2))
 
@@ -673,8 +674,10 @@ class GraphDot:
 
         if self.root:
             # BFS from root node
-            root_id = int(self.root, 16) if self.root.startswith("0x") else int(
-                self.root
+            root_id = (
+                int(self.root, 16)
+                if self.root.startswith("0x")
+                else int(self.root)
             )
             queue = [(root_id, 0)]
             visited = {root_id}
@@ -737,13 +740,11 @@ class GraphDot:
                 node_info[node_id] = (node.type, label)
 
         # Generate DOT output
-        lines = ["digraph G {", '  rankdir=LR;', '  node [shape=box];', ""]
+        lines = ["digraph G {", "  rankdir=LR;", "  node [shape=box];", ""]
 
         # Define node styles by type
         lines.append("  // Node styles")
-        lines.append(
-            '  node [style=filled, fillcolor=lightblue] // default'
-        )
+        lines.append("  node [style=filled, fillcolor=lightblue] // default")
         lines.append("")
 
         # Output nodes with labels
@@ -966,13 +967,14 @@ class GraphImportCallgraph:
         file_keys: dict[str, int] = {}
         for node in graph.iter_nodes(node_type="file"):
             import msgpack
+
             payload = msgpack.unpackb(node.payload) if node.payload else {}
             path = payload.get("path", "")
             # Store both full path and relative path
             file_keys[path] = node.id
             # Also store relative path from root
             if path.startswith(str(root)):
-                rel_path = path[len(str(root)) + 1:]
+                rel_path = path[len(str(root)) + 1 :]
                 file_keys[rel_path] = node.id
 
         # Import call edges
