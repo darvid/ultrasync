@@ -13,9 +13,9 @@ from ultrasync.graph import (
     needs_compaction,
 )
 from ultrasync.graph.adjacency import (
-    AdjEntry,
     FLAG_HAS_PAYLOAD,
     FLAG_TOMBSTONE,
+    AdjEntry,
     append_entry,
     compact,
     mark_tombstone,
@@ -81,7 +81,9 @@ class TestAdjacencyEncoding:
     def test_encode_decode_multiple(self):
         entries = [
             AdjEntry(rel_id=1, target_id=100, edge_rev=1, flags=0),
-            AdjEntry(rel_id=2, target_id=200, edge_rev=1, flags=FLAG_HAS_PAYLOAD),
+            AdjEntry(
+                rel_id=2, target_id=200, edge_rev=1, flags=FLAG_HAS_PAYLOAD
+            ),
             AdjEntry(rel_id=3, target_id=300, edge_rev=2, flags=0),
         ]
         data = encode_adjacency(entries)
@@ -165,7 +167,9 @@ class TestGraphMemory:
 
     def test_update_node(self, graph):
         graph.put_node(node_id=100, node_type="file")
-        updated = graph.put_node(node_id=100, node_type="file", payload={"new": True})
+        updated = graph.put_node(
+            node_id=100, node_type="file", payload={"new": True}
+        )
         assert updated.rev == 2
 
     def test_delete_node(self, graph):

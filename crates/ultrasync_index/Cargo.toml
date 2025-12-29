@@ -4,38 +4,48 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "ultrasync_index"
 crate-type = ["cdylib"]
+name = "ultrasync_index"
 
 [dependencies]
-memmap2 = "0.9"
-pyo3 = { version = "0.27", features = ["extension-module"] }
-rayon = "1.10"
-
-# tree-sitter core and language grammars
-tree-sitter = { version = "0.24", optional = true }
-tree-sitter-python = { version = "0.23", optional = true }
-tree-sitter-typescript = { version = "0.23", optional = true }
-tree-sitter-rust = { version = "0.23", optional = true }
-
 # candle for Rust-native embeddings
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
 candle-transformers = { version = "0.8", optional = true }
-tokenizers = { version = "0.21", optional = true }
-hf-hub = { version = "0.3", optional = true }
-serde_json = { version = "1.0", optional = true }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"], optional = true }
 intel-mkl-src = { version = "0.8", optional = true }
-
-[features]
-default = ["scanner", "embeddings"]
-scanner = ["tree-sitter", "tree-sitter-python", "tree-sitter-typescript", "tree-sitter-rust"]
-embeddings = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub", "serde_json"]
-mkl = ["intel-mkl-src", "candle-core/mkl"]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+memmap2 = "0.9"
+pyo3 = { version = "0.27", features = ["extension-module"] }
+rayon = "1.10"
+serde_json = { version = "1.0", optional = true }
+tokenizers = { version = "0.21", optional = true }
+# tree-sitter core and language grammars
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-python = { version = "0.23", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+default = ["embeddings", "scanner"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+embeddings = [
+  "candle-core",
+  "candle-nn",
+  "candle-transformers",
+  "hf-hub",
+  "serde_json",
+  "tokenizers"
+]
+mkl = ["candle-core/mkl", "intel-mkl-src"]
+scanner = [
+  "tree-sitter",
+  "tree-sitter-python",
+  "tree-sitter-rust",
+  "tree-sitter-typescript"
+]
 
 [profile.dev]
 opt-level = 1

@@ -77,11 +77,11 @@ class TestFileTrackerMemory:
         tracker.upsert_memory(
             id="mem:xyz98765",
             task="task:refactor",
-            insights='[]',
-            context='[]',
+            insights="[]",
+            context="[]",
             symbol_keys="[]",
             text="Refactored the login flow",
-            tags='[]',
+            tags="[]",
             blob_offset=200,
             blob_length=75,
             key_hash=111222333,
@@ -102,11 +102,11 @@ class TestFileTrackerMemory:
         tracker.upsert_memory(
             id="mem:debug1",
             task="task:debug",
-            insights='[]',
-            context='[]',
+            insights="[]",
+            context="[]",
             symbol_keys="[]",
             text="Debug session 1",
-            tags='[]',
+            tags="[]",
             blob_offset=0,
             blob_length=10,
             key_hash=1,
@@ -115,11 +115,11 @@ class TestFileTrackerMemory:
         tracker.upsert_memory(
             id="mem:debug2",
             task="task:debug",
-            insights='[]',
-            context='[]',
+            insights="[]",
+            context="[]",
             symbol_keys="[]",
             text="Debug session 2",
-            tags='[]',
+            tags="[]",
             blob_offset=10,
             blob_length=10,
             key_hash=2,
@@ -128,11 +128,11 @@ class TestFileTrackerMemory:
         tracker.upsert_memory(
             id="mem:refactor1",
             task="task:refactor",
-            insights='[]',
-            context='[]',
+            insights="[]",
+            context="[]",
             symbol_keys="[]",
             text="Refactor session",
-            tags='[]',
+            tags="[]",
             blob_offset=20,
             blob_length=10,
             key_hash=3,
@@ -155,11 +155,11 @@ class TestFileTrackerMemory:
         tracker.upsert_memory(
             id="mem:todelete",
             task=None,
-            insights='[]',
-            context='[]',
+            insights="[]",
+            context="[]",
             symbol_keys="[]",
             text="Will be deleted",
-            tags='[]',
+            tags="[]",
             blob_offset=0,
             blob_length=10,
             key_hash=999,
@@ -181,7 +181,8 @@ class TestPatternSetManager:
         manager = PatternSetManager()
 
         patterns = manager.list_all()
-        assert len(patterns) >= 3  # security-smells, todo-fixme, debug-artifacts
+        # security-smells, todo-fixme, debug-artifacts
+        assert len(patterns) >= 3
 
         ids = [p["id"] for p in patterns]
         assert "pat:security-smells" in ids
@@ -237,7 +238,7 @@ class TestMemoryKeys:
     """Tests for memory key functions."""
 
     def test_mem_key_format(self):
-        from ultrasync.keys import mem_key, hash64_mem_key
+        from ultrasync.keys import hash64_mem_key, mem_key
 
         key = mem_key("abc12345")
         assert key == "mem:abc12345"

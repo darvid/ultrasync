@@ -538,7 +538,7 @@ class ClaudeCodeParser(TranscriptParser):
             try:
                 parsed = json.loads(content)
                 # return parsed JSON (dict or list)
-                if isinstance(parsed, (dict, list)):
+                if isinstance(parsed, dict | list):
                     logger.debug(
                         "parsed JSON from content field: type=%s",
                         type(parsed).__name__,

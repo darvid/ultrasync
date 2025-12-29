@@ -487,7 +487,7 @@ class TestFileScannerReDoSProtection:
     def test_typescript_component_pattern_no_backtracking(
         self, scanner: FileScanner, tmp_path: Path
     ):
-        """Pathological input that could trigger backtracking in component regex.
+        """Pathological input that triggers backtracking in component regex.
 
         Pattern like 'export const Foo = aaaa...aaaa' with no arrow function
         could cause backtracking if using [^;]* or similar greedy patterns.

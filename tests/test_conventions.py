@@ -10,15 +10,11 @@ from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
 from ultrasync.jit.convention_discovery import (
     ConventionDiscovery,
-    DiscoveredRule,
     discover_and_import,
 )
 from ultrasync.jit.conventions import (
-    CONVENTION_CATEGORIES,
-    ConventionEntry,
     ConventionManager,
     ConventionSearchResult,
-    ConventionViolation,
 )
 
 
@@ -262,9 +258,7 @@ class TestFileTrackerConventions:
             key_hash=2,
         )
 
-        fe_convs = list(
-            tracker.iter_conventions_by_scope("context:frontend")
-        )
+        fe_convs = list(tracker.iter_conventions_by_scope("context:frontend"))
         assert len(fe_convs) == 1
         assert fe_convs[0].name == "frontend-conv"
 
@@ -764,9 +758,7 @@ ignore = ["E501"]
 
         # Biome
         (project_root / "biome.json").write_text(
-            json.dumps(
-                {"linter": {"rules": {"style": {"useConst": "warn"}}}}
-            )
+            json.dumps({"linter": {"rules": {"style": {"useConst": "warn"}}}})
         )
 
         discovery = ConventionDiscovery(project_root)

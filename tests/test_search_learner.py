@@ -11,6 +11,7 @@ from ultrasync.search_learner import (
     DEFAULT_SESSION_TIMEOUT,
     FALLBACK_READ_TOOLS,
     FALLBACK_SEARCH_TOOLS,
+    ULTRASYNC_SEARCH_TOOLS,
     LearnerStats,
     SearchLearner,
     SearchSession,

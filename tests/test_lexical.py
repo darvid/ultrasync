@@ -76,7 +76,7 @@ class TestLexicalIndex:
         index.add_file(
             key_hash=12345,
             path="src/components/Button.tsx",
-            content="export function Button() { return <button>Click</button> }",
+            content="export function Button() { return <button>Click</button> }",  # noqa: E501
         )
         index.commit()
 
@@ -87,7 +87,7 @@ class TestLexicalIndex:
         index.add_file(
             key_hash=12345,
             path="src/components/Button.tsx",
-            content="export function Button() { return <button>Click</button> }",
+            content="export function Button() { return <button>Click</button> }",  # noqa: E501
         )
         index.commit()
 
@@ -252,12 +252,16 @@ class TestRRFFusion:
         lexical = [LexicalResult(key_hash=200, score=10.0)]
 
         # Higher semantic weight
-        fused = rrf_fuse(semantic, lexical, semantic_weight=2.0, lexical_weight=1.0)
+        fused = rrf_fuse(
+            semantic, lexical, semantic_weight=2.0, lexical_weight=1.0
+        )
         # Semantic result should be first due to higher weight
         assert fused[0][0] == 100
 
         # Higher lexical weight
-        fused = rrf_fuse(semantic, lexical, semantic_weight=1.0, lexical_weight=2.0)
+        fused = rrf_fuse(
+            semantic, lexical, semantic_weight=1.0, lexical_weight=2.0
+        )
         # Lexical result should be first due to higher weight
         assert fused[0][0] == 200
 

@@ -11,7 +11,7 @@ class TestBlobAppender:
 
     def test_creates_file_with_header(self, tmp_path):
         blob_path = tmp_path / "new.blob"
-        blob = BlobAppender(blob_path)
+        _ = BlobAppender(blob_path)
         assert blob_path.exists()
         assert blob_path.stat().st_size == BLOB_HEADER_SIZE
 
@@ -71,7 +71,7 @@ class TestBlobAppenderBatch:
         entries = blob.append_batch(items)
         assert len(entries) == 3
 
-        for i, (item, entry) in enumerate(zip(items, entries, strict=True)):
+        for item, entry in zip(items, entries, strict=True):
             assert entry.length == len(item)
             read_data = blob.read(entry.offset, entry.length)
             assert read_data == item

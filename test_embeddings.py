@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 """Test both embedding providers."""
 
-import asyncio
 import time
 
 
@@ -22,7 +21,7 @@ def test_sentence_transformer():
     vec = provider.embed("hello world")
     print(f"  single embed: {time.perf_counter() - t0:.4f}s")
     print(f"  vec shape: {vec.shape}")
-    print(f"  vec norm: {(vec**2).sum()**0.5:.4f}")
+    print(f"  vec norm: {(vec**2).sum() ** 0.5:.4f}")
 
     # test batch embed
     texts = ["hello", "world", "foo", "bar", "baz"]
@@ -33,7 +32,7 @@ def test_sentence_transformer():
 
     # test cache
     t0 = time.perf_counter()
-    vec2 = provider.embed("hello world")
+    _ = provider.embed("hello world")
     print(f"  cached embed: {time.perf_counter() - t0:.6f}s")
 
     print("  SentenceTransformerProvider works!")
@@ -43,7 +42,7 @@ def test_sentence_transformer():
 def test_infinity_provider():
     """Test InfinityProvider."""
     try:
-        from infinity_emb import AsyncEmbeddingEngine, EngineArgs
+        import infinity_emb  # noqa: F401
     except ImportError:
         print("infinity-emb not installed, skipping InfinityProvider test")
         return False
@@ -70,10 +69,11 @@ def test_infinity_provider():
         t0 = time.perf_counter()
         try:
             vec = provider.embed("hello world")
-            print(f"  single embed (incl. engine start): {time.perf_counter() - t0:.4f}s")
+            elapsed = time.perf_counter() - t0
+            print(f"  single embed (incl. engine start): {elapsed:.4f}s")
             print(f"  dim: {provider.dim}")
             print(f"  vec shape: {vec.shape}")
-            print(f"  vec norm: {(vec**2).sum()**0.5:.4f}")
+            print(f"  vec norm: {(vec**2).sum() ** 0.5:.4f}")
         except Exception as e:
             print(f"  embed failed with engine={engine}: {e}")
             continue
@@ -83,7 +83,9 @@ def test_infinity_provider():
         t0 = time.perf_counter()
         try:
             vecs = provider.embed_batch(texts)
-            print(f"  batch embed ({len(texts)}): {time.perf_counter() - t0:.4f}s")
+            print(
+                f"  batch embed ({len(texts)}): {time.perf_counter() - t0:.4f}s"
+            )
             print(f"  vecs count: {len(vecs)}")
         except Exception as e:
             print(f"  batch embed failed: {e}")
@@ -91,7 +93,7 @@ def test_infinity_provider():
 
         # test cache
         t0 = time.perf_counter()
-        vec2 = provider.embed("hello world")
+        _ = provider.embed("hello world")
         print(f"  cached embed: {time.perf_counter() - t0:.6f}s")
 
         print(f"  InfinityProvider with engine={engine} works!")
@@ -136,7 +138,7 @@ def test_infinity_api_provider():
     print(f"  single embed: {time.perf_counter() - t0:.4f}s")
     print(f"  dim: {provider.dim}")
     print(f"  vec shape: {vec.shape}")
-    print(f"  vec norm: {(vec**2).sum()**0.5:.4f}")
+    print(f"  vec norm: {(vec**2).sum() ** 0.5:.4f}")
 
     # test batch embed
     texts = ["hello", "world", "foo", "bar", "baz"]
@@ -147,7 +149,7 @@ def test_infinity_api_provider():
 
     # test cache
     t0 = time.perf_counter()
-    vec2 = provider.embed("hello world")
+    _ = provider.embed("hello world")
     print(f"  cached embed: {time.perf_counter() - t0:.6f}s")
 
     provider.close()
@@ -187,7 +189,10 @@ def test_create_provider():
 
 def test_protocol():
     """Test that providers implement the protocol."""
-    from ultrasync.embeddings import EmbeddingProvider, SentenceTransformerProvider
+    from ultrasync.embeddings import (
+        EmbeddingProvider,
+        SentenceTransformerProvider,
+    )
 
     print("\ntesting Protocol compliance...")
 
@@ -197,7 +202,8 @@ def test_protocol():
 
     try:
         from ultrasync.embeddings import InfinityProvider
-        inf_provider = InfinityProvider.__new__(InfinityProvider)
+
+        _ = InfinityProvider.__new__(InfinityProvider)
         # can't check instance without init, but type checking works
         print("  InfinityProvider available")
     except ImportError:
