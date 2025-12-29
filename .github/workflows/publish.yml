@@ -27,8 +27,12 @@ jobs:
     name: Rust build
     uses: ./.github/workflows/rust.yml
 
+  security:
+    name: Security scan
+    uses: ./.github/workflows/security.yml
+
   build-rust-wheels:
-    needs: [ci, test, rust]
+    needs: [ci, test, rust, security]
     name: Build Rust wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -54,7 +58,7 @@ jobs:
           path: crates/ultrasync_index/dist/
 
   build-rust-sdist:
-    needs: [ci, test, rust]
+    needs: [ci, test, rust, security]
     name: Build Rust sdist
     runs-on: ubuntu-latest
     steps:
@@ -74,7 +78,7 @@ jobs:
           path: crates/ultrasync_index/dist/
 
   build-python:
-    needs: [ci, test, rust]
+    needs: [ci, test, rust, security]
     name: Build Python package
     runs-on: ubuntu-latest
     steps:
