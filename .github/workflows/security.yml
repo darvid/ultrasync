@@ -45,8 +45,8 @@ jobs:
       - name: Export requirements
         run: |
           uv export --no-hashes --no-dev > requirements.txt
-          # Remove first-party packages not yet on PyPI
-          grep -v "^ultrasync" requirements.txt > requirements-audit.txt || true
+          # Remove editable installs (first-party packages not on PyPI)
+          grep -v "^-e " requirements.txt > requirements-audit.txt || true
 
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@v1.1.0
