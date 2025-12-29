@@ -2801,9 +2801,16 @@ class FileTracker:
         info = self.env.info()
         stat = self.env.stat()
 
-        # get actual file size
+        # get actual file size (apparent) and disk usage (sparse-aware)
         data_file = self.db_path / "data.mdb"
-        file_size = data_file.stat().st_size if data_file.exists() else 0
+        if data_file.exists():
+            st = data_file.stat()
+            file_size = st.st_size  # apparent size
+            # st_blocks is in 512-byte units
+            disk_usage = st.st_blocks * 512
+        else:
+            file_size = 0
+            disk_usage = 0
 
         # estimate live data size (pages * page_size)
         page_size = stat["psize"]
@@ -2816,7 +2823,8 @@ class FileTracker:
             "last_txnid": info["last_txnid"],
             "page_size": page_size,
             "entries": stat["entries"],
-            "file_size": file_size,
+            "file_size": file_size,  # apparent size (sparse files show full size)
+            "disk_usage": disk_usage,  # actual bytes on disk
             "estimated_used": estimated_used,
             "estimated_waste": max(0, file_size - estimated_used),
         }

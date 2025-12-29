@@ -57,10 +57,19 @@ class Stats:
         db_stats = tracker.get_db_stats()
         tracker.close()
 
-        blob_size = blob_file.stat().st_size if blob_file.exists() else 0
-        index_size = index_file.stat().st_size if index_file.exists() else 0
-        vector_size = vector_file.stat().st_size if vector_file.exists() else 0
-        tracker_size = db_stats["file_size"]
+        # use actual disk usage (sparse-aware) for all files
+        def get_disk_usage(path: Path) -> int:
+            if not path.exists():
+                return 0
+            st = path.stat()
+            # st_blocks is in 512-byte units
+            return st.st_blocks * 512
+
+        blob_size = get_disk_usage(blob_file)
+        index_size = get_disk_usage(index_file)
+        vector_size = get_disk_usage(vector_file)
+        # use disk_usage from db_stats (sparse-aware)
+        tracker_size = db_stats.get("disk_usage", db_stats["file_size"])
 
         # total disk usage
         total_size = blob_size + index_size + vector_size + tracker_size
