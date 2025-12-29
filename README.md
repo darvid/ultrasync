@@ -215,12 +215,25 @@ uv tool run ultrasync voyager
 # Install with dev dependencies
 uv sync --group dev
 
-# Lint and format
+# Build Rust extension
+uv run maturin develop -m crates/ultrasync_index/Cargo.toml
+
+# Install pre-commit hooks (using prek - faster rust-based runner)
+cargo install prek
+prek install
+
+# Run hooks manually
+prek run --all-files
+
+# Lint and format (also runs via pre-commit)
 ruff check src/ultrasync
 ruff format src/ultrasync
+cargo fmt --manifest-path crates/ultrasync_index/Cargo.toml
+cargo clippy --manifest-path crates/ultrasync_index/Cargo.toml
 
-# Build Rust extension
-uv run maturin develop -m ultrasync_index/Cargo.toml
+# Run tests
+uv run pytest tests/ -v
+cargo test --manifest-path crates/ultrasync_index/Cargo.toml
 ```
 
 ## Team Sync
