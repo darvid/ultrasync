@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from ultrasync.graph import (
+from ultrasync_mcp.graph import (
     GraphMemory,
     Relation,
     RelationRegistry,
@@ -12,7 +12,7 @@ from ultrasync.graph import (
     encode_adjacency,
     needs_compaction,
 )
-from ultrasync.graph.adjacency import (
+from ultrasync_mcp.graph.adjacency import (
     FLAG_HAS_PAYLOAD,
     FLAG_TOMBSTONE,
     AdjEntry,
@@ -20,7 +20,7 @@ from ultrasync.graph.adjacency import (
     compact,
     mark_tombstone,
 )
-from ultrasync.jit import FileTracker
+from ultrasync_mcp.jit import FileTracker
 
 
 class TestRelationRegistry:

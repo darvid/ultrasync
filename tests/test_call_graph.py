@@ -5,14 +5,14 @@ from textwrap import dedent
 
 import pytest
 
-from ultrasync.call_graph import (
+from ultrasync_mcp.call_graph import (
     CallGraph,
     CallGraphBuilder,
     CallSite,
     SymbolNode,
     build_call_graph,
 )
-from ultrasync.taxonomy import CodebaseIR, FileIR, SymbolClassification
+from ultrasync_mcp.taxonomy import CodebaseIR, FileIR, SymbolClassification
 
 
 class TestSymbolNode:

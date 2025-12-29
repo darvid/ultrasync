@@ -22,10 +22,10 @@ uv sync
 uv sync --group dev
 
 # lint
-ruff check src/ultrasync
+ruff check src/ultrasync_mcp
 
 # format
-ruff format src/ultrasync
+ruff format src/ultrasync_mcp
 
 # run ipython for testing
 uv run ipython
@@ -51,7 +51,7 @@ uv run maturin develop -m ultrasync_index/Cargo.toml
    - `ThreadIndex` - in-memory vector index for small working sets
      (<500 items), brute-force cosine similarity
 
-2. **Python package `ultrasync`**:
+2. **Python package `ultrasync_mcp`**:
    - `embeddings.EmbeddingProvider` - sentence-transformers wrapper
    - `events.SessionEvent` / `EventType` - normalized IDE/agent events
    - `threads.Thread` / `ThreadManager` - hot thread management with

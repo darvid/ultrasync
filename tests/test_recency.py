@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from ultrasync.jit.recency import (
+from ultrasync_mcp.jit.recency import (
     DEFAULT_BUCKETS,
     RecencyConfig,
     apply_recency_bias,

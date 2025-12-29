@@ -19,7 +19,7 @@ class TestMemoryRecord:
     """Tests for MemoryRecord dataclass."""
 
     def test_memory_record_creation(self):
-        from ultrasync.jit import MemoryRecord
+        from ultrasync_mcp.jit import MemoryRecord
 
         record = MemoryRecord(
             id="mem:test1234",
@@ -43,7 +43,7 @@ class TestFileTrackerMemory:
     """Tests for FileTracker memory methods."""
 
     def test_upsert_and_get_memory(self, temp_data_dir):
-        from ultrasync.jit import FileTracker
+        from ultrasync_mcp.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -70,7 +70,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_get_memory_by_key(self, temp_data_dir):
-        from ultrasync.jit import FileTracker
+        from ultrasync_mcp.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -94,7 +94,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_query_memories_by_task(self, temp_data_dir):
-        from ultrasync.jit import FileTracker
+        from ultrasync_mcp.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -148,7 +148,7 @@ class TestFileTrackerMemory:
         tracker.close()
 
     def test_delete_memory(self, temp_data_dir):
-        from ultrasync.jit import FileTracker
+        from ultrasync_mcp.jit import FileTracker
 
         tracker = FileTracker(temp_data_dir / "tracker.db")
 
@@ -176,7 +176,7 @@ class TestPatternSetManager:
     """Tests for PatternSetManager."""
 
     def test_builtin_patterns_loaded(self):
-        from ultrasync.patterns import PatternSetManager
+        from ultrasync_mcp.patterns import PatternSetManager
 
         manager = PatternSetManager()
 
@@ -190,7 +190,7 @@ class TestPatternSetManager:
         assert "pat:debug-artifacts" in ids
 
     def test_load_custom_pattern(self):
-        from ultrasync.patterns import PatternSetManager
+        from ultrasync_mcp.patterns import PatternSetManager
 
         manager = PatternSetManager()
 
@@ -207,7 +207,7 @@ class TestPatternSetManager:
         assert len(ps.patterns) == 1
 
     def test_scan_content(self):
-        from ultrasync.patterns import PatternSetManager
+        from ultrasync_mcp.patterns import PatternSetManager
 
         manager = PatternSetManager()
 
@@ -221,7 +221,7 @@ class TestPatternSetManager:
         assert any("FIXME" in p for p in patterns_found)
 
     def test_scan_security_smells(self):
-        from ultrasync.patterns import PatternSetManager
+        from ultrasync_mcp.patterns import PatternSetManager
 
         manager = PatternSetManager()
 
@@ -238,7 +238,7 @@ class TestMemoryKeys:
     """Tests for memory key functions."""
 
     def test_mem_key_format(self):
-        from ultrasync.keys import hash64_mem_key, mem_key
+        from ultrasync_mcp.keys import hash64_mem_key, mem_key
 
         key = mem_key("abc12345")
         assert key == "mem:abc12345"
@@ -248,7 +248,7 @@ class TestMemoryKeys:
         assert hash_val > 0
 
     def test_taxonomy_key_formats(self):
-        from ultrasync.keys import (
+        from ultrasync_mcp.keys import (
             context_key,
             insight_key,
             pattern_key,

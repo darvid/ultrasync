@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from ultrasync.hyperscan_search import HyperscanSearch
 from ultrasync_index import GlobalIndex
+from ultrasync_mcp.hyperscan_search import HyperscanSearch
 
 # Binary format constants (must match lib.rs)
 MAGIC = b"FXINDEX\0"

@@ -3,7 +3,7 @@ import asyncio
 import numpy as np
 import pytest
 
-from ultrasync.jit.embed_queue import EmbedQueue
+from ultrasync_mcp.jit.embed_queue import EmbedQueue
 
 
 class MockEmbeddingProvider:

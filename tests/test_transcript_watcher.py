@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ultrasync.transcript_watcher import ClaudeCodeParser, CodexParser
+from ultrasync_mcp.transcript_watcher import ClaudeCodeParser, CodexParser
 
 
 class TestClaudeCodeParserToolCorrelation:

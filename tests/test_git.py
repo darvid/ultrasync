@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from ultrasync.git import EXCLUDED_DIR_NAMES, should_ignore_path
+from ultrasync_mcp.git import EXCLUDED_DIR_NAMES, should_ignore_path
 
 
 class TestShouldIgnorePath:

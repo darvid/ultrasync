@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ultrasync.events import EventType, SessionEvent
+from ultrasync_mcp.events import EventType, SessionEvent
 
 
 class TestEventType:

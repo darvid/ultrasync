@@ -1,6 +1,6 @@
 """Tests for keying and hashing layer."""
 
-from ultrasync.keys import (
+from ultrasync_mcp.keys import (
     file_key,
     hash64,
     hash64_file_key,

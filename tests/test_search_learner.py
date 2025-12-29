@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ultrasync.search_learner import (
+from ultrasync_mcp.search_learner import (
     DEFAULT_MIN_FALLBACK_READS,
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_SESSION_TIMEOUT,

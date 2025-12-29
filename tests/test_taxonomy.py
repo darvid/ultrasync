@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from ultrasync.taxonomy import (
+from ultrasync_mcp.taxonomy import (
     DEFAULT_TAXONOMY,
     Classification,
     CodebaseIR,

@@ -5,14 +5,14 @@ import json
 import numpy as np
 import pytest
 
-from ultrasync.jit import FileTracker
-from ultrasync.jit.blob import BlobAppender
-from ultrasync.jit.cache import VectorCache
-from ultrasync.jit.convention_discovery import (
+from ultrasync_mcp.jit import FileTracker
+from ultrasync_mcp.jit.blob import BlobAppender
+from ultrasync_mcp.jit.cache import VectorCache
+from ultrasync_mcp.jit.convention_discovery import (
     ConventionDiscovery,
     discover_and_import,
 )
-from ultrasync.jit.conventions import (
+from ultrasync_mcp.jit.conventions import (
     ConventionManager,
     ConventionSearchResult,
 )

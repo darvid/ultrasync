@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ultrasync.jit.manager import JITIndexManager
+from ultrasync_mcp.jit.manager import JITIndexManager
 
 
 class MockEmbeddingProvider:

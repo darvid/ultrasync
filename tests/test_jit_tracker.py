@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from ultrasync.jit import FileTracker
+from ultrasync_mcp.jit import FileTracker
 
 
 class TestFileTracker:

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ultrasync.jit.cache import VectorCache
+from ultrasync_mcp.jit.cache import VectorCache
 
 
 class TestVectorCache:

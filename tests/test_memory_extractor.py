@@ -1,6 +1,6 @@
 """Tests for memory extraction module."""
 
-from ultrasync.jit.memory_extractor import (
+from ultrasync_mcp.jit.memory_extractor import (
     DeduplicationCache,
     ExtractionResult,
     MemoryExtractionConfig,

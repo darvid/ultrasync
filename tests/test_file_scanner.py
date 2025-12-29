@@ -5,7 +5,7 @@ from textwrap import dedent
 
 import pytest
 
-from ultrasync.file_scanner import FileMetadata, FileScanner, SymbolInfo
+from ultrasync_mcp.file_scanner import FileMetadata, FileScanner, SymbolInfo
 
 
 class TestSymbolInfo:

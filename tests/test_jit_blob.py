@@ -1,6 +1,6 @@
 import pytest
 
-from ultrasync.jit.blob import BLOB_HEADER_SIZE, BlobAppender, BlobEntry
+from ultrasync_mcp.jit.blob import BLOB_HEADER_SIZE, BlobAppender, BlobEntry
 
 
 class TestBlobAppender:

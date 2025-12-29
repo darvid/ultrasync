@@ -1,5 +1,5 @@
 [project]
-name = "ultrascan-mcp"
+name = "ultrasync-mcp"
 version = "0.1.0"
 description = "Semantic code indexing and memory for AI coding agents"
 readme = "README.md"
@@ -37,7 +37,7 @@ Homepage = "https://github.com/davidgidwani/ultrasync"
 Repository = "https://github.com/davidgidwani/ultrasync"
 
 [project.scripts]
-ultrasync = "ultrasync._entry:main"
+ultrasync = "ultrasync_mcp._entry:main"
 
 [project.optional-dependencies]
 benchmark = [
@@ -79,31 +79,6 @@ docs = [
 requires = ["uv_build>=0.9.15,<0.10.0"]
 build-backend = "uv_build"
 
-[tool.pytest]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-
-[tool.ruff]
-line-length = 80
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "TID252"]
-
-[tool.ruff.lint.isort]
-known-first-party = ["ultrasync", "ultrasync_index"]
-
-[tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["E402"]  # allow imports after warnings filter
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-docstring-code-format = true
-
-[tool.uv.sources]
-ultrasync-index = { path = "crates/ultrasync_index", editable = true }
-
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]
 skips = [
@@ -116,3 +91,28 @@ skips = [
   "B606",  # os.execv with known paths is intentional
   "B607",  # partial paths to git are acceptable
 ]
+
+[tool.pytest]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 80
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "TID252"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ultrasync_mcp", "ultrasync_index"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]  # allow imports after warnings filter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.uv.sources]
+ultrasync-index = { path = "crates/ultrasync_index", editable = true }

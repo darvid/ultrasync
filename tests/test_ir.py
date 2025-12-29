@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from ultrasync.ir import (
+from ultrasync_mcp.ir import (
     AppIR,
     BusinessRuleExtractor,
     EndpointDef,

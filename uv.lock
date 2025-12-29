@@ -3283,7 +3283,12 @@ wheels = [
 ]
 
 [[package]]
-name = "ultrasync"
+name = "ultrasync-index"
+version = "0.1.0"
+source = { editable = "crates/ultrasync_index" }
+
+[[package]]
+name = "ultrasync-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -3367,11 +3372,6 @@ dev = [
     { name = "tombi", specifier = ">=0.7.7" },
 ]
 docs = [{ name = "zensical", specifier = ">=0.0.11" }]
-
-[[package]]
-name = "ultrasync-index"
-version = "0.1.0"
-source = { editable = "crates/ultrasync_index" }
 
 [[package]]
 name = "urllib3"

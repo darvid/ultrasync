@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ultrasync.file_registry import FileEntry, FileRegistry
-from ultrasync.file_scanner import FileMetadata, SymbolInfo
-from ultrasync.index_builder import (
+from ultrasync_mcp.file_registry import FileEntry, FileRegistry
+from ultrasync_mcp.file_scanner import FileMetadata, SymbolInfo
+from ultrasync_mcp.index_builder import (
     BUCKET_SIZE,
     HEADER_SIZE,
     MAGIC,

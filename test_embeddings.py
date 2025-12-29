@@ -6,7 +6,7 @@ import time
 
 def test_sentence_transformer():
     """Test SentenceTransformerProvider."""
-    from ultrasync.embeddings import SentenceTransformerProvider
+    from ultrasync_mcp.embeddings import SentenceTransformerProvider
 
     print("testing SentenceTransformerProvider...")
     t0 = time.perf_counter()
@@ -47,7 +47,7 @@ def test_infinity_provider():
         print("infinity-emb not installed, skipping InfinityProvider test")
         return False
 
-    from ultrasync.embeddings import InfinityProvider
+    from ultrasync_mcp.embeddings import InfinityProvider
 
     # try different engines - torch often fails with BetterTransformer issues
     engines_to_try = ["torch", "optimum"]
@@ -111,7 +111,7 @@ def test_infinity_api_provider():
         print("\nhttpx not installed, skipping InfinityAPIProvider test")
         return False
 
-    from ultrasync.embeddings import InfinityAPIProvider
+    from ultrasync_mcp.embeddings import InfinityAPIProvider
 
     print("\ntesting InfinityAPIProvider...")
 
@@ -159,7 +159,7 @@ def test_infinity_api_provider():
 
 def test_create_provider():
     """Test factory function."""
-    from ultrasync.embeddings import create_provider
+    from ultrasync_mcp.embeddings import create_provider
 
     print("\ntesting create_provider factory...")
 
@@ -189,7 +189,7 @@ def test_create_provider():
 
 def test_protocol():
     """Test that providers implement the protocol."""
-    from ultrasync.embeddings import (
+    from ultrasync_mcp.embeddings import (
         EmbeddingProvider,
         SentenceTransformerProvider,
     )
@@ -201,7 +201,7 @@ def test_protocol():
     print(f"  SentenceTransformerProvider is EmbeddingProvider: {is_provider}")
 
     try:
-        from ultrasync.embeddings import InfinityProvider
+        from ultrasync_mcp.embeddings import InfinityProvider
 
         _ = InfinityProvider.__new__(InfinityProvider)
         # can't check instance without init, but type checking works

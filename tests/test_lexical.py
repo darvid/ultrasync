@@ -8,7 +8,7 @@ import pytest
 # Skip all tests if tantivy is not installed
 pytest.importorskip("tantivy")
 
-from ultrasync.jit.lexical import (
+from ultrasync_mcp.jit.lexical import (
     LexicalIndex,
     code_tokenize,
     rrf_fuse,
@@ -207,7 +207,7 @@ class TestRRFFusion:
 
     def test_basic_fusion(self):
         """Test basic RRF fusion of two result sets."""
-        from ultrasync.jit.lexical import LexicalResult
+        from ultrasync_mcp.jit.lexical import LexicalResult
 
         semantic = [(100, 0.9), (200, 0.8), (300, 0.7)]
         lexical = [
@@ -232,7 +232,7 @@ class TestRRFFusion:
 
     def test_one_empty(self):
         """Test RRF with one empty list."""
-        from ultrasync.jit.lexical import LexicalResult
+        from ultrasync_mcp.jit.lexical import LexicalResult
 
         semantic = [(100, 0.9), (200, 0.8)]
         fused = rrf_fuse(semantic, [])
@@ -246,7 +246,7 @@ class TestRRFFusion:
 
     def test_weighted_fusion(self):
         """Test RRF with different weights."""
-        from ultrasync.jit.lexical import LexicalResult
+        from ultrasync_mcp.jit.lexical import LexicalResult
 
         semantic = [(100, 0.9)]
         lexical = [LexicalResult(key_hash=200, score=10.0)]
@@ -267,7 +267,7 @@ class TestRRFFusion:
 
     def test_source_tracking(self):
         """Test that RRF tracks source correctly."""
-        from ultrasync.jit.lexical import LexicalResult
+        from ultrasync_mcp.jit.lexical import LexicalResult
 
         semantic = [(100, 0.9), (200, 0.8)]
         lexical = [

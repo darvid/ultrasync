@@ -2,7 +2,7 @@
 
 import pytest
 
-from ultrasync.jit.secrets import (
+from ultrasync_mcp.jit.secrets import (
     DETECT_SECRETS_AVAILABLE,
     ScanResult,
     SecretMatch,

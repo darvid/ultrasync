@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from ultrasync.regex_safety import (
+from ultrasync_mcp.regex_safety import (
     SafePattern,
     analyze_pattern,
     safe_compile,
