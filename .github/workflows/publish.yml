@@ -15,7 +15,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci:
+    name: CI checks
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    name: Tests
+    uses: ./.github/workflows/test.yml
+
+  rust:
+    name: Rust build
+    uses: ./.github/workflows/rust.yml
+
   build-rust-wheels:
+    needs: [ci, test, rust]
     name: Build Rust wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -41,6 +54,7 @@ jobs:
           path: crates/ultrasync_index/dist/
 
   build-rust-sdist:
+    needs: [ci, test, rust]
     name: Build Rust sdist
     runs-on: ubuntu-latest
     steps:
@@ -60,6 +74,7 @@ jobs:
           path: crates/ultrasync_index/dist/
 
   build-python:
+    needs: [ci, test, rust]
     name: Build Python package
     runs-on: ubuntu-latest
     steps:
