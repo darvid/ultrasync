@@ -35,6 +35,9 @@ infinity = [
 lexical = [
   "tantivy>=0.22",  # BM25 lexical search via Rust bindings
 ]
+secrets = [
+  "detect-secrets>=1.4.0",  # enterprise secret detection by Yelp
+]
 sync = [
   "python-socketio[asyncio_client]>=5.11.0",  # async socket.io for sync server
 ]

@@ -3,6 +3,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,6 +12,7 @@ import structlog
 from ultrasync.jit.blob import BlobAppender
 from ultrasync.jit.cache import VectorCache
 from ultrasync.jit.lmdb_tracker import FileTracker, MemoryRecord
+from ultrasync.jit.secrets import ScanResult
 from ultrasync.keys import hash64, mem_key
 
 if TYPE_CHECKING:
@@ -18,9 +20,33 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Environment variable for max memory count
+
+class SecretPolicy(Enum):
+    """Policy for handling detected secrets in memory content."""
+
+    ALLOW = "allow"  # Store as-is (not recommended)
+    REJECT = "reject"  # Refuse to store, raise error
+    REDACT = "redact"  # Replace secrets with [REDACTED:type]
+    WARN = "warn"  # Store but log warning
+
+
+class SecretDetectedError(Exception):
+    """Raised when secrets are detected and policy is REJECT."""
+
+    def __init__(self, scan_result: ScanResult):
+        self.scan_result = scan_result
+        secret_types = ", ".join(scan_result.secret_types)
+        super().__init__(
+            f"Secrets detected in memory content: {secret_types}. "
+            "Content was not stored. Use REDACT policy to auto-redact."
+        )
+
+
+# Environment variables
 ENV_MAX_MEMORIES = "ULTRASYNC_MAX_MEMORIES"
+ENV_SECRET_POLICY = "ULTRASYNC_SECRET_POLICY"
 DEFAULT_MAX_MEMORIES = 1000
+DEFAULT_SECRET_POLICY = SecretPolicy.REDACT
 
 
 @dataclass
@@ -62,6 +88,13 @@ class MemoryManager:
 
     Supports LRU eviction when memory count exceeds max_memories.
     Configure via ULTRASYNC_MAX_MEMORIES env var (default: 1000).
+
+    Secret Detection:
+    Configure via ULTRASYNC_SECRET_POLICY env var:
+    - "allow": Store as-is (not recommended)
+    - "reject": Refuse to store, raise SecretDetectedError
+    - "redact": Replace secrets with [REDACTED:type] (default)
+    - "warn": Store but log warning
     """
 
     def __init__(
@@ -71,6 +104,8 @@ class MemoryManager:
         vector_cache: VectorCache,
         embedding_provider: EmbeddingProvider,
         max_memories: int | None = None,
+        secret_policy: SecretPolicy | str | None = None,
+        secret_scanner: SecretScanner | None = None,
     ):
         self.tracker = tracker
         self.blob = blob
@@ -85,6 +120,35 @@ class MemoryManager:
             self.max_memories = max_memories
         else:
             self.max_memories = DEFAULT_MAX_MEMORIES
+
+        # Initialize secret scanning
+        env_policy = os.environ.get(ENV_SECRET_POLICY)
+        if env_policy:
+            try:
+                self.secret_policy = SecretPolicy(env_policy.lower())
+            except ValueError:
+                logger.warning(
+                    "invalid secret policy in env, using default",
+                    env_value=env_policy,
+                    default=DEFAULT_SECRET_POLICY.value,
+                )
+                self.secret_policy = DEFAULT_SECRET_POLICY
+        elif secret_policy is not None:
+            if isinstance(secret_policy, str):
+                self.secret_policy = SecretPolicy(secret_policy.lower())
+            else:
+                self.secret_policy = secret_policy
+        else:
+            self.secret_policy = DEFAULT_SECRET_POLICY
+
+        # Use provided scanner or create default
+        self.secret_scanner = secret_scanner or SecretScanner()
+
+        logger.debug(
+            "memory manager initialized",
+            max_memories=self.max_memories,
+            secret_policy=self.secret_policy.value,
+        )
 
     def _record_to_entry(self, record: MemoryRecord) -> MemoryEntry:
         """Convert a MemoryRecord to a MemoryEntry."""
@@ -187,6 +251,53 @@ class MemoryManager:
 
         return evicted
 
+    def _process_text_secrets(self, text: str) -> str:
+        """Process text according to secret policy.
+
+        Args:
+            text: Original text to check
+
+        Returns:
+            Processed text (possibly redacted)
+
+        Raises:
+            SecretDetectedError: If policy is REJECT and secrets found
+        """
+        if self.secret_policy == SecretPolicy.ALLOW:
+            return text
+
+        scan_result = self.secret_scanner.scan(text)
+
+        if not scan_result.has_secrets:
+            return text
+
+        secret_types = scan_result.secret_types
+
+        if self.secret_policy == SecretPolicy.REJECT:
+            logger.warning(
+                "secrets detected, rejecting memory",
+                secret_types=secret_types,
+                match_count=len(scan_result.matches),
+            )
+            raise SecretDetectedError(scan_result)
+
+        if self.secret_policy == SecretPolicy.WARN:
+            logger.warning(
+                "secrets detected in memory content",
+                secret_types=secret_types,
+                match_count=len(scan_result.matches),
+            )
+            return text
+
+        # REDACT policy
+        redacted = self.secret_scanner.redact(text, scan_result)
+        logger.info(
+            "redacted secrets from memory content",
+            secret_types=secret_types,
+            match_count=len(scan_result.matches),
+        )
+        return redacted
+
     def write(
         self,
         text: str,
@@ -199,7 +310,14 @@ class MemoryManager:
         """Write a structured memory entry to the JIT index.
 
         Automatically evicts cold (unused) memories if over max_memories limit.
+        Scans for secrets and applies configured policy (default: redact).
+
+        Raises:
+            SecretDetectedError: If policy is REJECT and secrets detected
         """
+        # Process text through secret scanner
+        processed_text = self._process_text_secrets(text)
+
         # Check if we need to evict before adding
         current_count = self.count()
         if current_count >= self.max_memories:
@@ -220,7 +338,7 @@ class MemoryManager:
             "insights": insights or [],
             "context": context or [],
             "symbol_keys": symbol_keys or [],
-            "text": text,
+            "text": processed_text,
             "tags": tags or [],
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -228,7 +346,7 @@ class MemoryManager:
         content = json.dumps(entry_data).encode("utf-8")
         blob_entry = self.blob.append(content)
 
-        embedding = self.provider.embed(text)
+        embedding = self.provider.embed(processed_text)
         self.vector_cache.put(key_hash, embedding)
 
         self.tracker.upsert_memory(
@@ -237,7 +355,7 @@ class MemoryManager:
             insights=json.dumps(insights or []),
             context=json.dumps(context or []),
             symbol_keys=json.dumps(symbol_keys or []),
-            text=text,
+            text=processed_text,
             tags=json.dumps(tags or []),
             blob_offset=blob_entry.offset,
             blob_length=blob_entry.length,
@@ -251,7 +369,7 @@ class MemoryManager:
             insights=insights or [],
             context=context or [],
             symbol_keys=symbol_keys or [],
-            text=text,
+            text=processed_text,
             tags=tags or [],
             created_at=entry_data["created_at"],
         )
@@ -284,7 +402,13 @@ class MemoryManager:
 
         Returns:
             MemoryEntry with the imported data
+
+        Raises:
+            SecretDetectedError: If policy is REJECT and secrets detected
         """
+        # Process text through secret scanner
+        processed_text = self._process_text_secrets(text)
+
         # Check for eviction (same as write)
         current_count = self.count()
         if current_count >= self.max_memories:
@@ -313,7 +437,7 @@ class MemoryManager:
             "insights": insights or [],
             "context": context or [],
             "symbol_keys": [],
-            "text": text,
+            "text": processed_text,
             "tags": tags or [],
             "created_at": ts,
             "owner_id": owner_id,
@@ -323,7 +447,7 @@ class MemoryManager:
         content = json.dumps(entry_data).encode("utf-8")
         blob_entry = self.blob.append(content)
 
-        embedding = self.provider.embed(text)
+        embedding = self.provider.embed(processed_text)
         self.vector_cache.put(key_hash, embedding)
 
         self.tracker.upsert_memory(
@@ -332,7 +456,7 @@ class MemoryManager:
             insights=json.dumps(insights or []),
             context=json.dumps(context or []),
             symbol_keys=json.dumps([]),
-            text=text,
+            text=processed_text,
             tags=json.dumps(tags or []),
             blob_offset=blob_entry.offset,
             blob_length=blob_entry.length,
@@ -350,7 +474,7 @@ class MemoryManager:
             insights=insights or [],
             context=context or [],
             symbol_keys=[],
-            text=text,
+            text=processed_text,
             tags=tags or [],
             created_at=ts,
             owner_id=owner_id,
