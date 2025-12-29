@@ -1,5 +1,5 @@
 [project]
-name = "ultrasync"
+name = "ultrascan-mcp"
 version = "0.1.0"
 description = "Semantic code indexing and memory for AI coding agents"
 readme = "README.md"
@@ -28,7 +28,7 @@ dependencies = [
   "sentence-transformers>=3",
   "structlog>=24.0",
   "tyro>=0.9",
-  "ultrasync-index",
+  "ultrascan-mcp-index",
   "urllib3>=2.6.0",
 ]
 
@@ -102,7 +102,7 @@ indent-style = "space"
 docstring-code-format = true
 
 [tool.uv.sources]
-ultrasync-index = { path = "crates/ultrasync_index", editable = true }
+ultrascan-mcp-index = { path = "crates/ultrasync_index", editable = true }
 
 [tool.bandit]
 exclude_dirs = ["tests", "venv", ".venv"]

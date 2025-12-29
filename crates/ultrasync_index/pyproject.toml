@@ -1,5 +1,5 @@
 [project]
-name = "ultrasync-index"
+name = "ultrascan-mcp-index"
 version = "0.1.0"
 description = "Rust-backed mmapped index and vector search for ultrasync"
 readme = "README.md"
