@@ -3,6 +3,10 @@ name: Build Wheels
 on:
   push:
     branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.lock"
+      - ".github/workflows/build.yml"
 
 jobs:
   build-wheels:
