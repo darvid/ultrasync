@@ -43,12 +43,15 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Export requirements
-        run: uv export --no-hashes --no-dev > requirements.txt
+        run: |
+          uv export --no-hashes --no-dev > requirements.txt
+          # Remove first-party packages not yet on PyPI
+          grep -v "^ultrasync" requirements.txt > requirements-audit.txt || true
 
       - name: Run pip-audit
         uses: pypa/gh-action-pip-audit@v1.1.0
         with:
-          inputs: requirements.txt
+          inputs: requirements-audit.txt
 
   cargo-audit:
     name: Rust dependency audit
