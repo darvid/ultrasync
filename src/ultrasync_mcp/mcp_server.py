@@ -160,6 +160,159 @@ ENV_WATCH_TRANSCRIPTS = "ULTRASYNC_WATCH_TRANSCRIPTS"
 MEMORY_HIGH_RELEVANCE_THRESHOLD = 0.5
 MEMORY_MEDIUM_RELEVANCE_THRESHOLD = 0.3
 
+# ---------------------------------------------------------------------------
+# Tool Categories - controls which tools are exposed via ULTRASYNC_TOOLS env
+# ---------------------------------------------------------------------------
+# Default: search, index, watcher, sync (minimal set for core functionality)
+# Set ULTRASYNC_TOOLS=all for full access, or comma-separated categories
+# e.g., ULTRASYNC_TOOLS=search,index,conventions,graph
+
+TOOL_CATEGORIES: dict[str, set[str]] = {
+    # Core search and memory operations
+    "search": {
+        "search",
+        "memory_write",
+        "memory_search",
+        "memory_get",
+        "memory_list_threads",
+        "memory_attach_file",
+        "memory_write_structured",
+        "memory_search_structured",
+        "memory_list_structured",
+        "share_memory",
+        "delete_memory",
+        "get_source",
+    },
+    # Indexing operations
+    "index": {
+        "index_file",
+        "index_directory",
+        "full_index",
+        "reindex_file",
+        "add_symbol",
+        "delete_file",
+        "delete_symbol",
+        "get_stats",
+        "get_registry_stats",
+        "recently_indexed",
+        "compact_vectors",
+        "compute_hash",
+    },
+    # Transcript watcher
+    "watcher": {
+        "watcher_stats",
+        "watcher_start",
+        "watcher_stop",
+        "watcher_reprocess",
+    },
+    # Team sync operations
+    "sync": {
+        "sync_connect",
+        "sync_disconnect",
+        "sync_status",
+        "sync_push_file",
+        "sync_push_memory",
+        "sync_push_presence",
+        "sync_full",
+        "sync_fetch_team_memories",
+        "sync_fetch_team_index",
+    },
+    # Session thread management
+    "session": {
+        "session_thread_list",
+        "session_thread_get",
+        "session_thread_search_queries",
+        "session_thread_for_file",
+        "session_thread_stats",
+    },
+    # Pattern/regex scanning
+    "patterns": {
+        "pattern_load",
+        "pattern_scan",
+        "pattern_scan_memories",
+        "pattern_list",
+    },
+    # Code anchor detection
+    "anchors": {
+        "anchor_list_types",
+        "anchor_scan_file",
+        "anchor_scan_indexed",
+        "anchor_find_files",
+    },
+    # Convention management
+    "conventions": {
+        "convention_add",
+        "convention_list",
+        "convention_search",
+        "convention_get",
+        "convention_delete",
+        "convention_for_context",
+        "convention_check",
+        "convention_stats",
+        "convention_export",
+        "convention_import",
+        "convention_discover",
+    },
+    # Intermediate representation / code analysis
+    "ir": {
+        "ir_extract",
+        "ir_trace_endpoint",
+        "ir_summarize",
+    },
+    # Graph database operations
+    "graph": {
+        "graph_put_node",
+        "graph_get_node",
+        "graph_put_edge",
+        "graph_delete_edge",
+        "graph_get_neighbors",
+        "graph_put_kv",
+        "graph_get_kv",
+        "graph_list_kv",
+        "graph_diff_since",
+        "graph_stats",
+        "graph_bootstrap",
+        "graph_relations",
+    },
+    # Miscellaneous context tools
+    "context": {
+        "search_grep_cache",
+        "list_contexts",
+        "files_by_context",
+        "list_insights",
+        "insights_by_type",
+    },
+}
+
+# Default categories exposed when ULTRASYNC_TOOLS is not set
+DEFAULT_TOOL_CATEGORIES: set[str] = {"search", "index", "watcher", "sync"}
+
+
+def get_enabled_categories() -> set[str]:
+    """Get enabled tool categories from ULTRASYNC_TOOLS env var.
+
+    Returns:
+        Set of enabled category names. Defaults to DEFAULT_TOOL_CATEGORIES.
+        Use ULTRASYNC_TOOLS=all to enable everything.
+    """
+    env = os.environ.get("ULTRASYNC_TOOLS", "").strip()
+    if not env:
+        return DEFAULT_TOOL_CATEGORIES.copy()
+    if env.lower() == "all":
+        return set(TOOL_CATEGORIES.keys())
+    return {c.strip().lower() for c in env.split(",") if c.strip()}
+
+
+def get_enabled_tools() -> set[str]:
+    """Get set of enabled tool names based on enabled categories."""
+    categories = get_enabled_categories()
+    tools: set[str] = set()
+    for cat in categories:
+        if cat in TOOL_CATEGORIES:
+            tools.update(TOOL_CATEGORIES[cat])
+    return tools
+
+
 logger = get_logger("mcp_server")
 
 
@@ -1105,7 +1258,29 @@ After writing code, validate against conventions:
 """,
     )
 
-    @mcp.tool()
+    # -----------------------------------------------------------------
+    # Conditional tool registration based on ULTRASYNC_TOOLS env var
+    # -----------------------------------------------------------------
+    _enabled_tools = get_enabled_tools()
+    _enabled_categories = get_enabled_categories()
+    logger.info(
+        "tool categories enabled: %s (%d tools)",
+        ", ".join(sorted(_enabled_categories)),
+        len(_enabled_tools),
+    )
+
+    def tool_if_enabled(func):
+        """Decorator that only registers tool if its category is enabled.
+
+        Uses the function name to look up whether it should be registered.
+        If the tool is not in any enabled category, returns the function
+        as-is without registering it as an MCP tool.
+        """
+        if func.__name__ in _enabled_tools:
+            return mcp.tool()(func)
+        return func
+
+    @tool_if_enabled
     def memory_write(
         content: str,
         path: str | None = None,
@@ -1144,7 +1319,7 @@ After writing code, validate against conventions:
             file_count=len(thr.file_ids),
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_search(
         query: str,
         top_k: int = 5,
@@ -1192,7 +1367,7 @@ After writing code, validate against conventions:
             for fid, s in results
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_list_threads() -> list[ThreadInfo]:
         """List all active memory threads with their metadata.
 
@@ -1215,7 +1390,7 @@ After writing code, validate against conventions:
             for thr in state.thread_manager.threads.values()
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_attach_file(
         thread_id: int,
         path: str,
@@ -1251,7 +1426,7 @@ After writing code, validate against conventions:
             score=thr.score(now),
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def compute_hash(
         key: str,
         key_type: str = "raw",
@@ -1308,7 +1483,7 @@ After writing code, validate against conventions:
             "hex": hex(hash_val),
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def get_registry_stats() -> dict[str, Any]:
         """Get statistics about the current file registry.
 
@@ -1336,7 +1511,7 @@ After writing code, validate against conventions:
             "thread_count": len(state.thread_manager.threads),
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def index_file(
         path: str,
         force: bool = False,
@@ -1372,7 +1547,7 @@ After writing code, validate against conventions:
             )
         return response
 
-    @mcp.tool()
+    @tool_if_enabled
     async def index_directory(
         path: str,
         pattern: str = "**/*",
@@ -1403,7 +1578,7 @@ After writing code, validate against conventions:
             return asdict(final_progress)
         return {"status": "no_files_to_index"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def add_symbol(
         name: str,
         source_code: str,
@@ -1437,7 +1612,7 @@ After writing code, validate against conventions:
         response["key_hash"] = _key_to_hex(result.key_hash)
         return response
 
-    @mcp.tool()
+    @tool_if_enabled
     async def reindex_file(path: str) -> dict[str, Any]:
         """Invalidate and reindex a file in the JIT index.
 
@@ -1455,7 +1630,7 @@ After writing code, validate against conventions:
         response["key_hash"] = _key_to_hex(result.key_hash)
         return response
 
-    @mcp.tool()
+    @tool_if_enabled
     def delete_file(path: str) -> dict[str, Any]:
         """Delete a file and all its symbols from the index.
 
@@ -1474,7 +1649,7 @@ After writing code, validate against conventions:
             "path": path,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def delete_symbol(key_hash: str) -> dict[str, Any]:
         """Delete a single symbol from the index by key hash.
 
@@ -1494,7 +1669,7 @@ After writing code, validate against conventions:
             "key_hash": key_hash,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def delete_memory(memory_id: str) -> dict[str, Any]:
         """Delete a memory entry from the index.
 
@@ -1513,7 +1688,7 @@ After writing code, validate against conventions:
             "memory_id": memory_id,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def get_stats() -> dict[str, Any]:
         """Get JIT index statistics.
 
@@ -1533,7 +1708,7 @@ After writing code, validate against conventions:
         stats = jit.get_stats()
         return asdict(stats)
 
-    @mcp.tool()
+    @tool_if_enabled
     def recently_indexed(
         limit: int = 10,
         item_type: Literal[
@@ -1624,7 +1799,7 @@ After writing code, validate against conventions:
 
         return result
 
-    @mcp.tool()
+    @tool_if_enabled
     def search_grep_cache(
         query: str,
         top_k: int = 5,
@@ -1678,7 +1853,7 @@ After writing code, validate against conventions:
             "count": len(output),
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def list_contexts() -> dict[str, Any]:
         """List all detected context types with file counts.
 
@@ -1725,7 +1900,7 @@ After writing code, validate against conventions:
             "total_contextualized_files": sum(stats.values()) if stats else 0,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def files_by_context(
         context: str,
         limit: int = 100,
@@ -1763,7 +1938,7 @@ After writing code, validate against conventions:
             )
         return results
 
-    @mcp.tool()
+    @tool_if_enabled
     def list_insights() -> dict[str, Any]:
         """List all detected insight types with counts.
 
@@ -1797,7 +1972,7 @@ After writing code, validate against conventions:
             "total_insights": sum(stats.values()) if stats else 0,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def insights_by_type(
         insight_type: str,
         limit: int = 100,
@@ -1833,7 +2008,7 @@ After writing code, validate against conventions:
             )
         return results
 
-    @mcp.tool()
+    @tool_if_enabled
     def compact_vectors(force: bool = False) -> dict[str, Any]:
         """Compact the vector store to reclaim dead bytes.
 
@@ -1854,7 +2029,7 @@ After writing code, validate against conventions:
         result = state.jit_manager.compact_vectors(force=force)
         return asdict(result)
 
-    @mcp.tool()
+    @tool_if_enabled
     async def full_index(
         path: str | None = None,
         patterns: list[str] | None = None,
@@ -1888,7 +2063,7 @@ After writing code, validate against conventions:
             return asdict(final_progress)
         return {"status": "no_files_to_index"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def search(
         query: str,
         top_k: int = 5,
@@ -2148,7 +2323,7 @@ After writing code, validate against conventions:
             response["hint"] = hint
         return response
 
-    @mcp.tool()
+    @tool_if_enabled
     def get_source(key_hash: str) -> dict[str, Any]:
         """Get source content for a file, symbol, or memory by key hash.
 
@@ -2209,7 +2384,7 @@ After writing code, validate against conventions:
 
         return {"error": f"key_hash {key_hash} not found"}
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_write_structured(
         text: str,
         task: str | None = None,
@@ -2287,7 +2462,7 @@ After writing code, validate against conventions:
             created_at=entry.created_at,
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_search_structured(
         query: str | None = None,
         task: str | None = None,
@@ -2345,7 +2520,7 @@ After writing code, validate against conventions:
             for r in results
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_get(memory_id: str) -> dict[str, Any] | None:
         """Retrieve a specific memory entry by ID.
 
@@ -2372,7 +2547,7 @@ After writing code, validate against conventions:
             "updated_at": entry.updated_at,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def memory_list_structured(
         task: str | None = None,
         context: list[str] | None = None,
@@ -2411,7 +2586,7 @@ After writing code, validate against conventions:
             for e in entries
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     async def share_memory(memory_id: str) -> dict[str, Any]:
         """Share a personal memory with your team.
 
@@ -2472,7 +2647,7 @@ After writing code, validate against conventions:
             "message": "memory shared with team successfully",
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def session_thread_list(
         session_id: str | None = None,
         limit: int = 20,
@@ -2512,7 +2687,7 @@ After writing code, validate against conventions:
             for t in threads[:limit]
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def session_thread_get(
         thread_id: int | None = None,
     ) -> SessionThreadContext | None:
@@ -2573,7 +2748,7 @@ After writing code, validate against conventions:
             ],
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def session_thread_search_queries(
         search_text: str,
         limit: int = 20,
@@ -2611,7 +2786,7 @@ After writing code, validate against conventions:
             for q, t in results
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def session_thread_for_file(
         file_path: str,
     ) -> list[SessionThreadInfo]:
@@ -2643,7 +2818,7 @@ After writing code, validate against conventions:
             for t in threads
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def session_thread_stats() -> dict[str, Any]:
         """Get statistics about session threads.
 
@@ -2661,7 +2836,7 @@ After writing code, validate against conventions:
             "current_session_id": ptm.current_session_id,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def pattern_load(
         pattern_set_id: str,
         patterns: list[str],
@@ -2698,7 +2873,7 @@ After writing code, validate against conventions:
             tags=ps.tags,
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def pattern_scan(
         pattern_set_id: str,
         target_key: int,
@@ -2747,7 +2922,7 @@ After writing code, validate against conventions:
             for m in matches
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def pattern_scan_memories(
         pattern_set_id: str,
         task: str | None = None,
@@ -2802,7 +2977,7 @@ After writing code, validate against conventions:
 
         return results
 
-    @mcp.tool()
+    @tool_if_enabled
     def pattern_list() -> list[PatternSetInfo]:
         """List all loaded pattern sets.
 
@@ -2819,7 +2994,7 @@ After writing code, validate against conventions:
             for ps in state.pattern_manager.list_all()
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def anchor_list_types() -> dict[str, Any]:
         """List all available semantic anchor types.
 
@@ -2844,7 +3019,7 @@ After writing code, validate against conventions:
 
         return {"anchor_types": anchor_types, "count": len(anchor_types)}
 
-    @mcp.tool()
+    @tool_if_enabled
     def anchor_scan_file(
         file_path: str,
         anchor_types: list[str] | None = None,
@@ -2895,7 +3070,7 @@ After writing code, validate against conventions:
             "count": len(anchors),
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def anchor_scan_indexed(
         key_hash: str | int,
         anchor_types: list[str] | None = None,
@@ -2944,7 +3119,7 @@ After writing code, validate against conventions:
             "count": len(anchors),
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def anchor_find_files(
         anchor_type: str,
         limit: int = 50,
@@ -3020,7 +3195,7 @@ After writing code, validate against conventions:
             times_applied=entry.times_applied,
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_add(
         name: str,
         description: str,
@@ -3072,7 +3247,7 @@ After writing code, validate against conventions:
         )
         return _entry_to_convention_info(entry)
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_list(
         category: str | None = None,
         scope: list[str] | None = None,
@@ -3099,7 +3274,7 @@ After writing code, validate against conventions:
         )
         return [_entry_to_convention_info(e) for e in entries]
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_search(
         query: str,
         scope: list[str] | None = None,
@@ -3129,7 +3304,7 @@ After writing code, validate against conventions:
             for r in results
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_get(conv_id: str) -> ConventionInfo | None:
         """Get a convention by ID.
 
@@ -3145,7 +3320,7 @@ After writing code, validate against conventions:
             return None
         return _entry_to_convention_info(entry)
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_delete(conv_id: str) -> dict[str, Any]:
         """Delete a convention by ID.
 
@@ -3159,7 +3334,7 @@ After writing code, validate against conventions:
         deleted = manager.delete(conv_id)
         return {"deleted": deleted, "conv_id": conv_id}
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_for_context(
         context: str,
         include_global: bool = True,
@@ -3181,7 +3356,7 @@ After writing code, validate against conventions:
         )
         return [_entry_to_convention_info(e) for e in entries]
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_check(
         key_hash: str,
         context: str | None = None,
@@ -3227,7 +3402,7 @@ After writing code, validate against conventions:
             for v in violations
         ]
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_stats() -> ConventionStats:
         """Get convention statistics.
 
@@ -3237,7 +3412,7 @@ After writing code, validate against conventions:
         manager = state.jit_manager.conventions
         return manager.get_stats()
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_export(
         org_id: str | None = None,
         format: Literal["yaml", "json"] = "yaml",
@@ -3256,7 +3431,7 @@ After writing code, validate against conventions:
             return manager.export_yaml(org_id=org_id)
         return manager.export_json(org_id=org_id)
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_import(
         source: str,
         org_id: str | None = None,
@@ -3275,7 +3450,7 @@ After writing code, validate against conventions:
         manager = state.jit_manager.conventions
         return manager.import_conventions(source, org_id=org_id, merge=merge)
 
-    @mcp.tool()
+    @tool_if_enabled
     def convention_discover(
         org_id: str | None = None,
     ) -> dict[str, Any]:
@@ -3314,7 +3489,7 @@ After writing code, validate against conventions:
 
         return result
 
-    @mcp.tool()
+    @tool_if_enabled
     def watcher_stats() -> WatcherStatsInfo | None:
         """Get transcript watcher statistics.
 
@@ -3348,7 +3523,7 @@ After writing code, validate against conventions:
             patterns_cached=stats.patterns_cached,
         )
 
-    @mcp.tool()
+    @tool_if_enabled
     async def watcher_start() -> dict[str, Any]:
         """Start the transcript watcher.
 
@@ -3369,7 +3544,7 @@ After writing code, validate against conventions:
             }
         return {"status": "failed", "reason": "no compatible agent detected"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def watcher_stop() -> dict[str, str]:
         """Stop the transcript watcher.
 
@@ -3382,7 +3557,7 @@ After writing code, validate against conventions:
         await state.stop_watcher()
         return {"status": "stopped"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def watcher_reprocess() -> dict[str, Any]:
         """Clear transcript positions and reprocess from beginning.
 
@@ -3422,7 +3597,7 @@ After writing code, validate against conventions:
     # IR Extraction Tools
     # -------------------------------------------------------------------------
 
-    @mcp.tool()
+    @tool_if_enabled
     def ir_extract(
         include: list[str] | None = None,
         skip_tests: bool = True,
@@ -3490,7 +3665,7 @@ After writing code, validate against conventions:
 
         return result
 
-    @mcp.tool()
+    @tool_if_enabled
     def ir_trace_endpoint(
         method: str,
         path: str,
@@ -3591,7 +3766,7 @@ After writing code, validate against conventions:
             ],
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def ir_summarize(
         include_flows: bool = False,
         sort_by: Literal["none", "name", "source"] = "name",
@@ -3637,7 +3812,7 @@ After writing code, validate against conventions:
     # Graph Memory Tools
     # -------------------------------------------------------------------------
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_put_node(
         node_id: int,
         node_type: str,
@@ -3673,7 +3848,7 @@ After writing code, validate against conventions:
             "updated_ts": record.updated_ts,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_get_node(node_id: int) -> dict[str, Any] | None:
         """Get a node by ID.
 
@@ -3711,7 +3886,7 @@ After writing code, validate against conventions:
             "updated_ts": record.updated_ts,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_put_edge(
         src_id: int,
         relation: str | int,
@@ -3746,7 +3921,7 @@ After writing code, validate against conventions:
             "created_ts": record.created_ts,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_delete_edge(
         src_id: int,
         relation: str | int,
@@ -3767,7 +3942,7 @@ After writing code, validate against conventions:
         graph = GraphMemory(state.jit_manager.tracker)
         return graph.delete_edge(src_id, relation, dst_id)
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_get_neighbors(
         node_id: int,
         direction: Literal["out", "in", "both"] = "out",
@@ -3814,7 +3989,7 @@ After writing code, validate against conventions:
 
         return result
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_put_kv(
         scope: str,
         namespace: str,
@@ -3849,7 +4024,7 @@ After writing code, validate against conventions:
             "ts": record.ts,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_get_kv(
         scope: str,
         namespace: str,
@@ -3907,7 +4082,7 @@ After writing code, validate against conventions:
             "payload": payload,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_list_kv(
         scope: str,
         namespace: str,
@@ -3946,7 +4121,7 @@ After writing code, validate against conventions:
             )
         return results
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_diff_since(ts: float) -> dict[str, Any]:
         """Get all graph changes since a timestamp.
 
@@ -3994,7 +4169,7 @@ After writing code, validate against conventions:
             ],
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_stats() -> dict[str, Any]:
         """Get graph memory statistics.
 
@@ -4006,7 +4181,7 @@ After writing code, validate against conventions:
         graph = GraphMemory(state.jit_manager.tracker)
         return graph.stats()
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_bootstrap(force: bool = False) -> dict[str, Any]:
         """Bootstrap graph from existing FileTracker data.
 
@@ -4036,7 +4211,7 @@ After writing code, validate against conventions:
             "already_bootstrapped": stats.already_bootstrapped,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     def graph_relations() -> list[dict[str, Any]]:
         """List all registered relations.
 
@@ -4075,7 +4250,7 @@ After writing code, validate against conventions:
     #     "ULTRASYNC_SYNC_TOKEN": "your-auth-token"
     #   }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_connect(
         url: str | None = None,
         token: str | None = None,
@@ -4189,7 +4364,7 @@ After writing code, validate against conventions:
                 "error": "failed to start sync manager",
             }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_disconnect() -> dict[str, Any]:
         """Disconnect from the sync server.
 
@@ -4202,7 +4377,7 @@ After writing code, validate against conventions:
         await state.stop_sync_manager()
         return {"disconnected": True, "was_connected": True}
 
-    @mcp.tool()
+    @tool_if_enabled
     def sync_status() -> dict[str, Any]:
         """Get current sync connection status.
 
@@ -4262,7 +4437,7 @@ After writing code, validate against conventions:
 
         return result
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_push_file(
         path: str,
         symbols: list[dict[str, Any]] | None = None,
@@ -4309,7 +4484,7 @@ After writing code, validate against conventions:
         else:
             return {"synced": False, "error": "no ack received"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_push_memory(
         memory_id: str,
     ) -> dict[str, Any]:
@@ -4349,7 +4524,7 @@ After writing code, validate against conventions:
         else:
             return {"synced": False, "error": "no ack received"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_push_presence(
         file: str | None = None,
         line: int | None = None,
@@ -4382,7 +4557,7 @@ After writing code, validate against conventions:
         else:
             return {"synced": False, "error": "no ack received"}
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_full(
         include_memories: bool = True,
         batch_size: int = 50,
@@ -4421,7 +4596,7 @@ After writing code, validate against conventions:
             "completed_at": progress.completed_at,
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_fetch_team_memories() -> dict[str, Any]:
         """Fetch and import team-shared memories from the sync server.
 
@@ -4482,7 +4657,7 @@ After writing code, validate against conventions:
             "errors": errors[:5] if errors else [],
         }
 
-    @mcp.tool()
+    @tool_if_enabled
     async def sync_fetch_team_index() -> dict[str, Any]:
         """Fetch and import team file index from the sync server.
 
