@@ -1953,23 +1953,22 @@ class JITIndexManager:
                 error="compaction not needed (use force=True to override)",
             )
 
-        self.tracker.begin_batch()
+        # Collect live vectors first - iter_live_vectors opens read txns
+        live_vectors = list(self.tracker.iter_live_vectors())
 
         try:
-            live_vectors = self.tracker.iter_live_vectors()
-            result, offset_map = self.vector_store.compact(live_vectors)
+            result, offset_map = self.vector_store.compact(iter(live_vectors))
 
             if not result.success:
-                self.tracker.end_batch()
                 return result
 
+            # update_vector_offsets handles its own transactions
             updated = self.tracker.update_vector_offsets(offset_map)
             logger.info(
                 "compaction updated %d vector offsets",
                 updated,
             )
 
-            self.tracker.end_batch()
             self.vector_cache.clear()
 
             logger.info(
@@ -1980,7 +1979,6 @@ class JITIndexManager:
             return result
 
         except Exception as e:
-            self.tracker.end_batch()
             logger.error("compaction failed: %s", e)
             return CompactionResult(
                 bytes_before=stats.total_bytes,
