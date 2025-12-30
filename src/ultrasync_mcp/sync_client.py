@@ -274,6 +274,20 @@ class SyncClient:
             payload={"symbols": [...], "embedding": [...]}
         )
 
+        # push a graph node
+        await client.push_graph_node(
+            node_id="file:src/main.py",
+            node_type="file",
+            payload={"path": "src/main.py", "symbols": [...]},
+        )
+
+        # push a graph edge
+        await client.push_graph_edge(
+            src_id="file:src/main.py",
+            dst_id="symbol:main",
+            rel_type="contains",
+        )
+
         await client.disconnect()
     """
 
@@ -281,13 +295,17 @@ class SyncClient:
         self,
         config: SyncConfig | None = None,
         on_ops: Callable[[list[dict]], None] | None = None,
+        on_graph_ops: Callable[[list[dict]], None] | None = None,
     ) -> None:
         self.config = config or SyncConfig()
         self._sio = socketio.AsyncClient(logger=False, engineio_logger=False)
         self._connected = False
         self._last_seq = 0
+        self._last_graph_seq = 0
         self._pending_acks: dict[str, asyncio.Future] = {}
+        self._pending_graph_acks: dict[str, asyncio.Future] = {}
         self._on_ops = on_ops
+        self._on_graph_ops = on_graph_ops
 
         # register handlers
         self._sio.on("connect", self._on_connect)
@@ -296,6 +314,9 @@ class SyncClient:
         self._sio.on("ack", self._on_ack)
         self._sio.on("reject", self._on_reject)
         self._sio.on("error", self._on_error)
+        # graph handlers
+        self._sio.on("graph_ops", self._on_graph_ops_received)
+        self._sio.on("graph_ack", self._on_graph_ack)
 
     @property
     def connected(self) -> bool:
@@ -667,6 +688,171 @@ class SyncClient:
             },
         )
 
+    # -------------------------------------------------------------------------
+    # Graph Operations
+    # -------------------------------------------------------------------------
+
+    async def push_graph_op(
+        self,
+        op_type: str,
+        node_id: str | None = None,
+        node_type: str | None = None,
+        src_id: str | None = None,
+        dst_id: str | None = None,
+        rel_type: str | None = None,
+        payload: dict[str, Any] | None = None,
+        timeout: float = 5.0,
+    ) -> dict | None:
+        """Push a graph operation to the sync server.
+
+        Args:
+            op_type: One of put_node, del_node, put_edge, del_edge
+            node_id: Node ID (for node ops)
+            node_type: Node type (for put_node)
+            src_id: Source node ID (for edge ops)
+            dst_id: Destination node ID (for edge ops)
+            rel_type: Relation type (for edge ops)
+            payload: Optional payload dict
+            timeout: Seconds to wait for ack
+
+        Returns:
+            The ack response if successful, None otherwise
+        """
+        if not self._connected:
+            logger.debug("not connected, skipping push_graph_op")
+            return None
+
+        import time
+
+        op_id = str(uuid.uuid4())
+        ts = int(time.time() * 1_000_000_000)  # nanoseconds
+
+        graph_op = {
+            "op_id": op_id,
+            "op_type": op_type,
+            "created_ts": ts,
+        }
+
+        if node_id is not None:
+            graph_op["node_id"] = node_id
+        if node_type is not None:
+            graph_op["node_type"] = node_type
+        if src_id is not None:
+            graph_op["src_id"] = src_id
+        if dst_id is not None:
+            graph_op["dst_id"] = dst_id
+        if rel_type is not None:
+            graph_op["rel_type"] = rel_type
+        if payload is not None:
+            graph_op["payload"] = payload
+
+        # create future for ack
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_graph_acks[op_id] = future
+
+        try:
+            await self._sio.emit("graph_command", graph_op)
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            logger.warning("timeout waiting for graph_ack on op %s", op_id)
+            return None
+        finally:
+            self._pending_graph_acks.pop(op_id, None)
+
+    async def push_graph_node(
+        self,
+        node_id: str,
+        node_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict | None:
+        """Push a graph node.
+
+        Args:
+            node_id: Unique node identifier (e.g., "file:src/main.py")
+            node_type: Node type (file, symbol, memory, decision, etc.)
+            payload: Optional payload dict with node metadata
+        """
+        return await self.push_graph_op(
+            op_type="put_node",
+            node_id=node_id,
+            node_type=node_type,
+            payload=payload,
+        )
+
+    async def push_graph_edge(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict | None:
+        """Push a graph edge.
+
+        Args:
+            src_id: Source node ID
+            dst_id: Destination node ID
+            rel_type: Relation type (contains, calls, imports, etc.)
+            payload: Optional payload dict with edge metadata
+        """
+        return await self.push_graph_op(
+            op_type="put_edge",
+            src_id=src_id,
+            dst_id=dst_id,
+            rel_type=rel_type,
+            payload=payload,
+        )
+
+    async def delete_graph_node(self, node_id: str) -> dict | None:
+        """Delete a graph node.
+
+        Args:
+            node_id: Node identifier to delete
+        """
+        return await self.push_graph_op(
+            op_type="del_node",
+            node_id=node_id,
+        )
+
+    async def delete_graph_edge(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+    ) -> dict | None:
+        """Delete a graph edge.
+
+        Args:
+            src_id: Source node ID
+            dst_id: Destination node ID
+            rel_type: Relation type
+        """
+        return await self.push_graph_op(
+            op_type="del_edge",
+            src_id=src_id,
+            dst_id=dst_id,
+            rel_type=rel_type,
+        )
+
+    async def sync_graph(self, since_seq: int = 0, limit: int = 1000) -> None:
+        """Request graph operations since a sequence number.
+
+        Args:
+            since_seq: Sequence number to sync from (0 for full sync)
+            limit: Maximum number of ops to fetch
+
+        The server will respond with graph_ops events.
+        """
+        if not self._connected:
+            logger.debug("not connected, skipping sync_graph")
+            return
+
+        await self._sio.emit(
+            "graph_sync",
+            {"last_seq": since_seq, "limit": limit},
+        )
+        logger.debug("requested graph sync from seq %d", since_seq)
+
     async def bulk_sync(
         self,
         items: list[dict[str, Any]],
@@ -1028,16 +1214,21 @@ class SyncClient:
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
+                    err_msg = f"HTTP {resp.status}: {error_text[:200]}"
                     progress.errors.append(
                         {
                             "batch": progress.current_batch,
-                            "error": f"HTTP {resp.status}: {error_text[:100]}",
+                            "error": err_msg,
                         }
                     )
+                    _debug_log(
+                        f"batch {progress.current_batch} failed: {err_msg}"
+                    )
                     logger.warning(
-                        "batch %d failed: HTTP %s",
+                        "batch %d failed: HTTP %s - %s",
                         progress.current_batch,
                         resp.status,
+                        error_text[:100],
                     )
                     return False
 
@@ -1065,9 +1256,11 @@ class SyncClient:
                 return True
 
         except Exception as e:
+            err_msg = f"Exception: {e}"
             progress.errors.append(
-                {"batch": progress.current_batch, "error": str(e)}
+                {"batch": progress.current_batch, "error": err_msg}
             )
+            _debug_log(f"batch {progress.current_batch} exception: {err_msg}")
             logger.warning("batch %d failed: %s", progress.current_batch, e)
             return False
 
@@ -1129,6 +1322,47 @@ class SyncClient:
         message = data.get("message", "")
         logger.error("sync server error: %s - %s", code, message)
 
+    def _on_graph_ops_received(self, data: dict) -> None:
+        """Handle incoming graph ops from server."""
+        ops = data.get("ops", [])
+        last_seq = data.get("last_seq", 0)
+
+        if ops:
+            logger.debug(
+                "received %d graph ops (last_seq=%d)", len(ops), last_seq
+            )
+            # update our last seen graph seq
+            for op in ops:
+                server_seq = op.get("server_seq", 0)
+                if server_seq > self._last_graph_seq:
+                    self._last_graph_seq = server_seq
+
+            # call user callback if set
+            if self._on_graph_ops:
+                self._on_graph_ops(ops)
+
+    def _on_graph_ack(self, data: dict) -> None:
+        """Handle ack for our graph commands."""
+        server_seq = data.get("server_seq", 0)
+        op_type = data.get("op_type", "")
+
+        if server_seq > self._last_graph_seq:
+            self._last_graph_seq = server_seq
+
+        # resolve all pending graph acks (we don't have op_id in ack)
+        # this is a limitation - for now we just resolve the oldest one
+        if self._pending_graph_acks:
+            op_id = next(iter(self._pending_graph_acks))
+            future = self._pending_graph_acks.pop(op_id, None)
+            if future and not future.done():
+                future.set_result(data)
+                logger.debug(
+                    "graph_ack for %s, seq=%d, op_type=%s",
+                    op_id,
+                    server_seq,
+                    op_type,
+                )
+
 
 _sync_client: SyncClient | None = None
 
@@ -1172,6 +1406,9 @@ class SyncManagerStats:
     files_synced: int = 0
     memories_synced: int = 0
     total_syncs: int = 0
+    # graph sync stats
+    graph_nodes_synced: int = 0
+    graph_edges_synced: int = 0
     # error tracking
     errors: list[str] = field(default_factory=list)
     # resync config
@@ -1188,6 +1425,7 @@ class SyncManager:
     1. Initial full sync on connect (all indexed files + memories)
     2. Periodic re-syncs to catch any missed updates
     3. Maintaining WebSocket connection for real-time ops
+    4. Graph sync for code knowledge graph
 
     Usage:
         manager = SyncManager(
@@ -1207,6 +1445,8 @@ class SyncManager:
         resync_interval: int = 300,  # seconds between periodic resyncs
         batch_size: int = 50,
         on_team_memory: Callable[[dict], None] | None = None,
+        on_graph_op: Callable[[dict], None] | None = None,
+        graph_memory: Any | None = None,  # GraphMemory instance
     ) -> None:
         """Initialize the sync manager.
 
@@ -1218,12 +1458,18 @@ class SyncManager:
             on_team_memory: Callback invoked when team memory ops are received
                 Signature: (payload: dict) -> None
                 payload contains: id, text, task, insights, context, owner_id
+            on_graph_op: Callback when graph ops are received from server
+                Signature: (op: dict) -> None
+                op contains: op_type, node_id, src_id, dst_id, rel_type, payload
+            graph_memory: GraphMemory instance for graph operations
         """
         self.tracker = tracker
         self.config = config or SyncConfig()
         self.resync_interval = resync_interval
         self.batch_size = batch_size
         self._on_team_memory = on_team_memory
+        self._on_graph_op = on_graph_op
+        self._graph_memory = graph_memory
 
         self._client: SyncClient | None = None
         self._sync_task: asyncio.Task | None = None
@@ -1286,8 +1532,12 @@ class SyncManager:
         self._stop_event.clear()
         self.stats.running = True
 
-        # create client with ops handler and connect
-        self._client = SyncClient(self.config, on_ops=self._handle_ops)
+        # create client with ops handlers and connect
+        self._client = SyncClient(
+            self.config,
+            on_ops=self._handle_ops,
+            on_graph_ops=self._handle_graph_ops,
+        )
         connected = await self._client.connect()
         _debug_log(f"SyncManager.start() - connected={connected}")
 
@@ -1380,6 +1630,89 @@ class SyncManager:
                     self._on_team_memory(payload)
                 except Exception as e:
                     logger.exception("error handling team memory: %s", e)
+
+    def _handle_graph_ops(self, ops: list[dict]) -> None:
+        """Handle incoming graph ops from the sync server.
+
+        Applies graph ops to local GraphMemory if available,
+        and invokes the callback if set.
+        """
+        for op in ops:
+            op_type = op.get("op_type", "")
+            actor_id = op.get("actor_id")
+
+            # skip our own ops
+            my_id = self.config.user_id or self.config.clerk_user_id
+            if actor_id and actor_id == my_id:
+                logger.debug("skipping own graph op: %s", op_type)
+                continue
+
+            logger.debug(
+                "received graph op: %s node_id=%s",
+                op_type,
+                op.get("node_id"),
+            )
+
+            # apply to local graph memory if available
+            if self._graph_memory:
+                try:
+                    self._apply_graph_op(op)
+                except Exception as e:
+                    logger.exception("error applying graph op: %s", e)
+
+            # invoke callback if set
+            if self._on_graph_op:
+                try:
+                    self._on_graph_op(op)
+                except Exception as e:
+                    logger.exception("error in graph op callback: %s", e)
+
+    def _apply_graph_op(self, op: dict) -> None:
+        """Apply a graph op to local GraphMemory."""
+        if not self._graph_memory:
+            return
+
+        import hashlib
+
+        op_type = op.get("op_type", "")
+        payload = op.get("payload", {})
+
+        # convert string node_id to int hash for LMDB storage
+        def _hash_id(s: str) -> int:
+            return int.from_bytes(
+                hashlib.sha256(s.encode()).digest()[:8], "big"
+            )
+
+        if op_type == "put_node":
+            node_id = op.get("node_id", "")
+            node_type = op.get("node_type", "unknown")
+            self._graph_memory.put_node(
+                node_id=_hash_id(node_id),
+                node_type=node_type,
+                payload=payload,
+            )
+        elif op_type == "del_node":
+            node_id = op.get("node_id", "")
+            self._graph_memory.delete_node(_hash_id(node_id))
+        elif op_type == "put_edge":
+            src_id = op.get("src_id", "")
+            dst_id = op.get("dst_id", "")
+            rel_type = op.get("rel_type", "related")
+            self._graph_memory.put_edge(
+                src_id=_hash_id(src_id),
+                rel=rel_type,
+                dst_id=_hash_id(dst_id),
+                payload=payload,
+            )
+        elif op_type == "del_edge":
+            src_id = op.get("src_id", "")
+            dst_id = op.get("dst_id", "")
+            rel_type = op.get("rel_type", "related")
+            self._graph_memory.delete_edge(
+                src_id=_hash_id(src_id),
+                rel=rel_type,
+                dst_id=_hash_id(dst_id),
+            )
 
     async def _sync_loop(self) -> None:
         """Main sync loop - handles initial sync and periodic resyncs."""
@@ -1737,7 +2070,16 @@ class SyncManager:
         if progress.errors:
             for err in progress.errors[:5]:
                 self.stats.errors.append(str(err))
+                # log each error for debugging
+                _debug_log(f"sync error: {err}")
+                logger.warning("sync error: %s", err)
 
+        _debug_log(
+            f"full sync complete: synced={progress.synced} "
+            f"files={self.stats.files_synced} "
+            f"memories={self.stats.memories_synced} "
+            f"errors={len(progress.errors)}"
+        )
         logger.info(
             "full sync complete: %d synced, %d files, %d memories, %d errors",
             progress.synced,
@@ -1746,8 +2088,24 @@ class SyncManager:
             len(progress.errors),
         )
 
+        # sync graph if GraphMemory is configured
+        if self._graph_memory:
+            graph_result = await self.sync_full_graph()
+            self.stats.graph_nodes_synced = graph_result["nodes"]
+            self.stats.graph_edges_synced = graph_result["edges"]
+            logger.info(
+                "graph sync: %d nodes, %d edges, %d errors",
+                graph_result["nodes"],
+                graph_result["edges"],
+                graph_result["errors"],
+            )
+
         # fetch team index (bidirectional sync)
         await self._fetch_team_index()
+
+        # request graph ops from server (bidirectional graph sync)
+        if self._graph_memory:
+            await self.request_graph_sync(since_seq=0)
 
         return progress
 
@@ -1831,3 +2189,165 @@ class SyncManager:
         # update connected status
         self.stats.connected = self.connected
         return self.stats
+
+    # -------------------------------------------------------------------------
+    # Graph Sync Methods
+    # -------------------------------------------------------------------------
+
+    async def sync_graph_node(
+        self,
+        node_id: str,
+        node_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Sync a single graph node to the server.
+
+        Args:
+            node_id: Node identifier (e.g., "file:src/main.py")
+            node_type: Node type (file, symbol, memory, etc.)
+            payload: Optional payload dict
+
+        Returns:
+            True if synced successfully
+        """
+        if not self._client or not self._client.connected:
+            return False
+
+        result = await self._client.push_graph_node(node_id, node_type, payload)
+        return result is not None
+
+    async def sync_graph_edge(
+        self,
+        src_id: str,
+        dst_id: str,
+        rel_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Sync a single graph edge to the server.
+
+        Args:
+            src_id: Source node ID
+            dst_id: Destination node ID
+            rel_type: Relation type
+            payload: Optional payload dict
+
+        Returns:
+            True if synced successfully
+        """
+        if not self._client or not self._client.connected:
+            return False
+
+        result = await self._client.push_graph_edge(
+            src_id, dst_id, rel_type, payload
+        )
+        return result is not None
+
+    async def sync_full_graph(self) -> dict[str, int]:
+        """Sync entire local graph to the server.
+
+        Iterates all nodes and edges from GraphMemory and pushes them.
+        This is useful for initial sync or recovery.
+
+        Returns:
+            Dict with counts: {"nodes": N, "edges": M, "errors": E}
+        """
+        if not self._graph_memory:
+            logger.warning("no graph memory configured, skipping graph sync")
+            return {"nodes": 0, "edges": 0, "errors": 0}
+
+        if not self._client or not self._client.connected:
+            logger.warning("not connected, skipping graph sync")
+            return {"nodes": 0, "edges": 0, "errors": 0}
+
+        import msgpack
+
+        nodes_synced = 0
+        edges_synced = 0
+        errors = 0
+
+        # sync all nodes
+        for node in self._graph_memory.iter_nodes():
+            try:
+                # decode payload if bytes
+                payload = {}
+                if node.payload:
+                    payload = msgpack.unpackb(node.payload)
+
+                # use hex representation of int node_id as string
+                node_id_str = f"{node.type}:{node.id:x}"
+
+                result = await self._client.push_graph_node(
+                    node_id=node_id_str,
+                    node_type=node.type,
+                    payload=payload,
+                )
+                if result:
+                    nodes_synced += 1
+                else:
+                    errors += 1
+            except Exception as e:
+                logger.warning("failed to sync node %s: %s", node.id, e)
+                errors += 1
+
+        # sync all edges
+        edge_db = self._graph_memory._db(b"graph_edges")
+        with self._graph_memory.tracker.env.begin() as txn:
+            cursor = txn.cursor(db=edge_db)
+            for _, value in cursor:
+                try:
+                    d = msgpack.unpackb(value)
+                    if d.get("tombstone"):
+                        continue
+
+                    # decode payload if present
+                    payload = {}
+                    if d.get("payload"):
+                        payload = msgpack.unpackb(d["payload"])
+
+                    # get relation name
+                    rel_name = self._graph_memory.relations.lookup_name(
+                        d["rel_id"]
+                    )
+                    if not rel_name:
+                        rel_name = f"rel:{d['rel_id']}"
+
+                    src_id_str = f"node:{d['src_id']:x}"
+                    dst_id_str = f"node:{d['dst_id']:x}"
+
+                    result = await self._client.push_graph_edge(
+                        src_id=src_id_str,
+                        dst_id=dst_id_str,
+                        rel_type=rel_name,
+                        payload=payload,
+                    )
+                    if result:
+                        edges_synced += 1
+                    else:
+                        errors += 1
+                except Exception as e:
+                    logger.warning("failed to sync edge: %s", e)
+                    errors += 1
+            cursor.close()
+
+        logger.info(
+            "graph sync complete: %d nodes, %d edges, %d errors",
+            nodes_synced,
+            edges_synced,
+            errors,
+        )
+        return {"nodes": nodes_synced, "edges": edges_synced, "errors": errors}
+
+    async def request_graph_sync(self, since_seq: int = 0) -> None:
+        """Request graph ops from server since a sequence number.
+
+        The server will respond with graph_ops events which will be
+        handled by _handle_graph_ops and applied to local GraphMemory.
+
+        Args:
+            since_seq: Sequence number to sync from (0 for full sync)
+        """
+        if not self._client or not self._client.connected:
+            logger.warning("not connected, cannot request graph sync")
+            return
+
+        await self._client.sync_graph(since_seq)

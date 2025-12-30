@@ -39,7 +39,7 @@ for integration with coding agents.
 1. AOT index lookup (exact key match, sub-millisecond)
 2. Semantic vector search (cosine similarity)
 3. Lexical BM25 search (keyword/exact symbol)
-4. Grep fallback (git-aware: unstaged → staged → tracked → rg)
+4. Grep fallback
 5. Opportunistic JIT indexing of discovered files
 
 **Search modes:**

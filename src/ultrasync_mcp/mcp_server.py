@@ -163,14 +163,18 @@ MEMORY_MEDIUM_RELEVANCE_THRESHOLD = 0.3
 # ---------------------------------------------------------------------------
 # Tool Categories - controls which tools are exposed via ULTRASYNC_TOOLS env
 # ---------------------------------------------------------------------------
-# Default: search, index, watcher, sync (minimal set for core functionality)
+# Default: search,memory (semantic search + memory persistence)
 # Set ULTRASYNC_TOOLS=all for full access, or comma-separated categories
-# e.g., ULTRASYNC_TOOLS=search,index,conventions,graph
+# e.g., ULTRASYNC_TOOLS=search,memory,index,watcher,sync
 
 TOOL_CATEGORIES: dict[str, set[str]] = {
-    # Core search and memory operations
+    # Semantic code search
     "search": {
         "search",
+        "get_source",
+    },
+    # Memory persistence operations
+    "memory": {
         "memory_write",
         "memory_search",
         "memory_get",
@@ -181,7 +185,6 @@ TOOL_CATEGORIES: dict[str, set[str]] = {
         "memory_list_structured",
         "share_memory",
         "delete_memory",
-        "get_source",
     },
     # Indexing operations
     "index": {
@@ -285,7 +288,7 @@ TOOL_CATEGORIES: dict[str, set[str]] = {
 }
 
 # Default categories exposed when ULTRASYNC_TOOLS is not set
-DEFAULT_TOOL_CATEGORIES: set[str] = {"search", "index", "watcher", "sync"}
+DEFAULT_TOOL_CATEGORIES: set[str] = {"search", "memory"}
 
 
 def get_enabled_categories() -> set[str]:
@@ -649,6 +652,7 @@ class ServerState:
         self._persistent_thread_manager: "PersistentThreadManager | None" = None  # noqa: F821, UP037
         self._init_task: asyncio.Task[None] | None = None  # noqa: F821
         self._sync_manager: "SyncManager | None" = None  # noqa: F821, UP037
+        self._init_lock: asyncio.Lock | None = None  # protects concurrent init
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -676,24 +680,32 @@ class ServerState:
 
         Runs model loading in thread pool so MCP handshake can complete.
         Also performs a warmup embed to pay the cold-start cost upfront.
+
+        Uses a lock to prevent concurrent initialization from multiple tasks.
         """
         import asyncio
 
-        if self._embedder is None or self._jit_manager is None:
-            await asyncio.to_thread(self._ensure_jit_initialized)
+        # lazy init the lock (can't create in __init__ before event loop)
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
 
-        # warmup embed to pay cold-start cost (model graph compilation, etc.)
-        # this runs in background so MCP handshake isn't blocked
-        if self._embedder is not None:
-            import time
+        async with self._init_lock:
+            if self._embedder is None or self._jit_manager is None:
+                await asyncio.to_thread(self._ensure_jit_initialized)
 
-            logger.info("warming up embedding model...")
-            start = time.perf_counter()
-            await asyncio.to_thread(self._embedder.embed, "warmup")
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info(
-                "embedding model ready (warmup took %.0fms)", elapsed_ms
-            )
+            # warmup embed to pay cold-start cost (model graph compilation)
+            # this runs in background so MCP handshake isn't blocked
+            if self._embedder is not None and not hasattr(self, "_warmup_done"):
+                import time
+
+                logger.info("warming up embedding model...")
+                start = time.perf_counter()
+                await asyncio.to_thread(self._embedder.embed, "warmup")
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info(
+                    "embedding model ready (warmup took %.0fms)", elapsed_ms
+                )
+                self._warmup_done = True
 
     def _ensure_aot_initialized(self) -> None:
         """Try to load AOT GlobalIndex if it exists."""
@@ -987,6 +999,7 @@ class ServerState:
             resync_interval=300,  # 5 minutes
             batch_size=50,
             on_team_memory=on_team_memory,
+            graph_memory=self._jit_manager.graph,  # enable graph sync
         )
 
         started = await self._sync_manager.start()
@@ -4189,6 +4202,9 @@ After writing code, validate against conventions:
         their relationships. Run once on first startup or with
         force=True to re-bootstrap.
 
+        After bootstrap, updates the JIT manager and sync manager
+        to use the new graph so graph sync works immediately.
+
         Args:
             force: Re-bootstrap even if already done
 
@@ -4200,6 +4216,16 @@ After writing code, validate against conventions:
 
         graph = GraphMemory(state.jit_manager.tracker)
         stats = bootstrap_graph(state.jit_manager.tracker, graph, force=force)
+
+        # update jit manager to use the bootstrapped graph
+        if state._jit_manager is not None and state._jit_manager.graph is None:
+            state._jit_manager.graph = graph
+            logger.info("updated jit_manager.graph after bootstrap")
+
+        # update running sync manager to use the graph for sync
+        if state._sync_manager is not None:
+            state._sync_manager._graph_memory = graph
+            logger.info("updated sync_manager graph_memory after bootstrap")
 
         return {
             "file_nodes": stats.file_nodes,
@@ -4328,12 +4354,32 @@ After writing code, validate against conventions:
                 "error": "jit manager not initialized",
             }
 
+        # callback for importing team memories received via sync
+        def on_team_memory(payload: dict) -> None:
+            if state._jit_manager is None:
+                return
+            try:
+                state._jit_manager.memory.import_memory(
+                    memory_id=payload.get("id", ""),
+                    text=payload.get("text", ""),
+                    task=payload.get("task"),
+                    insights=payload.get("insights"),
+                    context=payload.get("context"),
+                    tags=payload.get("tags"),
+                    owner_id=payload.get("owner_id"),
+                    created_at=payload.get("created_at"),
+                )
+            except Exception as e:
+                logger.exception("failed to import team memory: %s", e)
+
         # create and start sync manager
         state._sync_manager = SyncManager(
             tracker=state._jit_manager.tracker,
             config=config,
             resync_interval=300,  # 5 minutes
             batch_size=50,
+            on_team_memory=on_team_memory,
+            graph_memory=state._jit_manager.graph,  # enable graph sync
         )
 
         started = await state._sync_manager.start()
