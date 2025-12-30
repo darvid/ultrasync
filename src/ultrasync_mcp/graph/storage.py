@@ -528,10 +528,10 @@ class GraphMemory:
         txn = self._get_txn(write=True)
         txn.put(kv_key, kv_value, db=kv_db)
 
-        # Store history
+        # Store history (full record, not just payload)
         hist_db = self._db(b"graph_policy_hist")
         hist_key = _composite_key(scope, namespace, key, rev)
-        txn.put(hist_key, payload_bytes, db=hist_db)
+        txn.put(hist_key, kv_value, db=hist_db)
 
         self._maybe_commit(txn)
         return record

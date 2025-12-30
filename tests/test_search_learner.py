@@ -126,7 +126,7 @@ class TestSearchLearnerWeakSearch:
     @pytest.mark.asyncio
     async def test_weak_search_starts_session(self, learner):
         event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "login button"},
             tool_result={"results": [{"score": 0.45, "key_hash": 123}]},
         )
@@ -143,7 +143,7 @@ class TestSearchLearnerWeakSearch:
     @pytest.mark.asyncio
     async def test_strong_search_no_session(self, learner):
         event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "login button"},
             tool_result={"results": [{"score": 0.85, "key_hash": 123}]},
         )
@@ -155,7 +155,7 @@ class TestSearchLearnerWeakSearch:
     @pytest.mark.asyncio
     async def test_empty_results_starts_session(self, learner):
         event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "nonexistent thing"},
             tool_result={"results": []},
         )
@@ -186,7 +186,7 @@ class TestSearchLearnerFallbackTracking:
     @pytest.mark.asyncio
     async def test_fallback_read_tracked(self, learner, tmp_path):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "login button"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -206,7 +206,7 @@ class TestSearchLearnerFallbackTracking:
     @pytest.mark.asyncio
     async def test_fallback_outside_project_ignored(self, learner, tmp_path):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "something"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -224,7 +224,7 @@ class TestSearchLearnerFallbackTracking:
     @pytest.mark.asyncio
     async def test_fallback_pattern_tracked(self, learner, tmp_path):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "login button"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -264,7 +264,7 @@ class TestSearchLearnerSessionResolution:
         self, learner, mock_jit_manager, tmp_path
     ):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "login button"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -291,7 +291,7 @@ class TestSearchLearnerSessionResolution:
     @pytest.mark.asyncio
     async def test_session_not_resolved_without_reads(self, learner):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "something"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -321,7 +321,7 @@ class TestSearchLearnerSessionExpiration:
     @pytest.mark.asyncio
     async def test_session_expires_without_fallback(self, learner):
         search_event = ToolCallEvent(
-            tool_name="mcp__ultrasync__jit_search",
+            tool_name="mcp__ultrasync__search",
             tool_input={"query": "something"},
             tool_result={"results": [{"score": 0.4}]},
         )
@@ -410,7 +410,7 @@ class TestExtractSearchResults:
 
 class TestConstants:
     def test_ultrasync_search_tools(self):
-        assert "mcp__ultrasync__jit_search" in ULTRASYNC_SEARCH_TOOLS
+        assert "mcp__ultrasync__search" in ULTRASYNC_SEARCH_TOOLS
 
     def test_fallback_read_tools(self):
         assert "Read" in FALLBACK_READ_TOOLS

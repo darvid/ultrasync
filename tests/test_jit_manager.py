@@ -349,7 +349,8 @@ class TestFullIndex(TestJITIndexManager):
         async for progress in manager.full_index(project_dir):
             progress_list.append(progress)
 
-        assert len(progress_list) == 5
+        # Progress is yielded per batch, not per file
+        assert len(progress_list) >= 1
         final = progress_list[-1]
         assert final.processed == 5
         assert final.total == 5

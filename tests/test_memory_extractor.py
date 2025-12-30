@@ -17,7 +17,7 @@ class TestMemoryExtractionConfig:
         monkeypatch.delenv("ULTRASYNC_MEMORY_AGGRESSIVENESS", raising=False)
         config = MemoryExtractionConfig.from_env()
         assert config.enabled is True
-        assert config.aggressiveness == "aggressive"
+        assert config.aggressiveness == "moderate"
 
     def test_env_disabled(self, monkeypatch):
         """Can disable via env var."""
@@ -143,38 +143,46 @@ class TestTaskInference:
 
     def test_debug_task_from_bash(self):
         """Bash tool suggests debugging."""
+        # Include decision pattern so extraction proceeds to task inference
         text = (
-            "Running the test suite to verify the fix works correctly "
-            "and all assertions pass."
+            "I decided to run the test suite to verify the fix works "
+            "correctly and all assertions pass."
         )
         result = self.extractor.extract(text, tools_used=["Bash"])
+        assert result.should_create is True
         assert result.task == "task:debug"
 
     def test_implement_task_from_write(self):
         """Write tool suggests implementation."""
+        # Include decision pattern so extraction proceeds to task inference
         text = (
-            "Creating the new authentication handler module with proper "
-            "session management."
+            "I decided to create the new authentication handler module "
+            "with proper session management."
         )
         result = self.extractor.extract(text, tools_used=["Write", "Edit"])
+        assert result.should_create is True
         assert result.task == "task:implement_feature"
 
     def test_review_task_from_read(self):
         """Read tool suggests review."""
+        # Include decision pattern so extraction proceeds to task inference
         text = (
-            "Analyzing the existing codebase structure to understand "
-            "the architecture patterns."
+            "I decided to analyze the existing codebase structure to "
+            "understand the architecture patterns."
         )
         result = self.extractor.extract(text, tools_used=["Read", "Grep"])
+        assert result.should_create is True
         assert result.task == "task:review"
 
     def test_general_task_for_unknown(self):
         """Unknown tools default to general task."""
+        # Include decision pattern so extraction proceeds to task inference
         text = (
-            "Working on something with unknown tools that don't map to "
-            "any specific task type."
+            "I decided to work on something with unknown tools that "
+            "don't map to any specific task type."
         )
         result = self.extractor.extract(text, tools_used=["UnknownTool"])
+        assert result.should_create is True
         assert result.task == "task:general"
 
 
@@ -187,9 +195,10 @@ class TestContextInference:
 
     def test_frontend_context(self):
         """Detects frontend context from file paths."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Updating the login component with better user experience "
-            "and improved form validation."
+            "I decided to update the login component with better user "
+            "experience and improved form validation."
         )
         result = self.extractor.extract(
             text,
@@ -198,13 +207,15 @@ class TestContextInference:
                 "/src/pages/dashboard.jsx",
             ],
         )
+        assert result.should_create is True
         assert "context:frontend" in result.context
 
     def test_backend_context(self):
         """Detects backend context from file paths."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Implementing the API endpoint with proper error handling "
-            "and validation logic."
+            "I decided to implement the API endpoint with proper error "
+            "handling and validation logic."
         )
         result = self.extractor.extract(
             text,
@@ -213,6 +224,7 @@ class TestContextInference:
                 "/src/api/routes.py",
             ],
         )
+        assert result.should_create is True
         assert (
             "context:backend" in result.context
             or "context:api" in result.context
@@ -220,21 +232,24 @@ class TestContextInference:
 
     def test_auth_context(self):
         """Detects auth context from file paths."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Fixing the session handling to properly refresh tokens "
-            "and prevent expired sessions."
+            "I decided to fix the session handling to properly refresh "
+            "tokens and prevent expired sessions."
         )
         result = self.extractor.extract(
             text,
             files_accessed=["/src/auth/session.py", "/src/login/handler.py"],
         )
+        assert result.should_create is True
         assert "context:auth" in result.context
 
     def test_testing_context(self):
         """Detects testing context from file paths."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Adding unit tests for the new feature to ensure coverage "
-            "and prevent regressions."
+            "I decided to add unit tests for the new feature to ensure "
+            "coverage and prevent regressions."
         )
         result = self.extractor.extract(
             text,
@@ -243,25 +258,29 @@ class TestContextInference:
                 "/src/__tests__/login.test.ts",
             ],
         )
+        assert result.should_create is True
         assert "context:testing" in result.context
 
     def test_infra_context(self):
         """Detects infrastructure context from file paths."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Updating the deployment configuration for better "
+            "I decided to update the deployment configuration for better "
             "resource allocation and scaling."
         )
         result = self.extractor.extract(
             text,
             files_accessed=["/docker/Dockerfile", "/k8s/deployment.yaml"],
         )
+        assert result.should_create is True
         assert "context:infra" in result.context
 
     def test_multiple_contexts(self):
         """Can detect multiple context types."""
+        # Include decision pattern so extraction proceeds to context inference
         text = (
-            "Updating both frontend components and tests to ensure "
-            "consistency across the app."
+            "I decided to update both frontend components and tests to "
+            "ensure consistency across the app."
         )
         result = self.extractor.extract(
             text,
@@ -270,18 +289,20 @@ class TestContextInference:
                 "/tests/test_app.py",
             ],
         )
+        assert result.should_create is True
         assert len(result.context) >= 2
 
 
 class TestAggressivenessLevels:
     """Test different aggressiveness levels."""
 
-    def test_aggressive_always_creates(self):
-        """Aggressive level creates memory for any content."""
+    def test_aggressive_creates_with_pattern(self):
+        """Aggressive level creates memory when patterns match."""
         extractor = MemoryExtractor(MemoryExtractionConfig.aggressive())
+        # Include a decision pattern
         text = (
-            "Just a simple statement without strong signals but long "
-            "enough to pass the minimum length."
+            "I decided to use a simple approach for this feature "
+            "to keep the implementation maintainable."
         )
         result = extractor.extract(text)
         assert result.should_create is True
@@ -407,17 +428,17 @@ class TestSkipReasons:
         assert result.should_create is False
         assert result.skip_reason == "text_too_short"
 
-    def test_skip_below_threshold(self):
-        """Skips when below aggressiveness threshold."""
+    def test_skip_no_patterns(self):
+        """Skips when no patterns match."""
         extractor = MemoryExtractor(MemoryExtractionConfig.conservative())
-        # Long enough text but no strong patterns
+        # Long enough text but no matching patterns
         text = (
             "Just a simple statement that is long enough to pass the "
             "minimum text length check but has no patterns."
         )
         result = extractor.extract(text)
         assert result.should_create is False
-        assert result.skip_reason == "below_threshold"
+        assert result.skip_reason == "no_patterns_matched"
 
 
 class TestExtractionResult:
@@ -428,6 +449,7 @@ class TestExtractionResult:
         result = ExtractionResult(
             should_create=True,
             text="test",
+            original_text="original test",
             task="task:debug",
             insights=["insight:decision"],
             context=["context:auth"],
@@ -437,6 +459,7 @@ class TestExtractionResult:
         )
         assert result.should_create is True
         assert result.text == "test"
+        assert result.original_text == "original test"
         assert result.task == "task:debug"
         assert result.insights == ["insight:decision"]
         assert result.context == ["context:auth"]
@@ -447,7 +470,9 @@ class TestExtractionResult:
 
     def test_result_defaults(self):
         """ExtractionResult has sensible defaults."""
-        result = ExtractionResult(should_create=False, text="test")
+        result = ExtractionResult(
+            should_create=False, text="test", original_text="original"
+        )
         assert result.task is None
         assert result.insights == []
         assert result.context == []
@@ -463,14 +488,16 @@ class TestSymbolKeys:
     def test_generates_symbol_keys(self):
         """Generates symbol keys from file paths."""
         extractor = MemoryExtractor(MemoryExtractionConfig.aggressive())
+        # Include decision pattern so extraction proceeds to symbol key gen
         text = (
-            "Working on the authentication module with proper session "
-            "handling and token refresh."
+            "I decided to work on the authentication module with proper "
+            "session handling and token refresh."
         )
         result = extractor.extract(
             text,
             files_accessed=["/src/auth.py", "/src/login.py"],
         )
+        assert result.should_create is True
         assert len(result.symbol_keys) == 2
         # Keys should be integers (hash values)
         for key in result.symbol_keys:

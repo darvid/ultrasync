@@ -575,8 +575,9 @@ class TestConventionManager:
         )
 
         stats = manager.get_stats()
-        assert stats["convention:style"] == 2
-        assert stats["convention:security"] == 1
+        assert stats["by_category"]["convention:style"] == 2
+        assert stats["by_category"]["convention:security"] == 1
+        assert stats["total"] == 3
 
     def test_export_yaml(self, manager):
         manager.add(
