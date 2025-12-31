@@ -3,6 +3,29 @@
 Semantic indexing and search for codebases. Exposes an MCP server
 for integration with coding agents.
 
+## TLDR
+
+(not written by AI)
+
+- Semantic, lexical, and RRF indexing and search for codebases.
+  - Results in sub-second response times for most search queries on
+    indexed codebases.
+  - Index and blob data stored in `.ultrasync` directory, be sure to
+    gitignore.
+- Structured memory and recall tools, _without_:
+  - Additional LLM calls
+  - Convoluted, vibe slopped together abstractions or interfaces
+  - Pollution of repository with arbitrary "human readable" Markdown
+    slop files
+- Network-speed pattern recognition based heuristics for classification
+  of contexts and codebase insights (like inferring TODOs, comments,
+  code smells, etc.).
+  - Intentionally fuzzy heuristics to improve p50 performance
+    dramatically and reduce token spend for some of the most common
+    codebase understanding tasks.
+- Exposes an MCP server for integration with coding agents, virtually
+  no configuration required. No additional processes. Fully local.
+
 ## Features
 
 ### Indexing Architecture
