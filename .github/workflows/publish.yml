@@ -3,6 +3,9 @@ name: Publish to PyPI
 on:
     release:
         types: [published]
+    pull_request:
+        branches: [main]
+        types: [closed]
     workflow_call:
     workflow_dispatch:
         inputs:
@@ -14,26 +17,68 @@ on:
 
 env:
     CARGO_TERM_COLOR: always
+    RELEASE_BRANCH: release/next
 
 jobs:
+    # gate: only run if this is a merged release PR or manual trigger
+    check:
+        name: Check if release PR
+        runs-on: ubuntu-latest
+        outputs:
+            should_publish: ${{ steps.check.outputs.should_publish }}
+        steps:
+            - name: Check trigger
+              id: check
+              run: |
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+                      echo "Manual trigger - proceeding"
+                      echo "should_publish=true" >> $GITHUB_OUTPUT
+                  elif [[ "${{ github.event_name }}" == "release" ]]; then
+                      echo "Release trigger - proceeding"
+                      echo "should_publish=true" >> $GITHUB_OUTPUT
+                  elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+                      echo "Workflow call - proceeding"
+                      echo "should_publish=true" >> $GITHUB_OUTPUT
+                  elif [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
+                      if [[ "${{ github.event.pull_request.head.ref }}" == "${{ env.RELEASE_BRANCH }}" ]]; then
+                          echo "Release PR merged - proceeding"
+                          echo "should_publish=true" >> $GITHUB_OUTPUT
+                      else
+                          echo "Not a release PR - skipping"
+                          echo "should_publish=false" >> $GITHUB_OUTPUT
+                      fi
+                  else
+                      echo "PR not merged - skipping"
+                      echo "should_publish=false" >> $GITHUB_OUTPUT
+                  fi
+
     ci:
         name: CI checks
+        needs: check
+        if: needs.check.outputs.should_publish == 'true'
         uses: ./.github/workflows/lint.yml
 
     test:
         name: Tests
+        needs: check
+        if: needs.check.outputs.should_publish == 'true'
         uses: ./.github/workflows/test.yml
 
     rust:
         name: Rust build
+        needs: check
+        if: needs.check.outputs.should_publish == 'true'
         uses: ./.github/workflows/rust.yml
 
     security:
         name: Security scan
+        needs: check
+        if: needs.check.outputs.should_publish == 'true'
         uses: ./.github/workflows/security.yml
 
     build-rust-wheels:
-        needs: [ci, test, rust, security]
+        needs: [check, ci, test, rust, security]
+        if: needs.check.outputs.should_publish == 'true'
         name: Build Rust wheels (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
         strategy:
