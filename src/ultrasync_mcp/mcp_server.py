@@ -1040,6 +1040,65 @@ class ServerState:
             return self._sync_manager.get_stats()
         return None
 
+    async def start_compaction_loop(
+        self,
+        interval_seconds: int = 3600,  # 1 hour default
+        initial_delay: int = 300,  # 5 min delay before first check
+    ) -> None:
+        """Start background compaction loop.
+
+        Periodically checks if compaction is needed and runs it.
+        Uses conservative thresholds to avoid unnecessary work.
+        """
+        self._compaction_stop_event = asyncio.Event()
+
+        # wait for index manager to be ready
+        stop = self._compaction_stop_event
+        while self._jit_manager is None and not stop.is_set():
+            await asyncio.sleep(1)
+
+        if self._compaction_stop_event.is_set():
+            return
+
+        # initial delay to let system settle after startup
+        try:
+            await asyncio.wait_for(
+                self._compaction_stop_event.wait(),
+                timeout=initial_delay,
+            )
+            return  # stop event set during initial delay
+        except asyncio.TimeoutError:
+            pass  # normal - initial delay elapsed
+
+        logger.info("compaction loop started, interval=%ds", interval_seconds)
+
+        while not self._compaction_stop_event.is_set():
+            try:
+                if self._jit_manager:
+                    result = self._jit_manager.maybe_compact()
+                    if result.get("errors"):
+                        for err in result["errors"]:
+                            logger.warning("compaction error: %s", err)
+            except Exception as e:
+                logger.exception("compaction loop error: %s", e)
+
+            # wait for next interval or stop
+            try:
+                await asyncio.wait_for(
+                    self._compaction_stop_event.wait(),
+                    timeout=interval_seconds,
+                )
+                break  # stop event set
+            except asyncio.TimeoutError:
+                pass  # normal - interval elapsed, run again
+
+        logger.info("compaction loop stopped")
+
+    async def stop_compaction_loop(self) -> None:
+        """Stop the compaction loop."""
+        if hasattr(self, "_compaction_stop_event"):
+            self._compaction_stop_event.set()
+
 
 def create_server(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
@@ -1117,6 +1176,9 @@ def create_server(
         logger.info("launching sync manager in background...")
         sync_task = asyncio.create_task(state.start_sync_manager())
 
+        # launch compaction loop (checks hourly, with 5 min initial delay)
+        compaction_task = asyncio.create_task(state.start_compaction_loop())
+
         # yield to event loop so tasks can start before MCP handshake
         await asyncio.sleep(0)
 
@@ -1146,6 +1208,15 @@ def create_server(
         if state.sync_manager:
             logger.info("stopping sync manager...")
             await state.stop_sync_manager()
+
+        # stop compaction loop
+        await state.stop_compaction_loop()
+        if compaction_task:
+            compaction_task.cancel()
+            try:
+                await compaction_task
+            except asyncio.CancelledError:
+                pass
 
     mcp = FastMCP(
         "ultrasync",

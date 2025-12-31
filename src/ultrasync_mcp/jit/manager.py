@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -1988,6 +1988,90 @@ class JITIndexManager:
                 success=False,
                 error=str(e),
             )
+
+    def maybe_compact(
+        self,
+        waste_threshold_pct: float = 20.0,
+        min_waste_bytes: int = 50 * 1024 * 1024,  # 50MB
+    ) -> dict[str, Any]:
+        """Check if compaction is needed and compact if thresholds exceeded.
+
+        Checks both vector store and LMDB tracker. Compacts if:
+        - Waste ratio > waste_threshold_pct AND
+        - Waste bytes > min_waste_bytes
+
+        Args:
+            waste_threshold_pct: Min waste % to trigger (default 20%)
+            min_waste_bytes: Min waste bytes to trigger (default 50MB)
+
+        Returns:
+            Dict with compaction results for vectors and lmdb
+        """
+        result = {
+            "vectors_compacted": False,
+            "lmdb_compacted": False,
+            "vectors_reclaimed": 0,
+            "lmdb_reclaimed": 0,
+            "errors": [],
+        }
+
+        # Check and compact vectors
+        try:
+            vec_stats = self.vector_store.stats()
+            waste_bytes = vec_stats.dead_bytes
+            waste_pct = vec_stats.waste_ratio * 100
+
+            over_pct = waste_pct > waste_threshold_pct
+            over_bytes = waste_bytes > min_waste_bytes
+            needs_compact = over_pct and over_bytes
+            if needs_compact:
+                logger.info(
+                    "vector compaction triggered",
+                    waste_pct=f"{waste_pct:.1f}%",
+                    waste_mb=f"{waste_bytes / 1024**2:.1f}",
+                )
+                vec_result = self.compact_vectors(force=True)
+                if vec_result.success:
+                    result["vectors_compacted"] = True
+                    result["vectors_reclaimed"] = vec_result.bytes_reclaimed
+                else:
+                    result["errors"].append(f"vectors: {vec_result.error}")
+        except Exception as e:
+            result["errors"].append(f"vectors check: {e}")
+
+        # Check and compact LMDB
+        try:
+            db_stats = self.tracker.get_db_stats()
+            file_size = db_stats.get("file_size", 0)
+            est_waste = db_stats.get("estimated_waste", 0)
+            waste_pct = (est_waste / file_size * 100) if file_size > 0 else 0
+
+            if waste_pct > waste_threshold_pct and est_waste > min_waste_bytes:
+                logger.info(
+                    "lmdb compaction triggered",
+                    waste_pct=f"{waste_pct:.1f}%",
+                    waste_mb=f"{est_waste / 1024**2:.1f}",
+                )
+                lmdb_result = self.tracker.compact(force=True)
+                if lmdb_result.get("success"):
+                    result["lmdb_compacted"] = True
+                    reclaimed = lmdb_result.get("bytes_reclaimed", 0)
+                    result["lmdb_reclaimed"] = reclaimed
+                else:
+                    err = lmdb_result.get("error", "unknown")
+                    result["errors"].append(f"lmdb: {err}")
+        except Exception as e:
+            result["errors"].append(f"lmdb check: {e}")
+
+        total_reclaimed = result["vectors_reclaimed"] + result["lmdb_reclaimed"]
+        if total_reclaimed > 0:
+            logger.info(
+                "compaction complete",
+                vectors_mb=f"{result['vectors_reclaimed'] / 1024**2:.1f}",
+                lmdb_mb=f"{result['lmdb_reclaimed'] / 1024**2:.1f}",
+            )
+
+        return result
 
     def get_vector(self, key_hash: int):
         return self.vector_cache.get(key_hash)

@@ -2873,6 +2873,7 @@ class FileTracker:
         # create temp directory for compacted copy
         temp_dir = tempfile.mkdtemp(prefix="lmdb_compact_")
         compact_path = Path(temp_dir) / "compacted"
+        compact_path.mkdir(parents=True, exist_ok=True)  # LMDB needs this!
 
         try:
             # copy with compaction
