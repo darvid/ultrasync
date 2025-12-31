@@ -248,6 +248,9 @@ class SyncConfig:
     user_id: str | None = field(default=None)
     # client_root is set from MCP list_roots() when available
     client_root: str | None = field(default=None)
+    # org_id and project_id are set after successful authentication
+    org_id: str | None = field(default=None)
+    project_id: str | None = field(default=None)
 
     @property
     def is_enabled(self) -> bool:
@@ -1014,8 +1017,8 @@ class SyncClient:
     async def push_vectors(
         self,
         manager: JITIndexManager,
-        org_id: str,
-        project_id: str,
+        org_id: str | None = None,
+        project_id: str | None = None,
         batch_size: int = 500,
     ) -> dict[str, Any]:
         """Push embeddings to the server via HTTP with gzip compression.
@@ -1025,21 +1028,38 @@ class SyncClient:
 
         Args:
             manager: JITIndexManager with vector store
-            org_id: Organization UUID
-            project_id: Project UUID
+            org_id: Organization UUID (derived from token if not provided)
+            project_id: Project UUID (derived from git_remote if not provided)
             batch_size: Number of vectors per batch (default 500)
 
         Returns:
             Dict with total_count, batch_count, errors
         """
-        try:
-            import aiohttp  # noqa: F401 - checked here, used in _push_vector_batch
-        except ImportError:
-            logger.warning("aiohttp not installed, cannot push vectors")
-            return {"error": "aiohttp not installed", "total_count": 0}
+        import aiohttp
 
         if not self.config.is_configured:
             return {"error": "sync not configured", "total_count": 0}
+
+        # derive org_id and project_id if not provided (like other methods)
+        if org_id is None or project_id is None:
+            base_url = self.config.url.rstrip("/")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return {
+                            "error": "token verify failed",
+                            "total_count": 0,
+                        }
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
 
         url = f"{self.config.url}/api/vectors/{org_id}/{project_id}"
         headers = {
@@ -1092,7 +1112,7 @@ class SyncClient:
                 vectors_batch = []
 
         # Also push symbol vectors
-        for symbol in manager.tracker.iter_symbols():
+        for symbol in manager.tracker.iter_all_symbols():
             if symbol.vector_offset is None:
                 continue
 
@@ -2462,6 +2482,33 @@ class SyncManager:
             len(progress.errors),
         )
 
+        # auto-bootstrap graph if index exists but graph isn't bootstrapped yet
+        if self._graph_memory is None and self._jit_manager is not None:
+            try:
+                from ultrasync_mcp.graph import GraphMemory
+                from ultrasync_mcp.graph.bootstrap import (
+                    bootstrap_graph,
+                    is_bootstrapped,
+                )
+
+                tracker = self._jit_manager.tracker
+                if not is_bootstrapped(tracker):
+                    logger.info("auto-bootstrapping graph for first sync...")
+                    graph = GraphMemory(tracker)
+                    stats = bootstrap_graph(tracker, graph, force=False)
+                    self._graph_memory = graph
+                    # also update jit_manager so it has graph for future use
+                    if self._jit_manager.graph is None:
+                        self._jit_manager.graph = graph
+                    logger.info(
+                        "graph bootstrap: %d files, %d symbols, %d memories",
+                        stats.file_nodes,
+                        stats.symbol_nodes,
+                        stats.memory_nodes,
+                    )
+            except Exception as e:
+                logger.warning("auto-bootstrap failed: %s", e)
+
         # sync graph if GraphMemory is configured
         if self._graph_memory:
             graph_result = await self.sync_full_graph()
@@ -2479,8 +2526,6 @@ class SyncManager:
             try:
                 vector_result = await self._client.push_vectors(
                     manager=self._jit_manager,
-                    org_id=self.config.org_id,
-                    project_id=self.config.project_id,
                     batch_size=500,
                 )
                 self.stats.vectors_synced = vector_result.get("total_pushed", 0)

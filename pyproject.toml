@@ -61,6 +61,7 @@ secrets = [
 ]
 sync = [
   "python-socketio[asyncio_client]>=5.11.0",  # async socket.io for sync server
+  "aiohttp>=3.9.0",  # async HTTP for sync client
 ]
 
 [dependency-groups]

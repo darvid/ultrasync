@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.utilities.dependencies import CurrentContext
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -155,6 +154,10 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get(
 # env var for enabling transcript watching
 ENV_WATCH_TRANSCRIPTS = "ULTRASYNC_WATCH_TRANSCRIPTS"
 
+# env var for setting client project root (overrides MCP list_roots)
+# useful when running with --directory but syncing to a different project
+ENV_CLIENT_ROOT = "ULTRASYNC_CLIENT_ROOT"
+
 # memory relevance thresholds for tiered display
 # high relevance = show FIRST as "prior context" (before code results)
 # medium relevance = show after results as supplementary
@@ -290,6 +293,7 @@ TOOL_CATEGORIES: dict[str, set[str]] = {
 }
 
 # Default categories exposed when ULTRASYNC_TOOLS is not set
+# NOTE: sync is part of team plan, not included by default
 DEFAULT_TOOL_CATEGORIES: set[str] = {"search", "memory"}
 
 
@@ -655,7 +659,21 @@ class ServerState:
         self._init_task: asyncio.Task[None] | None = None  # noqa: F821
         self._sync_manager: "SyncManager | None" = None  # noqa: F821, UP037
         self._init_lock: asyncio.Lock | None = None  # protects concurrent init
-        self._client_root: str | None = None  # detected from MCP list_roots()
+        # client_root: from MCP list_roots() or ULTRASYNC_CLIENT_ROOT env
+        env_client_root = os.environ.get(ENV_CLIENT_ROOT)
+        if env_client_root:
+            self._client_root = env_client_root
+            logger.info("client root from env: %s", env_client_root)
+        else:
+            self._client_root = None
+            # warn if running with explicit --directory but no CLIENT_ROOT set
+            if root is not None:
+                logger.warning(
+                    "running with --directory=%s but no CLIENT_ROOT set. "
+                    "sync uses this dir initially. set ULTRASYNC_CLIENT_ROOT "
+                    "to the client project path for project isolation.",
+                    root,
+                )
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -1005,6 +1023,11 @@ class ServerState:
                 )
 
         config = SyncConfig()
+        logger.info(
+            "SyncConfig created: git_remote=%s project_name=%s",
+            config.git_remote,
+            config.project_name,
+        )
         if not config.is_configured:
             logger.warning(
                 "sync enabled but not configured - set "
@@ -1014,10 +1037,20 @@ class ServerState:
 
         # update config with client root if provided
         if client_root:
+            logger.info("updating config from client_root: %s", client_root)
             config.update_from_client_root(client_root)
         # also check if we have a stored client root
         elif self._client_root:
+            logger.info(
+                "updating config from _client_root: %s", self._client_root
+            )  # noqa: E501
             config.update_from_client_root(self._client_root)
+
+        logger.info(
+            "SyncConfig after update: git_remote=%s project_name=%s",
+            config.git_remote,
+            config.project_name,
+        )
 
         # ensure index manager is ready (needed for tracker access)
         await self._init_index_manager_async()
@@ -1066,11 +1099,46 @@ class ServerState:
             await self._sync_manager.stop()
             self._sync_manager = None
 
+    async def _reconnect_sync_manager(self) -> None:
+        """Stop and restart sync manager with updated config.
+
+        Called when client root changes and git_remote is different,
+        requiring a fresh connection with the correct project ID.
+        This does a full stop/start to ensure a new initial sync happens.
+        """
+        if not self._sync_manager:
+            return
+
+        try:
+            old_config = self._sync_manager.config
+            logger.info(
+                "restarting sync manager for project switch: %s",
+                old_config.git_remote,
+            )
+
+            # stop the old sync manager completely
+            await self._sync_manager.stop()
+            self._sync_manager = None
+
+            # small delay
+            await asyncio.sleep(0.5)
+
+            # start fresh with updated config (uses self._client_root)
+            logger.info("starting fresh sync manager...")
+            await self.start_sync_manager()
+
+        except Exception as e:
+            logger.error("failed to restart sync manager: %s", e)
+
     def set_client_root(self, root: str) -> None:
         """Set the client workspace root from MCP list_roots().
 
         This should be called as early as possible (e.g., from the first
         tool call) to ensure correct project isolation for sync.
+
+        When the client root changes (e.g., user switches projects), this
+        method updates the JIT data directory and reinitializes the JIT
+        manager to use the correct project's database files.
 
         Args:
             root: The client's workspace root directory path
@@ -1078,8 +1146,31 @@ class ServerState:
         if self._client_root == root:
             return  # already set
 
-        logger.info("client root detected: %s", root)
+        old_root = self._client_root
+        logger.info("client root detected: %s (previous: %s)", root, old_root)
         self._client_root = root
+
+        # update JIT data directory to use the new project's .ultrasync folder
+        new_jit_data_dir = Path(root) / ".ultrasync"
+        if new_jit_data_dir != self._jit_data_dir:
+            old_jit_dir = self._jit_data_dir
+            self._jit_data_dir = new_jit_data_dir
+            logger.info(
+                "jit data dir changed: %s -> %s", old_jit_dir, new_jit_data_dir
+            )
+
+            # reinitialize jit_manager if it was already created with old path
+            if self._jit_manager is not None:
+                logger.info(
+                    "reinitializing jit_manager for new project data directory"
+                )
+                # close old manager's resources if it has a close method
+                if hasattr(self._jit_manager, "close"):
+                    try:
+                        self._jit_manager.close()
+                    except Exception as e:
+                        logger.warning("error closing old jit_manager: %s", e)
+                self._jit_manager = None  # will be recreated on next access
 
         # update sync manager config if already running
         if self._sync_manager and self._sync_manager.config:
@@ -1089,10 +1180,13 @@ class ServerState:
             if old_remote != new_remote:
                 logger.warning(
                     "sync manager git_remote changed after connect! "
-                    "old=%s new=%s. reconnect may be needed.",
+                    "old=%s new=%s - triggering reconnect",
                     old_remote,
                     new_remote,
                 )
+                # schedule reconnect in background - disconnect will trigger
+                # the sync loop to reconnect with updated config
+                asyncio.create_task(self._reconnect_sync_manager())
 
     @property
     def client_root(self) -> str | None:
@@ -1254,6 +1348,9 @@ def create_server(
             watcher_task = asyncio.create_task(state.start_watcher())
 
         # launch sync manager in background (handles connect + initial sync)
+        # NOTE: if running with --directory (local dev), sync will initially
+        # use wrong project. When first tool call detects real client root,
+        # set_client_root() triggers a reconnect with correct project.
         logger.info("launching sync manager in background...")
         sync_task = asyncio.create_task(state.start_sync_manager())
 
@@ -1451,34 +1548,48 @@ After writing code, validate against conventions:
         """Detect client workspace root from MCP list_roots().
 
         This should be called early in tool execution to ensure correct
-        project isolation for sync. Caches the result in state.
+        project isolation for sync. Always calls list_roots() to detect
+        if the client has switched projects (e.g., user opened a new
+        workspace in Claude).
+
+        If the detected root differs from current config, set_client_root()
+        will trigger a sync reconnect with the correct project.
 
         Args:
-            ctx: MCP context from CurrentContext()
+            ctx: MCP context (auto-injected)
 
         Returns:
             The detected client root path, or None if not available
         """
-        # already detected
-        if state.client_root:
+        if ctx is None:
+            logger.warning(
+                "_detect_client_root: ctx is None, cannot call list_roots"
+            )
             return state.client_root
 
         try:
-            roots = await ctx.list_roots()
+            # list_roots is on session, not Context directly
+            roots = await ctx.session.list_roots()
+            logger.info("list_roots returned: %s", roots)
             if roots:
                 # use first root (typically the project root)
                 root_uri = roots[0].uri
+                logger.info("using root_uri: %s", root_uri)
                 # convert file:// URI to path
                 if root_uri.startswith("file://"):
                     root_path = root_uri[7:]  # strip file://
                 else:
                     root_path = root_uri
+                logger.info("resolved root_path: %s", root_path)
+                # set_client_root handles change detection, jit reinit,
+                # and sync reconnect if git_remote changed
                 state.set_client_root(root_path)
                 return root_path
         except Exception as e:
-            logger.debug("list_roots failed: %s", e)
+            logger.warning("list_roots failed: %s", e)
 
-        return None
+        # fall back to cached root if list_roots fails
+        return state.client_root
 
     @tool_if_enabled
     def memory_write(
@@ -2276,7 +2387,7 @@ After writing code, validate against conventions:
         recency_bias: bool = False,
         recency_config: Literal["default", "aggressive", "mild"] | None = None,
         include_memories: bool = True,
-        ctx: Context = CurrentContext(),  # noqa: B008 - FastMCP DI pattern
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects real context
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -2791,7 +2902,10 @@ After writing code, validate against conventions:
         ]
 
     @tool_if_enabled
-    async def share_memory(memory_id: str) -> dict[str, Any]:
+    async def share_memory(
+        memory_id: str,
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
+    ) -> dict[str, Any]:
         """Share a personal memory with your team.
 
         Promotes a personal memory to team-shared visibility. The memory
@@ -2807,6 +2921,10 @@ After writing code, validate against conventions:
         Returns:
             Status dict with shared=True on success, or error message
         """
+        # detect client root and start sync if needed
+        if ctx:
+            await _detect_client_root(ctx)
+
         # check if sync is available
         if state.sync_manager is None:
             return {
@@ -2854,6 +2972,7 @@ After writing code, validate against conventions:
     @tool_if_enabled
     async def share_memories_batch(
         memory_ids: list[str],
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
     ) -> dict[str, Any]:
         """Share multiple personal memories with your team in one request.
 
@@ -2867,6 +2986,10 @@ After writing code, validate against conventions:
         Returns:
             Dict with total, success count, error count, and per-memory results
         """
+        # detect client root and start sync if needed
+        if ctx:
+            await _detect_client_root(ctx)
+
         if state.sync_manager is None:
             return {
                 "success": False,
@@ -4686,12 +4809,18 @@ After writing code, validate against conventions:
         return {"disconnected": True, "was_connected": True}
 
     @tool_if_enabled
-    def sync_status() -> dict[str, Any]:
+    async def sync_status(
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
+    ) -> dict[str, Any]:
         """Get current sync connection status.
 
         Returns:
             Connection status and configuration
         """
+        # detect client root for project isolation
+        if ctx:
+            await _detect_client_root(ctx)
+
         try:
             from ultrasync_mcp.sync_client import is_remote_sync_enabled
         except ImportError:
@@ -4724,6 +4853,10 @@ After writing code, validate against conventions:
                 if manager.config.is_configured
                 else None
             ),
+            # debug info for project isolation
+            "client_root": state.client_root,
+            "git_remote": manager.config.git_remote,
+            "jit_data_dir": str(state._jit_data_dir),
         }
 
         # add stats from sync manager
@@ -4734,6 +4867,9 @@ After writing code, validate against conventions:
                 "last_sync_at": stats.last_sync_at,
                 "files_synced": stats.files_synced,
                 "memories_synced": stats.memories_synced,
+                "graph_nodes_synced": stats.graph_nodes_synced,
+                "graph_edges_synced": stats.graph_edges_synced,
+                "vectors_synced": stats.vectors_synced,
                 "total_syncs": stats.total_syncs,
                 "resync_interval_seconds": stats.resync_interval_seconds,
                 "errors": stats.errors[-5:] if stats.errors else [],
@@ -4749,6 +4885,7 @@ After writing code, validate against conventions:
     async def sync_push_file(
         path: str,
         symbols: list[dict[str, Any]] | None = None,
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
     ) -> dict[str, Any]:
         """Push a file's index data to the sync server.
 
@@ -4761,6 +4898,10 @@ After writing code, validate against conventions:
         Returns:
             Sync result with server_seq
         """
+        # detect client root and start sync if needed
+        if ctx:
+            await _detect_client_root(ctx)
+
         client = state.sync_client
         if client is None or not client.connected:
             return {"synced": False, "error": "not connected"}
@@ -4795,6 +4936,7 @@ After writing code, validate against conventions:
     @tool_if_enabled
     async def sync_push_memory(
         memory_id: str,
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
     ) -> dict[str, Any]:
         """Push a memory entry to the sync server.
 
@@ -4806,6 +4948,10 @@ After writing code, validate against conventions:
         Returns:
             Sync result with server_seq
         """
+        # detect client root and start sync if needed
+        if ctx:
+            await _detect_client_root(ctx)
+
         client = state.sync_client
         if client is None or not client.connected:
             return {"synced": False, "error": "not connected"}
