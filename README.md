@@ -26,6 +26,44 @@ for integration with coding agents.
 - Exposes an MCP server for integration with coding agents, virtually
   no configuration required. No additional processes. Fully local.
 
+## Quickstart
+
+```shell
+uv tool install "ultrasync-mcp[cli,lexical,secrets]"
+# or, if you have sync:
+uv tool install "ultrasync-mcp[cli,lexical,secrets,sync]"
+```
+
+Then update your MCP server configuration for your coding agent of
+(currently Claude Code and Codex supported), e.g.:
+
+```jsonc
+{
+  "ultrasync": {
+    "type": "stdio",
+    "command": "uv",
+    "args": [
+      "tool",
+      "run",
+      "--from",
+      "ultrasync-mcp",
+      "ultrasync",
+      "mcp"
+    ],
+    "env": {
+      // Uncomment below if using remote sync
+      // "ULTRASYNC_REMOTE_SYNC": "true",
+      // "ULTRASYNC_SYNC_URL": "https://mcp.ultrasync.dev",
+      // "ULTRASYNC_SYNC_TOKEN": "uss_...,
+
+      // ULTRASYNC_TOOLS defaults to search,memory
+      // If using remote sync, add "sync" to the list
+      "ULTRASYNC_TOOLS": "search,memory,sync"
+    }
+  }
+}
+```
+
 ## Features
 
 ### Indexing Architecture
