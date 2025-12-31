@@ -162,6 +162,40 @@ memory integration (prior decisions/constraints).
 - **Utilities**: `get_stats`, `recently_indexed`, `compute_hash`,
   `get_source`, `compact_vectors`, `watcher_start/stop/reprocess`
 
+#### Tool Categories
+
+By default, only essential tools are loaded to reduce noise in agent
+tool lists. Control which tools are exposed via the `ULTRASYNC_TOOLS`
+environment variable:
+
+```bash
+# Default: search + memory only (recommended for most use cases)
+ULTRASYNC_TOOLS=search,memory
+
+# Enable all 70+ tools
+ULTRASYNC_TOOLS=all
+
+# Enable specific categories
+ULTRASYNC_TOOLS=search,memory,index,sync
+```
+
+**Available categories:**
+
+| Category      | Tools                                              |
+|---------------|----------------------------------------------------|
+| `search`      | `search`, `get_source`                             |
+| `memory`      | `memory_write`, `memory_search`, `memory_get`, ... |
+| `index`       | `index_file`, `index_directory`, `full_index`, ... |
+| `watcher`     | `watcher_stats`, `watcher_start/stop/reprocess`    |
+| `sync`        | `sync_connect`, `sync_status`, `sync_push_*`, ...  |
+| `session`     | `session_thread_list/get/search_queries`, ...      |
+| `patterns`    | `pattern_load`, `pattern_scan`, `pattern_list`     |
+| `anchors`     | `anchor_list_types`, `anchor_scan_*`, ...          |
+| `conventions` | `convention_add/list/search/get/delete`, ...       |
+| `ir`          | `ir_extract`, `ir_trace_endpoint`, `ir_summarize`  |
+| `graph`       | `graph_put/get_node`, `graph_*_edge`, ...          |
+| `context`     | `search_grep_cache`, `list_contexts`, ...          |
+
 ## Installation
 
 We recommend installing `ultrasync` as a tool with `uv tool` or `uvx`.
@@ -192,6 +226,21 @@ Add the following to your `mcpServers` or equivalent configuration:
       "ultrasync",
       "mcp"
     ]
+  }
+}
+```
+
+To enable additional tool categories, add the `env` field:
+
+```json
+{
+  "ultrasync": {
+    "type": "stdio",
+    "command": "/path/to/uv",
+    "args": ["tool", "run", "ultrasync", "mcp"],
+    "env": {
+      "ULTRASYNC_TOOLS": "search,memory,index,sync"
+    }
   }
 }
 ```
