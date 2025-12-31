@@ -64,11 +64,14 @@ def is_remote_sync_enabled() -> bool:
     return val in ("true", "1", "yes", "on")
 
 
-def _get_git_remote() -> str:
+def _get_git_remote(cwd: str | None = None) -> str:
     """Get full git remote origin URL for shared project derivation.
 
     Returns the normalized git remote URL. All team members on the same
     repo will get the same URL, enabling shared project IDs.
+
+    Args:
+        cwd: Working directory to run git from. If None, uses process cwd.
 
     Normalization:
     - Strips .git suffix
@@ -84,6 +87,7 @@ def _get_git_remote() -> str:
             capture_output=True,
             text=True,
             timeout=2,
+            cwd=cwd,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -91,8 +95,9 @@ def _get_git_remote() -> str:
     except Exception:
         pass
 
-    # fallback to current directory name
-    return os.path.basename(os.getcwd())
+    # fallback to directory name (use provided cwd or process cwd)
+    fallback_dir = cwd if cwd else os.getcwd()
+    return os.path.basename(fallback_dir)
 
 
 def _normalize_git_remote(url: str) -> str:
@@ -123,13 +128,16 @@ def _normalize_git_remote(url: str) -> str:
     return normalized
 
 
-def _get_project_name() -> str:
+def _get_project_name(cwd: str | None = None) -> str:
     """Get project name from env or auto-detect from git.
 
     Returns the project name for sync isolation. Uses:
     1. ULTRASYNC_SYNC_PROJECT_NAME env var if set
     2. Git remote origin URL (extracts repo name)
     3. Current directory name as fallback
+
+    Args:
+        cwd: Working directory to run git from. If None, uses process cwd.
 
     Note: For multiplayer sync, use _get_git_remote() instead to get
     the full normalized remote URL for shared project ID derivation.
@@ -148,6 +156,7 @@ def _get_project_name() -> str:
             capture_output=True,
             text=True,
             timeout=2,
+            cwd=cwd,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -161,8 +170,9 @@ def _get_project_name() -> str:
     except Exception:
         pass
 
-    # fallback to current directory name
-    return os.path.basename(os.getcwd())
+    # fallback to directory name (use provided cwd or process cwd)
+    fallback_dir = cwd if cwd else os.getcwd()
+    return os.path.basename(fallback_dir)
 
 
 def derive_shared_project_id(git_remote: str, org_id: str) -> str:
@@ -236,6 +246,8 @@ class SyncConfig:
     )
     # user_id is set after token verification (from token claims)
     user_id: str | None = field(default=None)
+    # client_root is set from MCP list_roots() when available
+    client_root: str | None = field(default=None)
 
     @property
     def is_enabled(self) -> bool:
@@ -246,6 +258,36 @@ class SyncConfig:
     def is_configured(self) -> bool:
         """Check if sync is properly configured (url and token required)."""
         return bool(self.url and self.token)
+
+    def update_from_client_root(self, client_root: str) -> None:
+        """Update git_remote and project_name from client workspace root.
+
+        Call this when the client's actual workspace root is known (e.g.,
+        from MCP list_roots()). This ensures project isolation works correctly
+        when the MCP server runs from a different directory than the client.
+
+        Args:
+            client_root: The client's workspace root directory path
+        """
+        self.client_root = client_root
+        new_remote = _get_git_remote(cwd=client_root)
+        new_name = _get_project_name(cwd=client_root)
+
+        if new_remote != self.git_remote:
+            logger.info(
+                "updating git_remote from client root: %s -> %s",
+                self.git_remote,
+                new_remote,
+            )
+            self.git_remote = new_remote
+
+        if new_name != self.project_name:
+            logger.info(
+                "updating project_name from client root: %s -> %s",
+                self.project_name,
+                new_name,
+            )
+            self.project_name = new_name
 
 
 @dataclass

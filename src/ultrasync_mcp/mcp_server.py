@@ -9,7 +9,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.utilities.dependencies import CurrentContext
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
@@ -654,6 +655,7 @@ class ServerState:
         self._init_task: asyncio.Task[None] | None = None  # noqa: F821
         self._sync_manager: "SyncManager | None" = None  # noqa: F821, UP037
         self._init_lock: asyncio.Lock | None = None  # protects concurrent init
+        self._client_root: str | None = None  # detected from MCP list_roots()
 
     def _ensure_initialized(self) -> None:
         if self._embedder is None:
@@ -939,7 +941,12 @@ class ServerState:
             return self._watcher.get_stats()
         return None
 
-    async def start_sync_manager(self) -> bool:
+    async def start_sync_manager(
+        self,
+        client_root: str | None = None,
+        wait_for_root: bool = True,
+        wait_timeout: float = 3.0,
+    ) -> bool:
         """Start the sync manager if configured.
 
         Creates a SyncManager that handles:
@@ -947,9 +954,20 @@ class ServerState:
         2. Periodic re-syncs to catch any missed updates
         3. Maintaining WebSocket connection for real-time ops
 
+        Args:
+            client_root: Optional client workspace root path. If provided,
+                updates git_remote detection to use this directory instead
+                of the MCP server's cwd. This ensures correct project
+                isolation when the server runs from a different directory.
+            wait_for_root: If True and no client_root provided, wait briefly
+                for client root to be set (via first tool call detecting it).
+            wait_timeout: How long to wait for client root (seconds).
+
         Returns:
             True if started successfully, False if not enabled/configured
         """
+        import asyncio
+
         from ultrasync_mcp.sync_client import (
             SyncConfig,
             SyncManager,
@@ -964,6 +982,28 @@ class ServerState:
             logger.debug("remote sync not enabled")
             return False
 
+        # wait for client root to be detected if not provided
+        if not client_root and not self._client_root and wait_for_root:
+            logger.debug(
+                "waiting %.1fs for client root detection...", wait_timeout
+            )
+            waited = 0.0
+            poll_interval = 0.1
+            while waited < wait_timeout and not self._client_root:
+                await asyncio.sleep(poll_interval)
+                waited += poll_interval
+            if self._client_root:
+                logger.info(
+                    "client root detected after %.1fs: %s",
+                    waited,
+                    self._client_root,
+                )
+            else:
+                logger.warning(
+                    "no client root detected after %.1fs, using MCP cwd",
+                    wait_timeout,
+                )
+
         config = SyncConfig()
         if not config.is_configured:
             logger.warning(
@@ -971,6 +1011,13 @@ class ServerState:
                 "ULTRASYNC_SYNC_URL and ULTRASYNC_SYNC_TOKEN"
             )
             return False
+
+        # update config with client root if provided
+        if client_root:
+            config.update_from_client_root(client_root)
+        # also check if we have a stored client root
+        elif self._client_root:
+            config.update_from_client_root(self._client_root)
 
         # ensure index manager is ready (needed for tracker access)
         await self._init_index_manager_async()
@@ -1007,8 +1054,9 @@ class ServerState:
         started = await self._sync_manager.start()
         if started:
             logger.info(
-                "sync manager started: project=%s",
+                "sync manager started: project=%s git_remote=%s",
                 config.project_name,
+                config.git_remote,
             )
         return started
 
@@ -1017,6 +1065,39 @@ class ServerState:
         if self._sync_manager:
             await self._sync_manager.stop()
             self._sync_manager = None
+
+    def set_client_root(self, root: str) -> None:
+        """Set the client workspace root from MCP list_roots().
+
+        This should be called as early as possible (e.g., from the first
+        tool call) to ensure correct project isolation for sync.
+
+        Args:
+            root: The client's workspace root directory path
+        """
+        if self._client_root == root:
+            return  # already set
+
+        logger.info("client root detected: %s", root)
+        self._client_root = root
+
+        # update sync manager config if already running
+        if self._sync_manager and self._sync_manager.config:
+            old_remote = self._sync_manager.config.git_remote
+            self._sync_manager.config.update_from_client_root(root)
+            new_remote = self._sync_manager.config.git_remote
+            if old_remote != new_remote:
+                logger.warning(
+                    "sync manager git_remote changed after connect! "
+                    "old=%s new=%s. reconnect may be needed.",
+                    old_remote,
+                    new_remote,
+                )
+
+    @property
+    def client_root(self) -> str | None:
+        """Get the detected client workspace root."""
+        return self._client_root
 
     @property
     def sync_manager(self) -> "SyncManager | None":  # noqa: F821, UP037
@@ -1365,6 +1446,39 @@ After writing code, validate against conventions:
         if func.__name__ in _enabled_tools:
             return mcp.tool()(func)
         return func
+
+    async def _detect_client_root(ctx: Context) -> str | None:
+        """Detect client workspace root from MCP list_roots().
+
+        This should be called early in tool execution to ensure correct
+        project isolation for sync. Caches the result in state.
+
+        Args:
+            ctx: MCP context from CurrentContext()
+
+        Returns:
+            The detected client root path, or None if not available
+        """
+        # already detected
+        if state.client_root:
+            return state.client_root
+
+        try:
+            roots = await ctx.list_roots()
+            if roots:
+                # use first root (typically the project root)
+                root_uri = roots[0].uri
+                # convert file:// URI to path
+                if root_uri.startswith("file://"):
+                    root_path = root_uri[7:]  # strip file://
+                else:
+                    root_path = root_uri
+                state.set_client_root(root_path)
+                return root_path
+        except Exception as e:
+            logger.debug("list_roots failed: %s", e)
+
+        return None
 
     @tool_if_enabled
     def memory_write(
@@ -2162,6 +2276,7 @@ After writing code, validate against conventions:
         recency_bias: bool = False,
         recency_config: Literal["default", "aggressive", "mild"] | None = None,
         include_memories: bool = True,
+        ctx: Context = CurrentContext(),  # noqa: B008 - FastMCP DI pattern
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
 
@@ -2222,6 +2337,9 @@ After writing code, validate against conventions:
         import time
 
         from ultrasync_mcp.jit.search import search
+
+        # detect client root early for project isolation
+        await _detect_client_root(ctx)
 
         root = state.root or Path(os.getcwd())
         # use async getter to wait for background init instead of blocking
