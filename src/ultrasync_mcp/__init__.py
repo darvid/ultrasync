@@ -3,7 +3,7 @@ import warnings
 # suppress GIL warning from tokenizers (used by sentence-transformers)
 warnings.filterwarnings("ignore", message=".*global interpreter lock.*")
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 from ultrasync_mcp.events import EventType, SessionEvent
 from ultrasync_mcp.file_registry import FileEntry, FileRegistry
