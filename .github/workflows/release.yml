@@ -25,36 +25,77 @@ jobs:
     name: Semantic Release
     runs-on: ubuntu-latest
     concurrency: release
+    # skip if this is a release commit (avoid infinite loop)
+    if: "!contains(github.event.head_commit.message, 'chore(release)')"
     permissions:
       contents: write
+      pull-requests: write
       id-token: write
 
     outputs:
-      released: ${{ steps.release.outputs.released }}
-      version: ${{ steps.release.outputs.version }}
-      tag: ${{ steps.release.outputs.tag }}
+      released: ${{ steps.check.outputs.released }}
+      version: ${{ steps.check.outputs.version }}
+      tag: ${{ steps.check.outputs.tag }}
+
+    env:
+      RELEASE_BRANCH: release/next
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-          persist-credentials: false
 
-      - name: Python Semantic Release
-        id: release
+      - name: Setup gitsign
+        uses: chainguard-dev/actions/setup-gitsign@main
+
+      - name: Check if release needed
+        id: check
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ secrets.RELEASE_TOKEN }}
-          git_committer_name: "github-actions"
-          git_committer_email: "actions@users.noreply.github.com"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          root_options: "-v --noop"
           force: ${{ inputs.force }}
 
-  publish:
-    name: Publish to PyPI
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    uses: ./.github/workflows/publish.yml
-    permissions:
-      id-token: write
-      contents: read
-    secrets: inherit
+      - name: Create release branch
+        if: steps.check.outputs.released == 'true'
+        run: |
+          git checkout -b ${{ env.RELEASE_BRANCH }}
+
+      - name: Semantic Release
+        if: steps.check.outputs.released == 'true'
+        uses: python-semantic-release/python-semantic-release@v10.5.3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          root_options: "-v"
+          force: ${{ inputs.force }}
+          push: "false"
+          vcs_release: "false"
+
+      - name: Push release branch
+        if: steps.check.outputs.released == 'true'
+        run: |
+          git push -u origin ${{ env.RELEASE_BRANCH }} --force
+
+      - name: Create Pull Request
+        if: steps.check.outputs.released == 'true'
+        run: |
+          gh pr create \
+            --base main \
+            --head ${{ env.RELEASE_BRANCH }} \
+            --title "chore(release): ${{ steps.check.outputs.version }}" \
+            --body "## Release ${{ steps.check.outputs.version }}
+
+          Automated release PR created by semantic-release.
+
+          This PR contains:
+          - Version bump to ${{ steps.check.outputs.version }}
+          - Updated CHANGELOG.md
+
+          Merge this PR to trigger the publish workflow."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # publish is triggered separately when the release PR is merged
+  # see publish.yml which triggers on pull_request closed
