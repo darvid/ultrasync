@@ -62,4 +62,7 @@ jobs:
     needs: release
     if: needs.release.outputs.released == 'true'
     uses: ./.github/workflows/publish.yml
+    permissions:
+      id-token: write
+      contents: read
     secrets: inherit
