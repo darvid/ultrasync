@@ -1,0 +1,10 @@
+# gitleaks configuration
+# https://github.com/gitleaks/gitleaks
+
+title = "ultrasync gitleaks config"
+
+[allowlist]
+  description = "allowlist for test fixtures and false positives"
+  paths = [
+    '''tests/test_secrets\.py''',
+  ]
