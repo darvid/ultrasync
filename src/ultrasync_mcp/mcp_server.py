@@ -184,6 +184,7 @@ TOOL_CATEGORIES: dict[str, set[str]] = {
         "memory_search_structured",
         "memory_list_structured",
         "share_memory",
+        "share_memories_batch",
         "delete_memory",
     },
     # Indexing operations
@@ -1000,6 +1001,7 @@ class ServerState:
             batch_size=50,
             on_team_memory=on_team_memory,
             graph_memory=self._jit_manager.graph,  # enable graph sync
+            jit_manager=self._jit_manager,  # enable vector sync
         )
 
         started = await self._sync_manager.start()
@@ -2658,6 +2660,76 @@ After writing code, validate against conventions:
             "memory_id": memory_id,
             "visibility": "team",
             "message": "memory shared with team successfully",
+        }
+
+    @tool_if_enabled
+    async def share_memories_batch(
+        memory_ids: list[str],
+    ) -> dict[str, Any]:
+        """Share multiple personal memories with your team in one request.
+
+        More efficient than calling share_memory repeatedly. Useful for
+        bulk sharing like "share all my decisions" or sharing multiple
+        related memories at once.
+
+        Args:
+            memory_ids: List of memory IDs to share (e.g., ["mem:a1", "mem:b2"])
+
+        Returns:
+            Dict with total, success count, error count, and per-memory results
+        """
+        if state.sync_manager is None:
+            return {
+                "success": False,
+                "error": "sync not configured - set ULTRASYNC_REMOTE_SYNC=true",
+            }
+
+        if not state.sync_manager.connected:
+            return {"success": False, "error": "sync not connected to server"}
+
+        client = state.sync_manager.client
+        if client is None:
+            return {"success": False, "error": "sync client not initialized"}
+
+        # build memory payloads, verifying each exists
+        memories: list[dict[str, Any]] = []
+        not_found: list[str] = []
+
+        for mem_id in memory_ids:
+            entry = state.jit_manager.memory.get(mem_id)
+            if not entry:
+                not_found.append(mem_id)
+                continue
+
+            memories.append(
+                {
+                    "memory_id": mem_id,
+                    "text": entry.text,
+                    "task": entry.task,
+                    "insights": entry.insights,
+                    "context": entry.context,
+                }
+            )
+
+        if not memories:
+            return {
+                "success": False,
+                "error": "no valid memories found",
+                "not_found": not_found,
+            }
+
+        result = await client.share_memories_batch(memories)
+
+        if result is None:
+            return {"success": False, "error": "batch share failed"}
+
+        return {
+            "success": True,
+            "total": result.get("total", 0),
+            "shared": result.get("success", 0),
+            "errors": result.get("errors", 0),
+            "not_found": not_found,
+            "results": result.get("results", []),
         }
 
     @tool_if_enabled
@@ -4380,6 +4452,7 @@ After writing code, validate against conventions:
             batch_size=50,
             on_team_memory=on_team_memory,
             graph_memory=state._jit_manager.graph,  # enable graph sync
+            jit_manager=state._jit_manager,  # enable vector sync
         )
 
         started = await state._sync_manager.start()

@@ -559,6 +559,85 @@ class SyncClient:
             logger.exception("share_memory error: %s", e)
             return None
 
+    async def share_memories_batch(
+        self,
+        memories: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Batch share multiple personal memories to team visibility.
+
+        More efficient than calling share_memory() repeatedly.
+
+        Args:
+            memories: List of memory dicts, each with:
+                - memory_id: ID of memory to share
+                - text: Memory text (optional, fetched if not provided)
+                - insight: Optional insight type
+                - context: Optional context type
+                - task: Optional task type
+
+        Returns:
+            Dict with results, success/error counts, or None if failed
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot batch share")
+            return None
+
+        if not memories:
+            return {"results": [], "total": 0, "success": 0, "errors": 0}
+
+        try:
+            base_url = self.config.url.rstrip("/")
+
+            async with aiohttp.ClientSession() as session:
+                # verify token and get org/project IDs
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                # call batch share endpoint
+                endpoint = f"/api/share-memories-batch/{org_id}/{project_id}"
+                async with session.post(
+                    f"{base_url}{endpoint}",
+                    json={
+                        "memories": memories,
+                        "shared_by_name": self.config.user_id
+                        or self.config.clerk_user_id,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {self.config.token}",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error("share_memories_batch: %s", error[:100])
+                        return None
+
+                    result = await resp.json()
+                    logger.info(
+                        "batch shared %d memories (%d ok, %d err)",
+                        result.get("total", 0),
+                        result.get("success", 0),
+                        result.get("errors", 0),
+                    )
+                    return result
+
+        except Exception as e:
+            logger.exception("share_memories_batch error: %s", e)
+            return None
+
     async def fetch_team_memories(self) -> list[dict] | None:
         """Fetch all team-shared memories from the sync server.
 
