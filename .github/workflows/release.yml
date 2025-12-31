@@ -57,6 +57,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           root_options: "-v --noop"
           force: ${{ inputs.force }}
+          push: "false"
+          vcs_release: "false"
 
       - name: Create release branch
         if: steps.check.outputs.released == 'true'
