@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import gzip
+import hashlib
+import json
 import os
 import tempfile
+import time
 import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -21,7 +25,7 @@ import socketio
 from ultrasync_mcp.logging_config import get_logger
 
 if TYPE_CHECKING:
-    pass
+    from ultrasync_mcp.jit.manager import JITIndexManager
 
 logger = get_logger("sync_client")
 
@@ -174,7 +178,6 @@ def derive_shared_project_id(git_remote: str, org_id: str) -> str:
     Returns:
         UUID string for the shared project
     """
-    import hashlib
 
     # combine org + git remote for isolation between orgs
     combined = f"{org_id}:{git_remote}"
@@ -304,6 +307,7 @@ class SyncClient:
         self._last_graph_seq = 0
         self._pending_acks: dict[str, asyncio.Future] = {}
         self._pending_graph_acks: dict[str, asyncio.Future] = {}
+        self._pending_graph_batch_acks: dict[str, asyncio.Future] = {}
         self._on_ops = on_ops
         self._on_graph_ops = on_graph_ops
 
@@ -317,6 +321,7 @@ class SyncClient:
         # graph handlers
         self._sio.on("graph_ops", self._on_graph_ops_received)
         self._sio.on("graph_ack", self._on_graph_ack)
+        self._sio.on("graph_batch_ack", self._on_graph_batch_ack)
 
     @property
     def connected(self) -> bool:
@@ -730,7 +735,7 @@ class SyncClient:
         graph_op = {
             "op_id": op_id,
             "op_type": op_type,
-            "created_ts": ts,
+            "hlc_ts": ts,
         }
 
         if node_id is not None:
@@ -759,6 +764,57 @@ class SyncClient:
             return None
         finally:
             self._pending_graph_acks.pop(op_id, None)
+
+    async def push_graph_batch(
+        self,
+        ops: list[dict[str, Any]],
+        timeout: float = 30.0,
+    ) -> dict | None:
+        """Push a batch of graph operations in a single message.
+
+        Much more efficient than individual push_graph_op calls.
+
+        Args:
+            ops: List of op dicts with op_type, node_id, etc.
+            timeout: Seconds to wait for batch ack
+
+        Returns:
+            {"processed": N, "last_seq": M, "errors": [...]} or None
+        """
+        if not self._connected:
+            logger.debug("not connected, skipping push_graph_batch")
+            return None
+
+        if not ops:
+            return {"processed": 0, "last_seq": 0, "errors": []}
+
+        import time
+
+        ts = int(time.time() * 1_000_000_000)
+
+        # Add hlc_ts to each op if not present
+        batch_ops = []
+        for op in ops:
+            batch_op = {**op, "hlc_ts": op.get("hlc_ts", ts)}
+            batch_ops.append(batch_op)
+
+        batch_id = str(uuid.uuid4())
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_graph_batch_acks[batch_id] = future
+
+        try:
+            await self._sio.emit(
+                "graph_batch", {"batch_id": batch_id, "ops": batch_ops}
+            )
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            logger.warning(
+                "timeout waiting for graph_batch_ack on batch %s", batch_id
+            )
+            return None
+        finally:
+            self._pending_graph_batch_acks.pop(batch_id, None)
 
     async def push_graph_node(
         self,
@@ -834,6 +890,177 @@ class SyncClient:
             rel_type=rel_type,
         )
 
+    async def push_vectors(
+        self,
+        manager: JITIndexManager,
+        org_id: str,
+        project_id: str,
+        batch_size: int = 500,
+    ) -> dict[str, Any]:
+        """Push embeddings to the server via HTTP with gzip compression.
+
+        Reads vectors from the local index and pushes them in batches.
+        Uses gzip compression to reduce transfer size.
+
+        Args:
+            manager: JITIndexManager with vector store
+            org_id: Organization UUID
+            project_id: Project UUID
+            batch_size: Number of vectors per batch (default 500)
+
+        Returns:
+            Dict with total_count, batch_count, errors
+        """
+        try:
+            import aiohttp  # noqa: F401 - checked here, used in _push_vector_batch
+        except ImportError:
+            logger.warning("aiohttp not installed, cannot push vectors")
+            return {"error": "aiohttp not installed", "total_count": 0}
+
+        if not self.config.is_configured:
+            return {"error": "sync not configured", "total_count": 0}
+
+        url = f"{self.config.url}/api/vectors/{org_id}/{project_id}"
+        headers = {
+            "Authorization": f"Bearer {self.config.token}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        }
+
+        total_count = 0
+        batch_count = 0
+        errors: list[str] = []
+
+        # Collect vectors from files and symbols
+        vectors_batch: list[dict[str, Any]] = []
+
+        for file_record in manager.tracker.iter_files():
+            if file_record.vector_offset is None:
+                continue
+
+            # Read vector from vector store
+            vec = manager.vector_store.read(
+                file_record.vector_offset, file_record.vector_length or 0
+            )
+            if vec is None:
+                continue
+
+            vectors_batch.append(
+                {
+                    "id": f"file:{file_record.path}",
+                    "vector": vec.tolist(),
+                    "metadata": {
+                        "type": "file",
+                        "path": file_record.path,
+                        "name": Path(file_record.path).name
+                        if file_record.path
+                        else "",
+                    },
+                }
+            )
+
+            if len(vectors_batch) >= batch_size:
+                result = await self._push_vector_batch(
+                    url, headers, vectors_batch
+                )
+                if "error" in result:
+                    errors.append(result["error"])
+                else:
+                    total_count += result.get("count", 0)
+                    batch_count += 1
+                vectors_batch = []
+
+        # Also push symbol vectors
+        for symbol in manager.tracker.iter_symbols():
+            if symbol.vector_offset is None:
+                continue
+
+            vec = manager.vector_store.read(
+                symbol.vector_offset, symbol.vector_length or 0
+            )
+            if vec is None:
+                continue
+
+            vectors_batch.append(
+                {
+                    "id": f"symbol:{symbol.key_hash}",
+                    "vector": vec.tolist(),
+                    "metadata": {
+                        "type": "symbol",
+                        "path": symbol.file_path,
+                        "name": symbol.name,
+                        "kind": symbol.kind,
+                    },
+                }
+            )
+
+            if len(vectors_batch) >= batch_size:
+                result = await self._push_vector_batch(
+                    url, headers, vectors_batch
+                )
+                if "error" in result:
+                    errors.append(result["error"])
+                else:
+                    total_count += result.get("count", 0)
+                    batch_count += 1
+                vectors_batch = []
+
+        # Push remaining vectors
+        if vectors_batch:
+            result = await self._push_vector_batch(url, headers, vectors_batch)
+            if "error" in result:
+                errors.append(result["error"])
+            else:
+                total_count += result.get("count", 0)
+                batch_count += 1
+
+        logger.info("pushed %d vectors in %d batches", total_count, batch_count)
+        return {
+            "total_count": total_count,
+            "batch_count": batch_count,
+            "errors": errors,
+        }
+
+    async def _push_vector_batch(
+        self,
+        url: str,
+        headers: dict[str, str],
+        vectors: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Push a batch of vectors with gzip compression."""
+        try:
+            import aiohttp
+        except ImportError:
+            return {"error": "aiohttp not installed"}
+
+        payload = json.dumps({"vectors": vectors}).encode("utf-8")
+        compressed = gzip.compress(payload)
+
+        logger.debug(
+            "pushing %d vectors (%d bytes -> %d bytes gzipped)",
+            len(vectors),
+            len(payload),
+            len(compressed),
+        )
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    data=compressed,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    elif resp.status == 429:
+                        return {"error": "rate limited"}
+                    else:
+                        text = await resp.text()
+                        return {"error": f"HTTP {resp.status}: {text}"}
+        except Exception as e:
+            return {"error": str(e)}
+
     async def sync_graph(self, since_seq: int = 0, limit: int = 1000) -> None:
         """Request graph operations since a sequence number.
 
@@ -876,7 +1103,6 @@ class SyncClient:
         Returns:
             BulkSyncProgress with final state
         """
-        import hashlib
         from datetime import datetime, timezone
 
         import aiohttp
@@ -1050,7 +1276,6 @@ class SyncClient:
         Returns:
             BulkSyncProgress with final state and item counts
         """
-        import hashlib
         from datetime import datetime, timezone
 
         import aiohttp
@@ -1363,6 +1588,29 @@ class SyncClient:
                     op_type,
                 )
 
+    def _on_graph_batch_ack(self, data: dict) -> None:
+        """Handle ack for batch graph commands."""
+        processed = data.get("processed", 0)
+        last_seq = data.get("last_seq", 0)
+        errors = data.get("errors", [])
+
+        if last_seq > self._last_graph_seq:
+            self._last_graph_seq = last_seq
+
+        # resolve the oldest pending batch ack
+        if self._pending_graph_batch_acks:
+            batch_id = next(iter(self._pending_graph_batch_acks))
+            future = self._pending_graph_batch_acks.pop(batch_id, None)
+            if future and not future.done():
+                future.set_result(data)
+                logger.debug(
+                    "graph_batch_ack %s: processed=%d seq=%d errs=%d",
+                    batch_id,
+                    processed,
+                    last_seq,
+                    len(errors),
+                )
+
 
 _sync_client: SyncClient | None = None
 
@@ -1409,6 +1657,10 @@ class SyncManagerStats:
     # graph sync stats
     graph_nodes_synced: int = 0
     graph_edges_synced: int = 0
+    # vector sync stats
+    vectors_synced: int = 0
+    # team import stats (bidirectional sync)
+    team_memories_imported: int = 0
     # error tracking
     errors: list[str] = field(default_factory=list)
     # resync config
@@ -1447,6 +1699,7 @@ class SyncManager:
         on_team_memory: Callable[[dict], None] | None = None,
         on_graph_op: Callable[[dict], None] | None = None,
         graph_memory: Any | None = None,  # GraphMemory instance
+        jit_manager: Any | None = None,  # JITIndexManager for vector sync
     ) -> None:
         """Initialize the sync manager.
 
@@ -1462,6 +1715,7 @@ class SyncManager:
                 Signature: (op: dict) -> None
                 op contains: op_type, node_id, src_id, dst_id, rel_type, payload
             graph_memory: GraphMemory instance for graph operations
+            jit_manager: JITIndexManager for vector/embedding sync
         """
         self.tracker = tracker
         self.config = config or SyncConfig()
@@ -1470,6 +1724,7 @@ class SyncManager:
         self._on_team_memory = on_team_memory
         self._on_graph_op = on_graph_op
         self._graph_memory = graph_memory
+        self._jit_manager = jit_manager
 
         self._client: SyncClient | None = None
         self._sync_task: asyncio.Task | None = None
@@ -1671,8 +1926,6 @@ class SyncManager:
         """Apply a graph op to local GraphMemory."""
         if not self._graph_memory:
             return
-
-        import hashlib
 
         op_type = op.get("op_type", "")
         payload = op.get("payload", {})
@@ -2100,8 +2353,31 @@ class SyncManager:
                 graph_result["errors"],
             )
 
+        # sync vectors/embeddings if JITIndexManager is configured
+        if self._jit_manager and self._client:
+            try:
+                vector_result = await self._client.push_vectors(
+                    manager=self._jit_manager,
+                    org_id=self.config.org_id,
+                    project_id=self.config.project_id,
+                    batch_size=500,
+                )
+                self.stats.vectors_synced = vector_result.get("total_pushed", 0)
+                logger.info(
+                    "vector sync: %d vectors in %d batches, %d errors",
+                    vector_result.get("total_pushed", 0),
+                    vector_result.get("batches", 0),
+                    len(vector_result.get("errors", [])),
+                )
+            except Exception as e:
+                logger.warning("vector sync failed: %s", e)
+                self.stats.errors.append(f"vector sync failed: {e}")
+
         # fetch team index (bidirectional sync)
         await self._fetch_team_index()
+
+        # fetch team memories (bidirectional sync)
+        await self._fetch_team_memories()
 
         # request graph ops from server (bidirectional graph sync)
         if self._graph_memory:
@@ -2146,6 +2422,57 @@ class SyncManager:
 
         except Exception as e:
             logger.exception("fetch_team_index error: %s", e)
+
+    async def _fetch_team_memories(self) -> None:
+        """Fetch and import team-shared memories from the sync server."""
+        if not self._client or not self._jit_manager:
+            return
+
+        try:
+            memories = await self._client.fetch_team_memories()
+            if memories is None:
+                logger.warning("failed to fetch team memories")
+                return
+
+            imported = 0
+            skipped = 0
+            my_id = self.config.user_id or self.config.clerk_user_id
+
+            for mem in memories:
+                # skip our own memories (we already have them locally)
+                owner_id = mem.get("owner_id")
+                if owner_id and owner_id == my_id:
+                    skipped += 1
+                    continue
+
+                try:
+                    self._jit_manager.memory.import_memory(
+                        memory_id=mem.get("id", ""),
+                        text=mem.get("text", ""),
+                        task=mem.get("task"),
+                        insights=mem.get("insights"),
+                        context=mem.get("context"),
+                        tags=mem.get("tags"),
+                        owner_id=owner_id,
+                        created_at=mem.get("created_at"),
+                    )
+                    imported += 1
+                except Exception as e:
+                    logger.debug(
+                        "failed to import team memory %s: %s", mem.get("id"), e
+                    )
+
+            if imported > 0:
+                self.stats.team_memories_imported = imported
+                logger.info(
+                    "imported %d team memories (%d fetched, %d skipped)",
+                    imported,
+                    len(memories),
+                    skipped,
+                )
+
+        except Exception as e:
+            logger.exception("fetch_team_memories error: %s", e)
 
     async def sync_file(self, path: str, symbols: list[dict]) -> bool:
         """Sync a single file immediately (for real-time updates).
@@ -2261,79 +2588,135 @@ class SyncManager:
 
         import msgpack
 
+        BATCH_SIZE = 100  # ops per batch
         nodes_synced = 0
         edges_synced = 0
         errors = 0
 
-        # sync all nodes
+        # collect all node ops
+        node_ops: list[dict[str, Any]] = []
         for node in self._graph_memory.iter_nodes():
             try:
-                # decode payload if bytes
                 payload = {}
                 if node.payload:
                     payload = msgpack.unpackb(node.payload)
-
-                # use hex representation of int node_id as string
                 node_id_str = f"{node.type}:{node.id:x}"
-
-                result = await self._client.push_graph_node(
-                    node_id=node_id_str,
-                    node_type=node.type,
-                    payload=payload,
+                # convert float timestamp to int milliseconds for hlc_ts
+                hlc_ts = (
+                    int(node.updated_ts * 1000)
+                    if node.updated_ts
+                    else int(time.time() * 1000)
                 )
-                if result:
-                    nodes_synced += 1
-                else:
-                    errors += 1
+                node_ops.append(
+                    {
+                        "op_type": "put_node",
+                        "hlc_ts": hlc_ts,
+                        "node_id": node_id_str,
+                        "node_type": node.type,
+                        "payload": payload,
+                    }
+                )
             except Exception as e:
-                logger.warning("failed to sync node %s: %s", node.id, e)
+                logger.warning("failed to prepare node %s: %s", node.id, e)
                 errors += 1
 
-        # sync all edges
+        # send node ops in batches
+        logger.info("graph sync: collected %d node ops", len(node_ops))
+        for i in range(0, len(node_ops), BATCH_SIZE):
+            batch = node_ops[i : i + BATCH_SIZE]
+            result = await self._client.push_graph_batch(batch)
+            if result:
+                nodes_synced += result.get("processed", 0)
+                errors += len(result.get("errors", []))
+            else:
+                errors += len(batch)
+
+        # pre-cache node types to avoid nested txns during edge iteration
+        # (nested txns break cursor iteration in LMDB)
+        node_types: dict[int, str] = {}
+        for node in self._graph_memory.iter_nodes():
+            node_types[node.id] = node.type
+        logger.info("graph sync: cached %d node types", len(node_types))
+        _debug_log(f"graph sync: cached {len(node_types)} node types")
+
+        # collect all edge ops
+        edge_ops: list[dict[str, Any]] = []
         edge_db = self._graph_memory._db(b"graph_edges")
         with self._graph_memory.tracker.env.begin() as txn:
+            # check edge count directly
+            edge_stat = txn.stat(db=edge_db)
+            logger.info(
+                "graph sync: edge db has %d entries",
+                edge_stat.get("entries", 0),
+            )
+            _debug_log(
+                f"graph sync: edge db has {edge_stat.get('entries', 0)} entries"
+            )
+
             cursor = txn.cursor(db=edge_db)
             for _, value in cursor:
                 try:
                     d = msgpack.unpackb(value)
                     if d.get("tombstone"):
                         continue
-
-                    # decode payload if present
                     payload = {}
                     if d.get("payload"):
                         payload = msgpack.unpackb(d["payload"])
-
-                    # get relation name
-                    rel_name = self._graph_memory.relations.lookup_name(
-                        d["rel_id"]
-                    )
+                    rel_name = self._graph_memory.relations.lookup(d["rel_id"])
                     if not rel_name:
                         rel_name = f"rel:{d['rel_id']}"
-
-                    src_id_str = f"node:{d['src_id']:x}"
-                    dst_id_str = f"node:{d['dst_id']:x}"
-
-                    result = await self._client.push_graph_edge(
-                        src_id=src_id_str,
-                        dst_id=dst_id_str,
-                        rel_type=rel_name,
-                        payload=payload,
+                    # use cached node types to avoid nested transactions
+                    src_type = node_types.get(d["src_id"], "unknown")
+                    dst_type = node_types.get(d["dst_id"], "unknown")
+                    src_id_str = f"{src_type}:{d['src_id']:x}"
+                    dst_id_str = f"{dst_type}:{d['dst_id']:x}"
+                    # convert float timestamp to int milliseconds for hlc_ts
+                    edge_ts = (
+                        d.get("updated_ts")
+                        or d.get("created_ts")
+                        or time.time()
                     )
-                    if result:
-                        edges_synced += 1
-                    else:
-                        errors += 1
+                    hlc_ts = int(edge_ts * 1000)
+                    edge_ops.append(
+                        {
+                            "op_type": "put_edge",
+                            "hlc_ts": hlc_ts,
+                            "src_id": src_id_str,
+                            "dst_id": dst_id_str,
+                            "rel_type": rel_name,
+                            "payload": payload,
+                        }
+                    )
                 except Exception as e:
-                    logger.warning("failed to sync edge: %s", e)
+                    logger.warning("failed to prepare edge: %s", e)
+                    _debug_log(f"edge error: {e}")
+                    if errors < 3:  # only log first few
+                        import traceback
+
+                        _debug_log(f"edge traceback: {traceback.format_exc()}")
                     errors += 1
             cursor.close()
+
+        # send edge ops in batches
+        logger.info("graph sync: collected %d edge ops", len(edge_ops))
+        _debug_log(f"graph sync: collected {len(edge_ops)} edge ops")
+        for i in range(0, len(edge_ops), BATCH_SIZE):
+            batch = edge_ops[i : i + BATCH_SIZE]
+            result = await self._client.push_graph_batch(batch)
+            if result:
+                edges_synced += result.get("processed", 0)
+                errors += len(result.get("errors", []))
+            else:
+                errors += len(batch)
 
         logger.info(
             "graph sync complete: %d nodes, %d edges, %d errors",
             nodes_synced,
             edges_synced,
             errors,
+        )
+        _debug_log(
+            f"graph sync done: {nodes_synced} nodes, {edges_synced} edges"
         )
         return {"nodes": nodes_synced, "edges": edges_synced, "errors": errors}
 
