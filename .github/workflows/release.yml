@@ -83,6 +83,13 @@ jobs:
       - name: Create Pull Request
         if: steps.check.outputs.released == 'true'
         run: |
+          # check if PR already exists for release branch
+          EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Release PR #$EXISTING_PR already exists, skipping creation"
+            exit 0
+          fi
+
           gh pr create \
             --base main \
             --head ${{ env.RELEASE_BRANCH }} \
