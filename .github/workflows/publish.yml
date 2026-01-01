@@ -223,12 +223,23 @@ jobs:
                   find artifacts -name "*.whl" -exec cp {} release-assets/ \;
                   find artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
 
+                  # extract changelog for this version (between ## vX.X.X headers)
+                  # uses semantic-release generated CHANGELOG.md
+                  awk "/^## $VERSION/,/^## v[0-9]/" CHANGELOG.md | head -n -1 > release-notes.md
+
+                  # fallback if changelog section is empty
+                  if [ ! -s release-notes.md ]; then
+                      echo "## $VERSION" > release-notes.md
+                      echo "" >> release-notes.md
+                      echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release-notes.md
+                  fi
+
                   # create tag if it doesn't exist
                   git tag "$VERSION" || true
                   git push origin "$VERSION" || true
 
-                  # create release with assets
+                  # create release with changelog notes and assets
                   gh release create "$VERSION" \
                       --title "$VERSION" \
-                      --generate-notes \
+                      --notes-file release-notes.md \
                       release-assets/*
