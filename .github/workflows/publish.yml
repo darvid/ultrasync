@@ -1,8 +1,8 @@
 name: Publish to PyPI
 
 on:
-    release:
-        types: [published]
+    # NOTE: release trigger removed - we create the GitHub release AFTER
+    # publishing to PyPI, not before. Flow: PR merge → publish → create release
     pull_request:
         branches: [main]
         types: [closed]
@@ -35,9 +35,6 @@ jobs:
               run: |
                   if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
                       echo "Manual trigger - proceeding"
-                      echo "should_publish=true" >> $GITHUB_OUTPUT
-                  elif [[ "${{ github.event_name }}" == "release" ]]; then
-                      echo "Release trigger - proceeding"
                       echo "should_publish=true" >> $GITHUB_OUTPUT
                   elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
                       echo "Workflow call - proceeding"
