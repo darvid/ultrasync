@@ -90,6 +90,13 @@ jobs:
             exit 0
           fi
 
+          # check if there are actual commits between main and release branch
+          COMMITS=$(git rev-list --count main..${{ env.RELEASE_BRANCH }} 2>/dev/null || echo "0")
+          if [ "$COMMITS" = "0" ]; then
+            echo "No commits between main and ${{ env.RELEASE_BRANCH }}, skipping PR creation"
+            exit 0
+          fi
+
           gh pr create \
             --base main \
             --head ${{ env.RELEASE_BRANCH }} \
