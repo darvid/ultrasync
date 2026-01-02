@@ -310,13 +310,13 @@ To enable additional tool categories, add the `env` field:
 
 ```bash
 # Start MCP server
-uv tool run ultrasync serve
+uv tool run --from ultrasync-mcp ultrasync serve
 
 # Index a directory
-uv tool run ultrasync index .
+uv tool run --from ultrasync-mcp ultrasync index .
 
 # Interactive TUI
-uv tool run ultrasync voyager
+uv tool run --from ultrasync-mcp ultrasync voyager
 ```
 
 ## Development
