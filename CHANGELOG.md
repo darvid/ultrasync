@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-01-02)
+
+### Bug Fixes
+
+- **ci**: Skip PR creation when no commits between branches
+  ([`4e6a1ff`](https://github.com/darvid/ultrasync/commit/4e6a1ffa8ae49780ee5ee099b992efe11e8bf3dd))
+
+
 ## v1.0.1 (2026-01-01)
 
 ### Bug Fixes
