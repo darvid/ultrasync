@@ -348,6 +348,7 @@ class SyncClient:
         self.config = config or SyncConfig()
         self._sio = socketio.AsyncClient(logger=False, engineio_logger=False)
         self._connected = False
+        self._welcome_received = asyncio.Event()
         self._last_seq = 0
         self._last_graph_seq = 0
         self._pending_acks: dict[str, asyncio.Future] = {}
@@ -359,6 +360,7 @@ class SyncClient:
         # register handlers
         self._sio.on("connect", self._on_connect)
         self._sio.on("disconnect", self._on_disconnect)
+        self._sio.on("welcome", self._on_welcome)
         self._sio.on("ops", self._on_ops_received)
         self._sio.on("ack", self._on_ack)
         self._sio.on("reject", self._on_reject)
@@ -411,11 +413,26 @@ class SyncClient:
                 "last_server_seq": self._last_seq,
                 "clerk_user_id": self.config.clerk_user_id,
             }
+            self._welcome_received.clear()
             await self._sio.emit("hello", hello)
+
+            # wait for welcome to get user_id before proceeding
+            # this ensures memories are namespaced correctly
+            try:
+                await asyncio.wait_for(
+                    self._welcome_received.wait(), timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "no welcome received from server - "
+                    "memories may use incorrect namespace"
+                )
+
             logger.info(
-                "sync client connected to %s (git_remote: %s)",
+                "sync client connected to %s (git_remote: %s, user_id: %s)",
                 self.config.url,
                 self.config.git_remote,
+                self.config.user_id,
             )
             return True
 
@@ -1639,6 +1656,40 @@ class SyncClient:
     def _on_disconnect(self) -> None:
         self._connected = False
         logger.debug("socket.io disconnected")
+
+    def _on_welcome(self, data: dict) -> None:
+        """Handle welcome message with user identity from server.
+
+        Server sends user_id (UUID) after validating our token.
+        This is needed to correctly namespace personal memories.
+        """
+        user_id = data.get("user_id")
+        clerk_user_id = data.get("clerk_user_id")
+        org_id = data.get("org_id")
+        project_id = data.get("project_id")
+
+        if user_id:
+            self.config.user_id = user_id
+            logger.info("received user_id from server: %s", user_id)
+
+        if clerk_user_id and not self.config.clerk_user_id:
+            self.config.clerk_user_id = clerk_user_id
+
+        if org_id:
+            self.config.org_id = org_id
+
+        if project_id:
+            self.config.project_id = project_id
+
+        logger.debug(
+            "welcome: user_id=%s org_id=%s project_id=%s",
+            user_id,
+            org_id,
+            project_id,
+        )
+
+        # signal that welcome was received
+        self._welcome_received.set()
 
     def _on_ops_received(self, data: dict) -> None:
         """Handle incoming ops from server."""
