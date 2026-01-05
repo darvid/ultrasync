@@ -230,6 +230,20 @@ class TranscriptParser(ABC):
         """
         return None  # default: no assistant text extraction
 
+    def extract_timestamp(self, line: str) -> float | None:
+        """Extract timestamp from a transcript line.
+
+        Override this to extract timestamps from transcript entries.
+        Timestamps should be returned as epoch seconds (float).
+
+        Args:
+            line: A single line from the transcript file
+
+        Returns:
+            Timestamp in epoch seconds, or None if not available
+        """
+        return None  # default: no timestamp extraction
+
     def parse_pattern_results(
         self, line: str, project_root: Path
     ) -> list[PatternResultEvent]:
@@ -416,8 +430,6 @@ class ClaudeCodeParser(TranscriptParser):
         Returns:
             List of completed tool call events (with results when available)
         """
-        import time
-
         events: list[ToolCallEvent] = []
 
         try:
@@ -428,6 +440,16 @@ class ClaudeCodeParser(TranscriptParser):
                 line[:50],
             )
             return events
+
+        # use transcript timestamp (epoch ms) instead of current time
+        entry_timestamp = entry.get("timestamp")
+        if entry_timestamp:
+            # convert from milliseconds to seconds
+            timestamp = entry_timestamp / 1000.0
+        else:
+            import time
+
+            timestamp = time.time()
 
         message = entry.get("message", {})
         content = message.get("content", [])
@@ -462,7 +484,7 @@ class ClaudeCodeParser(TranscriptParser):
                             tool_name=tool_name,
                             tool_input=tool_input,
                             tool_result=None,
-                            timestamp=time.time(),
+                            timestamp=timestamp,
                         )
                     )
                     logger.debug(
@@ -493,7 +515,7 @@ class ClaudeCodeParser(TranscriptParser):
                             tool_name=tool_name,
                             tool_input=tool_input,
                             tool_result=tool_result,
-                            timestamp=time.time(),
+                            timestamp=timestamp,
                         )
                     )
 
@@ -651,6 +673,21 @@ class ClaudeCodeParser(TranscriptParser):
             combined = " ".join(text_parts).strip()
             return combined if combined else None
 
+        except json.JSONDecodeError:
+            return None
+
+    def extract_timestamp(self, line: str) -> float | None:
+        """Extract timestamp from a Claude Code transcript line.
+
+        Claude Code stores timestamps as epoch milliseconds in the
+        'timestamp' field of each JSONL entry.
+        """
+        try:
+            entry = json.loads(line)
+            ts_ms = entry.get("timestamp")
+            if ts_ms is not None:
+                return ts_ms / 1000.0  # convert ms to seconds
+            return None
         except json.JSONDecodeError:
             return None
 
@@ -1115,6 +1152,21 @@ class CodexParser(TranscriptParser):
         except json.JSONDecodeError:
             return None
 
+    def extract_timestamp(self, line: str) -> float | None:
+        """Extract timestamp from a Codex transcript line.
+
+        Codex stores timestamps as epoch milliseconds in the
+        'timestamp' field of each JSONL entry.
+        """
+        try:
+            entry = json.loads(line)
+            ts_ms = entry.get("timestamp")
+            if ts_ms is not None:
+                return ts_ms / 1000.0  # convert ms to seconds
+            return None
+        except json.JSONDecodeError:
+            return None
+
 
 class TranscriptWatcher:
     """Watch coding agent transcripts and auto-index accessed files.
@@ -1206,6 +1258,7 @@ class TranscriptWatcher:
         self._turn_assistant_text: list[str] = []
         self._turn_tools_used: list[str] = []
         self._turn_files_accessed: list[str] = []
+        self._turn_timestamp: float | None = None  # earliest timestamp in turn
 
         logger.info(
             "transcript watcher initialized: agent=%s project=%s "
@@ -1595,6 +1648,15 @@ class TranscriptWatcher:
             assistant_text = self.parser.extract_assistant_text(line)
             if assistant_text:
                 self._turn_assistant_text.append(assistant_text)
+                # track earliest timestamp in this turn
+                line_ts = self.parser.extract_timestamp(line)
+                if line_ts is not None:
+                    if self._turn_timestamp is None:
+                        self._turn_timestamp = line_ts
+                    else:
+                        self._turn_timestamp = min(
+                            self._turn_timestamp, line_ts
+                        )
                 logger.debug(
                     "accumulated assistant text: %d chars (total %d parts)",
                     len(assistant_text),
@@ -1654,6 +1716,8 @@ class TranscriptWatcher:
                 context=result.context or None,
                 symbol_keys=result.symbol_keys or None,
                 tags=result.tags or None,
+                # preserve original transcript timestamp
+                created_at=self._turn_timestamp,
             )
             self.stats.memories_created += 1
             logger.info(
@@ -1673,6 +1737,7 @@ class TranscriptWatcher:
         self._turn_assistant_text.clear()
         self._turn_tools_used.clear()
         self._turn_files_accessed.clear()
+        self._turn_timestamp = None
 
     async def _index_file_full(self, path: Path) -> bool:
         """Full index with embeddings (for grep/glob results).

@@ -306,11 +306,23 @@ class MemoryManager:
         context: list[str] | None = None,
         symbol_keys: list[int] | None = None,
         tags: list[str] | None = None,
+        created_at: float | str | None = None,
     ) -> MemoryEntry:
         """Write a structured memory entry to the JIT index.
 
         Automatically evicts cold (unused) memories if over max_memories limit.
         Scans for secrets and applies configured policy (default: redact).
+
+        Args:
+            text: Memory content
+            task: Task type (e.g., "task:debug")
+            insights: Insight tags
+            context: Context tags
+            symbol_keys: Related symbol key hashes
+            tags: Free-form tags
+            created_at: Timestamp - epoch seconds (float), ISO string, or None
+                        for current time. Use this to preserve original
+                        timestamps from chat transcripts.
 
         Raises:
             SecretDetectedError: If policy is REJECT and secrets detected
@@ -332,6 +344,16 @@ class MemoryManager:
 
         mem_id, key_hash = create_memory_key()
 
+        # Handle created_at: epoch seconds, ISO string, or default to now
+        if created_at is None:
+            ts_str = datetime.now(timezone.utc).isoformat()
+        elif isinstance(created_at, (int, float)):
+            ts_str = datetime.fromtimestamp(
+                created_at, tz=timezone.utc
+            ).isoformat()
+        else:
+            ts_str = created_at  # assume already ISO string
+
         entry_data = {
             "id": mem_id,
             "task": task,
@@ -340,7 +362,7 @@ class MemoryManager:
             "symbol_keys": symbol_keys or [],
             "text": processed_text,
             "tags": tags or [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": ts_str,
         }
 
         content = json.dumps(entry_data).encode("utf-8")
