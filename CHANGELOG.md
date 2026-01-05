@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v1.0.2 (2026-01-05)
+
+### Bug Fixes
+
+- **ci**: Skip PR creation when no commits between branches
+  ([`4e6a1ff`](https://github.com/darvid/ultrasync/commit/4e6a1ffa8ae49780ee5ee099b992efe11e8bf3dd))
+
+- **memory**: Preserve transcript timestamps instead of using current time
+  ([`bf4ccf0`](https://github.com/darvid/ultrasync/commit/bf4ccf046f1b4bef0f298b64695c06b28f4ca075))
+
+- **sync**: Receive user_id from server welcome event
+  ([`8b1da65`](https://github.com/darvid/ultrasync/commit/8b1da65e77584cd79d5e5c19c4668138472afa9d))
+
+
 ## v1.0.1 (2026-01-01)
 
 ### Bug Fixes
