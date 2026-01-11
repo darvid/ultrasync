@@ -16,7 +16,9 @@ target/
 **/*.rs.bk
 Cargo.lock
 
+# Ultrasync index data (per-project cache)
 .ultrasync/
+
 .infinity_cache/
 benchmarks/results/
 

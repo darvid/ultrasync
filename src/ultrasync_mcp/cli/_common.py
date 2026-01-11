@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ultrasync_mcp.embeddings import SentenceTransformerProvider
 
-DEFAULT_DATA_DIR = Path(".ultrasync")
+from ultrasync_mcp.paths import PROJECT_DIR_NAME, get_data_dir
+
+DEFAULT_DATA_DIR = Path(PROJECT_DIR_NAME)  # for backwards compatibility
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "ULTRASYNC_EMBEDDING_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2"
 )
@@ -75,7 +77,7 @@ class GlobalOptions:
 
     directory: Path | None = field(
         default=None,
-        metadata={"help": "Directory with .ultrasync index"},
+        metadata={"help": "Project root directory (data dir auto-resolved)"},
     )
     model: str = field(
         default=DEFAULT_EMBEDDING_MODEL,
@@ -86,11 +88,14 @@ class GlobalOptions:
 def resolve_data_dir(directory: Path | None) -> tuple[Path, Path]:
     """Resolve root and data directory paths.
 
+    Uses the paths module to determine the data directory location,
+    respecting ULTRASYNC_DATA_DIR env var and XDG conventions.
+
     Returns:
         Tuple of (root_path, data_dir_path)
     """
     root = directory.resolve() if directory else Path.cwd()
-    data_dir = root / DEFAULT_DATA_DIR
+    data_dir = get_data_dir(root)
     return root, data_dir
 
 

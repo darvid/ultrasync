@@ -25,6 +25,7 @@ from ultrasync_mcp.file_registry import FileRegistry
 from ultrasync_mcp.jit.conventions import ConventionStats
 from ultrasync_mcp.keys import hash64, hash64_file_key, hash64_sym_key
 from ultrasync_mcp.logging_config import configure_logging, get_logger
+from ultrasync_mcp.paths import get_data_dir
 from ultrasync_mcp.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
 from ultrasync_mcp.threads import ThreadManager
 from ultrasync_mcp.transcript_watcher import (
@@ -637,9 +638,7 @@ class ServerState:
     ) -> None:
         self._model_name = model_name
         self._root = root
-        self._jit_data_dir = jit_data_dir or (
-            root / ".ultrasync" if root else Path.cwd() / ".ultrasync"
-        )
+        self._jit_data_dir = jit_data_dir or get_data_dir(root)
         self._aot_index_path = aot_index_path
         self._aot_blob_path = aot_blob_path
         self._embedder: EmbeddingProvider | None = None
@@ -1150,8 +1149,8 @@ class ServerState:
         logger.info("client root detected: %s (previous: %s)", root, old_root)
         self._client_root = root
 
-        # update JIT data directory to use the new project's .ultrasync folder
-        new_jit_data_dir = Path(root) / ".ultrasync"
+        # update JIT data directory for the new project
+        new_jit_data_dir = get_data_dir(Path(root))
         if new_jit_data_dir != self._jit_data_dir:
             old_jit_dir = self._jit_data_dir
             self._jit_data_dir = new_jit_data_dir
@@ -1299,7 +1298,7 @@ def create_server(
         Configured FastMCP server instance
     """
     # determine data directory early for logging
-    data_dir = root / ".ultrasync" if root else Path.cwd() / ".ultrasync"
+    data_dir = get_data_dir(root)
 
     # configure logging (writes to data_dir/debug.log if ULTRASYNC_DEBUG set)
     configure_logging(data_dir=data_dir)

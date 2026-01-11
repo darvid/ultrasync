@@ -22,6 +22,7 @@ from ultrasync_mcp.jit.memory import MemoryManager
 from ultrasync_mcp.jit.progress import IndexingProgress
 from ultrasync_mcp.jit.vector_store import CompactionResult, VectorStore
 from ultrasync_mcp.keys import hash64, hash64_file_key, hash64_sym_key
+from ultrasync_mcp.paths import PROJECT_DIR_NAME
 from ultrasync_mcp.patterns import PatternSetManager
 
 try:
@@ -1290,7 +1291,7 @@ class JITIndexManager:
             "__pycache__",
             "*.pyc",
             ".venv",
-            ".ultrasync",
+            PROJECT_DIR_NAME,
             "target",
             "dist",
         ]

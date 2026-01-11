@@ -3,8 +3,12 @@
 Enable debug logging via environment variable:
     ULTRASYNC_DEBUG=1 claude
 
-Debug logs are written to .ultrasync/debug.log in the project directory.
-Set ULTRASYNC_DEBUG_FILE to override the log file location.
+Debug logs are written to the ultrasync data directory:
+- Per-project: <project>/.ultrasync/debug.log (default for git repos)
+- Global: $XDG_CACHE_HOME/ultrasync/debug.log (fallback)
+- Custom: Set ULTRASYNC_DATA_DIR to override location
+
+Set ULTRASYNC_DEBUG_FILE to override the log file path directly.
 
 Log levels:
     ULTRASYNC_DEBUG=1     → DEBUG level
@@ -26,6 +30,8 @@ from typing import Any
 
 import structlog
 from structlog.typing import EventDict, WrappedLogger
+
+from ultrasync_mcp.paths import get_data_dir
 
 # package-level logger
 LOGGER_NAME = "ultrasync"
@@ -78,12 +84,11 @@ def get_log_file(data_dir: Path | None = None) -> Path | None:
     if not os.environ.get(ENV_DEBUG):
         return None
 
-    # use data_dir or cwd
+    # use data_dir or default from paths module
     if data_dir:
         return data_dir / "debug.log"
 
-    default_dir = Path.cwd() / ".ultrasync"
-    return default_dir / "debug.log"
+    return get_data_dir() / "debug.log"
 
 
 def add_logger_name(
