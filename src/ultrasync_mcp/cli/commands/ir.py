@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from ultrasync_mcp import console
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -60,7 +60,7 @@ class IrExtract:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         console.info(f"Extracting App IR from {root}...")
         start_time = time.perf_counter()
@@ -144,7 +144,7 @@ class IrEntities:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         extractor = AppIRExtractor(root, pattern_manager=manager)
@@ -199,7 +199,7 @@ class IrEndpoints:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         extractor = AppIRExtractor(root, pattern_manager=manager)
@@ -243,7 +243,7 @@ class IrServices:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         extractor = AppIRExtractor(root, pattern_manager=manager)
@@ -294,7 +294,7 @@ class IrFlows:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         extractor = AppIRExtractor(root, pattern_manager=manager)

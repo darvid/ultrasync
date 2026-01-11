@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ultrasync_mcp.cli._common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_EMBEDDING_MODEL,
     get_embedder_class,
 )
 from ultrasync_mcp.jit.manager import JITIndexManager
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -37,7 +37,7 @@ class Warm:
         EmbeddingProvider = get_embedder_class()
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             print(f"error: no index found at {data_dir}", file=sys.stderr)

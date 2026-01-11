@@ -7,10 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ultrasync_mcp.cli._common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_EMBEDDING_MODEL,
     get_embedder_class,
 )
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -59,7 +59,7 @@ class Voyager:
         graph = None
         ir = None
 
-        data_dir = root_path / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root_path)
         if data_dir.exists():
             from ultrasync_mcp.call_graph import (
                 CallGraph,

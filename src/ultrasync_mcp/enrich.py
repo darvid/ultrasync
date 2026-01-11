@@ -928,16 +928,17 @@ async def enrich_codebase(
     Returns:
         EnrichmentResult
     """
-    from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR, get_embedder_class
+    from ultrasync_mcp.cli._common import get_embedder_class
     from ultrasync_mcp.ir import AppIRExtractor
     from ultrasync_mcp.jit.manager import JITIndexManager
+    from ultrasync_mcp.paths import get_data_dir
     from ultrasync_mcp.patterns import PatternSetManager
 
     def report(phase: EnrichPhase, msg: str, cur: int = 0, tot: int = 0):
         if progress_callback:
             progress_callback(EnrichProgress(phase, msg, cur, tot))
 
-    data_dir = root / DEFAULT_DATA_DIR
+    data_dir = get_data_dir(root)
 
     # Load embedding model
     report(EnrichPhase.EXTRACTING_IR, "loading embedding model...")

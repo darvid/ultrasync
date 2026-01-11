@@ -10,8 +10,9 @@ from typing import Annotated, Literal
 
 import tyro
 
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR, compact_path
+from ultrasync_mcp.cli._common import compact_path
 from ultrasync_mcp.jit import FileTracker
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -48,7 +49,7 @@ class Keys:
         """Execute the keys command."""
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             print(f"error: no index found at {data_dir}", file=sys.stderr)

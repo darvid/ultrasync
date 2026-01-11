@@ -12,11 +12,11 @@ from typing import TYPE_CHECKING, Literal
 
 from ultrasync_mcp import console
 from ultrasync_mcp.cli._common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_EMBEDDING_MODEL,
     get_embedder_class,
 )
 from ultrasync_mcp.jit.manager import JITIndexManager
+from ultrasync_mcp.paths import get_data_dir
 
 if TYPE_CHECKING:
     from ultrasync_mcp.enrich import EnrichProgress
@@ -80,7 +80,7 @@ class EnrichmentProgress:
 
 @dataclass
 class Index:
-    """Index a directory (writes to .ultrasync/)."""
+    """Index a directory (writes to data dir, see paths module)."""
 
     directory: Path = field(
         default_factory=Path.cwd,
@@ -140,7 +140,7 @@ class Index:
     def run(self) -> int:
         """Execute the index command."""
         root = self.directory.resolve()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if self.nuke and data_dir.exists():
             shutil.rmtree(data_dir)

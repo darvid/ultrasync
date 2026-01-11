@@ -8,10 +8,10 @@ from pathlib import Path
 
 from ultrasync_mcp import console
 from ultrasync_mcp.cli._common import (
-    DEFAULT_DATA_DIR,
     DEFAULT_EMBEDDING_MODEL,
     get_embedder_class,
 )
+from ultrasync_mcp.paths import get_data_dir
 
 # Try to import Rich for progress display
 try:
@@ -28,7 +28,7 @@ def _get_manager(directory: Path | None):
     from ultrasync_mcp.jit import JITIndexManager
 
     root = directory.resolve() if directory else Path.cwd()
-    data_dir = root / DEFAULT_DATA_DIR
+    data_dir = get_data_dir(root)
 
     if not data_dir.exists():
         return None, data_dir

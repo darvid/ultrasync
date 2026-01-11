@@ -9,9 +9,10 @@ from typing import Annotated
 
 import tyro
 
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR, compact_path
+from ultrasync_mcp.cli._common import compact_path
 from ultrasync_mcp.jit import FileTracker
 from ultrasync_mcp.jit.blob import BlobAppender
+from ultrasync_mcp.paths import get_data_dir
 
 
 def _has_rich() -> bool:
@@ -38,7 +39,7 @@ class AnchorsList:
         from ultrasync_mcp.patterns import ANCHOR_PATTERN_IDS, PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
 
@@ -102,7 +103,7 @@ class AnchorsShow:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         # convert anchor:routes -> pat:anchor-routes
         anchor_type = self.anchor_type
@@ -200,7 +201,7 @@ class AnchorsScan:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
 
@@ -444,7 +445,7 @@ class AnchorsFind:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         # normalize anchor type
         anchor_type = self.anchor_type
@@ -596,7 +597,7 @@ class AnchorsFindAll:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         tracker_db = data_dir / "tracker.db"
         blob_file = data_dir / "blob.dat"

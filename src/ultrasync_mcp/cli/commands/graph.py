@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ultrasync_mcp import console
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -26,7 +26,7 @@ class GraphStats:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -74,7 +74,7 @@ class GraphBootstrap:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -127,7 +127,7 @@ class GraphNodes:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -199,7 +199,7 @@ class GraphEdges:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -274,7 +274,7 @@ class GraphKvList:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -342,7 +342,7 @@ class GraphKvSet:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -401,7 +401,7 @@ class GraphKvGet:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -462,7 +462,7 @@ class GraphDiff:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -560,7 +560,7 @@ class GraphExport:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -651,7 +651,7 @@ class GraphDot:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -832,7 +832,7 @@ class GraphGc:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -941,7 +941,7 @@ class GraphImportCallgraph:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")
@@ -1036,7 +1036,7 @@ class GraphRelations:
         from ultrasync_mcp.jit import FileTracker
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no index found at {data_dir}")

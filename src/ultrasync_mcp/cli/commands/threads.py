@@ -7,8 +7,9 @@ from datetime import datetime
 from pathlib import Path
 
 from ultrasync_mcp import console
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR, compact_path
+from ultrasync_mcp.cli._common import compact_path
 from ultrasync_mcp.jit import FileTracker
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -31,7 +32,7 @@ class ThreadsList:
     def run(self) -> int:
         """Execute the threads list command."""
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
         tracker_db = data_dir / "tracker.db"
 
         if not tracker_db.exists():
@@ -85,7 +86,7 @@ class ThreadsShow:
     def run(self) -> int:
         """Execute the threads show command."""
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
         tracker_db = data_dir / "tracker.db"
 
         if not tracker_db.exists():
@@ -175,7 +176,7 @@ class ThreadsStats:
     def run(self) -> int:
         """Execute the threads stats command."""
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
         tracker_db = data_dir / "tracker.db"
 
         if not tracker_db.exists():
@@ -232,7 +233,7 @@ class ThreadsForFile:
     def run(self) -> int:
         """Execute the threads for-file command."""
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
         tracker_db = data_dir / "tracker.db"
 
         if not tracker_db.exists():
@@ -281,7 +282,7 @@ class ThreadsSearch:
     def run(self) -> int:
         """Execute the threads search command."""
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
         tracker_db = data_dir / "tracker.db"
 
         if not tracker_db.exists():

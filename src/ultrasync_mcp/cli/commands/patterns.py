@@ -6,9 +6,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR
 from ultrasync_mcp.jit import FileTracker
 from ultrasync_mcp.jit.blob import BlobAppender
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -25,7 +25,7 @@ class PatternsList:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         pattern_sets = manager.list_all()
@@ -59,7 +59,7 @@ class PatternsShow:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         manager = PatternSetManager(data_dir=data_dir)
         ps = manager.get(self.pattern_set)
@@ -109,7 +109,7 @@ class PatternsLoad:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not self.file.exists():
             print(f"error: file not found: {self.file}", file=sys.stderr)
@@ -165,7 +165,7 @@ class PatternsScan:
         from ultrasync_mcp.patterns import PatternSetManager
 
         root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             print(f"error: no index found at {data_dir}", file=sys.stderr)

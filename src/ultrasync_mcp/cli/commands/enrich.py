@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from ultrasync_mcp import console
-from ultrasync_mcp.cli._common import DEFAULT_DATA_DIR
+from ultrasync_mcp.paths import get_data_dir
 
 
 @dataclass
@@ -75,7 +75,7 @@ class Enrich:
         from ultrasync_mcp.enrich import enrich_codebase
 
         root = self.directory.resolve()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no .ultrasync index found at {root}")
@@ -268,7 +268,7 @@ class EnrichList:
         from ultrasync_mcp.jit.lmdb_tracker import FileTracker
 
         root = self.directory.resolve()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no .ultrasync index found at {root}")
@@ -343,7 +343,7 @@ class EnrichClear:
         from ultrasync_mcp.jit.lmdb_tracker import FileTracker
 
         root = self.directory.resolve()
-        data_dir = root / DEFAULT_DATA_DIR
+        data_dir = get_data_dir(root)
 
         if not data_dir.exists():
             console.error(f"no .ultrasync index found at {root}")
