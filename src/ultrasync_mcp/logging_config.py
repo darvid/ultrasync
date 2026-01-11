@@ -31,7 +31,7 @@ from typing import Any
 import structlog
 from structlog.typing import EventDict, WrappedLogger
 
-from ultrasync_mcp.paths import get_data_dir
+from ultrasync_mcp.paths import get_global_data_dir
 
 # package-level logger
 LOGGER_NAME = "ultrasync"
@@ -88,7 +88,8 @@ def get_log_file(data_dir: Path | None = None) -> Path | None:
     if data_dir:
         return data_dir / "debug.log"
 
-    return get_data_dir() / "debug.log"
+    # fallback to global dir for debug logs (not project-specific)
+    return get_global_data_dir() / "debug.log"
 
 
 def add_logger_name(
