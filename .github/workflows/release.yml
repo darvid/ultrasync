@@ -100,7 +100,7 @@ jobs:
           ssh_public_signing_key: ${{ secrets.SSH_SIGNING_PUBLIC_KEY }}
           ssh_private_signing_key: ${{ secrets.SSH_SIGNING_PRIVATE_KEY }}
           git_committer_name: "ultrasync-release[bot]"
-          git_committer_email: "ultrasync-release[bot]@users.noreply.github.com"
+          git_committer_email: "569269+darvid@users.noreply.github.com"
           verbosity: "2"
           force: ${{ inputs.force }}
           commit: "true"
