@@ -14,6 +14,12 @@ repos:
   # Rust - cargo fmt and clippy
   - repo: local
     hooks:
+      - id: commit-msg-check
+        name: commit msg check
+        entry: .github/scripts/commit-msg-check.sh
+        language: system
+        stages: [commit-msg]
+
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --manifest-path crates/ultrasync_index/Cargo.toml --
