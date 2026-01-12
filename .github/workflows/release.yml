@@ -41,20 +41,19 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
 
     steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          persist-credentials: false
-
-      - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
-          git_user_signingkey: true
-          git_commit_gpgsign: true
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Check if release needed
         id: check
@@ -74,7 +73,7 @@ jobs:
         if: steps.check.outputs.released == 'true'
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
           verbosity: "1"
           force: ${{ inputs.force }}
           push: "false"
@@ -84,13 +83,12 @@ jobs:
       - name: Push release branch
         if: steps.check.outputs.released == 'true'
         run: |
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           git push -u origin ${{ env.RELEASE_BRANCH }} --force
 
       - name: Create Pull Request
         if: steps.check.outputs.released == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # check if PR already exists for release branch
           EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
