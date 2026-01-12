@@ -41,19 +41,19 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
 
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup gitsign
+        uses: chainguard-dev/actions/setup-gitsign@main
+
+      - name: Configure git for signing
+        run: |
+          git config --global commit.gpgsign true
+          git config --global tag.gpgsign true
 
       - name: Check if release needed
         id: check
@@ -73,7 +73,7 @@ jobs:
         if: steps.check.outputs.released == 'true'
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ steps.app-token.outputs.token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           verbosity: "1"
           force: ${{ inputs.force }}
           push: "false"
@@ -88,7 +88,7 @@ jobs:
       - name: Create Pull Request
         if: steps.check.outputs.released == 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # check if PR already exists for release branch
           EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
