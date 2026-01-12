@@ -1,5 +1,5 @@
 {
-  "include": ["src/ultrasync"],
+  "include": ["src/ultrasync_mcp"],
   "exclude": ["**/__pycache__", "**/node_modules"],
   "typeCheckingMode": "standard",
   "pythonVersion": "3.10",
