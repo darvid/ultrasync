@@ -106,7 +106,7 @@ jobs:
           commit: "true"
           changelog: "true"
           push: "false"
-          tag: "false"
+          tag: "true"
           vcs_release: "false"
 
       - name: Create and push release branch
