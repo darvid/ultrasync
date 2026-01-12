@@ -64,12 +64,7 @@ jobs:
           no_operation_mode: true
           force: ${{ inputs.force }}
 
-      - name: Create release branch
-        if: steps.check.outputs.released == 'true'
-        run: |
-          git checkout -b ${{ env.RELEASE_BRANCH }}
-
-      - name: Semantic Release (version bump)
+      - name: Semantic Release (version bump on main)
         if: steps.check.outputs.released == 'true'
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
@@ -82,25 +77,29 @@ jobs:
           tag: "false"
           vcs_release: "false"
 
-      - name: Check for commits
+      - name: Create and push release branch
         if: steps.check.outputs.released == 'true'
-        id: commits
+        id: branch
         run: |
-          COMMITS=$(git rev-list --count main..${{ env.RELEASE_BRANCH }} 2>/dev/null || echo "0")
-          echo "commit_count=$COMMITS" >> $GITHUB_OUTPUT
-          if [ "$COMMITS" = "0" ]; then
-            echo "::warning::No commits on release branch - semantic-release may have failed"
-          else
-            echo "Found $COMMITS commit(s) on release branch"
+          # Check if semantic-release created a commit
+          if git diff --quiet HEAD~1 2>/dev/null; then
+            echo "No changes detected from semantic-release"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-      - name: Push release branch
-        if: steps.check.outputs.released == 'true' && steps.commits.outputs.commit_count != '0'
-        run: |
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+
+          # Create release branch from current HEAD (which has the version bump)
+          git checkout -b ${{ env.RELEASE_BRANCH }}
           git push -u origin ${{ env.RELEASE_BRANCH }} --force
 
+          # Reset main back to origin (remove the version bump from main)
+          git checkout main
+          git reset --hard origin/main
+
       - name: Create Pull Request
-        if: steps.check.outputs.released == 'true' && steps.commits.outputs.commit_count != '0'
+        if: steps.check.outputs.released == 'true' && steps.branch.outputs.has_changes == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
