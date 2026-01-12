@@ -41,17 +41,30 @@ jobs:
       tag: ${{ steps.check.outputs.tag }}
 
     steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure Git for GitHub App
+        run: |
+          git config user.name "ultrasync-release[bot]"
+          git config user.email "ultrasync-release[bot]@users.noreply.github.com"
 
       - name: Check if release needed
         id: check
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
           verbosity: "1"
           no_operation_mode: true
           force: ${{ inputs.force }}
@@ -60,7 +73,7 @@ jobs:
         if: steps.check.outputs.released == 'true'
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
           verbosity: "2"
           force: ${{ inputs.force }}
           commit: "true"
@@ -72,6 +85,8 @@ jobs:
       - name: Create and push release branch
         if: steps.check.outputs.released == 'true'
         id: branch
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # Check if semantic-release created a commit
           if git diff --quiet HEAD~1 2>/dev/null; then
@@ -93,7 +108,7 @@ jobs:
       - name: Create Pull Request
         if: steps.check.outputs.released == 'true' && steps.branch.outputs.has_changes == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # check if PR already exists for release branch
           EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
