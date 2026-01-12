@@ -1,244 +1,195 @@
 name: Publish to PyPI
 
 on:
-    # NOTE: release trigger removed - we create the GitHub release AFTER
-    # publishing to PyPI, not before. Flow: PR merge → publish → create release
-    pull_request:
-        branches: [main]
-        types: [closed]
-    workflow_call:
-    workflow_dispatch:
-        inputs:
-            dry_run:
-                description: "Dry run (don't actually publish)"
-                required: false
-                default: "false"
-                type: boolean
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (don't actually publish)"
+        required: false
+        default: "false"
+        type: boolean
 
 env:
-    CARGO_TERM_COLOR: always
-    RELEASE_BRANCH: release/next
+  CARGO_TERM_COLOR: always
 
 jobs:
-    # gate: only run if this is a merged release PR or manual trigger
-    check:
-        name: Check if release PR
-        runs-on: ubuntu-latest
-        outputs:
-            should_publish: ${{ steps.check.outputs.should_publish }}
-            version: ${{ steps.version.outputs.version }}
-        steps:
-            - uses: actions/checkout@v4
+  check:
+    name: Extract version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
 
-            - name: Check trigger
-              id: check
-              run: |
-                  if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-                      echo "Manual trigger - proceeding"
-                      echo "should_publish=true" >> $GITHUB_OUTPUT
-                  elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
-                      echo "Workflow call - proceeding"
-                      echo "should_publish=true" >> $GITHUB_OUTPUT
-                  elif [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
-                      if [[ "${{ github.event.pull_request.head.ref }}" == "${{ env.RELEASE_BRANCH }}" ]]; then
-                          echo "Release PR merged - proceeding"
-                          echo "should_publish=true" >> $GITHUB_OUTPUT
-                      else
-                          echo "Not a release PR - skipping"
-                          echo "should_publish=false" >> $GITHUB_OUTPUT
-                      fi
-                  else
-                      echo "PR not merged - skipping"
-                      echo "should_publish=false" >> $GITHUB_OUTPUT
-                  fi
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              VERSION=$(grep -m1 'version = ' pyproject.toml | cut -d'"' -f2)
+          else
+              VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
 
-            - name: Extract version
-              id: version
-              run: |
-                  VERSION=$(grep -m1 'version = ' pyproject.toml | cut -d'"' -f2)
-                  echo "version=$VERSION" >> $GITHUB_OUTPUT
-                  echo "Detected version: $VERSION"
+  ci:
+    name: CI checks
+    needs: check
+    uses: ./.github/workflows/lint.yml
 
-    ci:
-        name: CI checks
-        needs: check
-        if: needs.check.outputs.should_publish == 'true'
-        uses: ./.github/workflows/lint.yml
+  test:
+    name: Tests
+    needs: check
+    uses: ./.github/workflows/test.yml
 
-    test:
-        name: Tests
-        needs: check
-        if: needs.check.outputs.should_publish == 'true'
-        uses: ./.github/workflows/test.yml
+  rust:
+    name: Rust build
+    needs: check
+    uses: ./.github/workflows/rust.yml
 
-    rust:
-        name: Rust build
-        needs: check
-        if: needs.check.outputs.should_publish == 'true'
-        uses: ./.github/workflows/rust.yml
+  build-rust-wheels:
+    needs: [check, ci, test, rust]
+    name: Build Rust wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
 
-    # NOTE: security scan skipped for publish - already verified when PR was open
-    # gitleaks fails on PR closed events due to branch deletion
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    build-rust-wheels:
-        needs: [check, ci, test, rust]
-        if: needs.check.outputs.should_publish == 'true'
-        name: Build Rust wheels (${{ matrix.os }})
-        runs-on: ${{ matrix.os }}
-        strategy:
-            matrix:
-                os: [ubuntu-latest, macos-latest, windows-latest]
-        steps:
-            - uses: actions/checkout@v4
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/ultrasync_index
+          args: --release --out dist
+          manylinux: auto
 
-            - name: Setup Rust
-              uses: dtolnay/rust-toolchain@stable
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-wheels-${{ matrix.os }}
+          path: crates/ultrasync_index/dist/
 
-            - name: Build wheels
-              uses: PyO3/maturin-action@v1
-              with:
-                  working-directory: crates/ultrasync_index
-                  args: --release --out dist
-                  manylinux: auto
+  build-rust-sdist:
+    needs: [ci, test, rust]
+    name: Build Rust sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            - name: Upload wheels
-              uses: actions/upload-artifact@v4
-              with:
-                  name: rust-wheels-${{ matrix.os }}
-                  path: crates/ultrasync_index/dist/
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/ultrasync_index
+          command: sdist
+          args: --out dist
 
-    build-rust-sdist:
-        needs: [ci, test, rust]
-        name: Build Rust sdist
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-sdist
+          path: crates/ultrasync_index/dist/
 
-            - name: Build sdist
-              uses: PyO3/maturin-action@v1
-              with:
-                  working-directory: crates/ultrasync_index
-                  command: sdist
-                  args: --out dist
+  build-python:
+    needs: [ci, test, rust]
+    name: Build Python package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-            - name: Upload sdist
-              uses: actions/upload-artifact@v4
-              with:
-                  name: rust-sdist
-                  path: crates/ultrasync_index/dist/
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
 
-    build-python:
-        needs: [ci, test, rust]
-        name: Build Python package
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
+      - name: Build package
+        run: uv build
 
-            - name: Install uv
-              uses: astral-sh/setup-uv@v4
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
 
-            - name: Build package
-              run: uv build
+  publish-rust:
+    name: Publish ultrasync-index to PyPI
+    needs: [build-rust-wheels, build-rust-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all rust artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rust-*
+          path: dist
+          merge-multiple: true
 
-            - name: Upload dist
-              uses: actions/upload-artifact@v4
-              with:
-                  name: python-dist
-                  path: dist/
+      - name: List artifacts
+        run: ls -la dist/
 
-    publish-rust:
-        name: Publish ultrasync-index to PyPI
-        needs: [build-rust-wheels, build-rust-sdist]
-        runs-on: ubuntu-latest
-        environment: pypi
-        permissions:
-            id-token: write
-        steps:
-            - name: Download all rust artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  pattern: rust-*
-                  path: dist
-                  merge-multiple: true
-
-            - name: List artifacts
-              run: ls -la dist/
-
-            - name: Publish to PyPI
-              if: ${{ !inputs.dry_run }}
-              uses: pypa/gh-action-pypi-publish@release/v1
-              with:
-                  packages-dir: dist/
-                  skip-existing: true
-
-    publish-python:
-        name: Publish ultrasync to PyPI
-        needs: [build-python, publish-rust]
-        runs-on: ubuntu-latest
-        environment: pypi
-        permissions:
-            id-token: write
-        steps:
-            - name: Download python artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  name: python-dist
-                  path: dist
-
-            - name: List artifacts
-              run: ls -la dist/
-
-            - name: Publish to PyPI
-              if: ${{ !inputs.dry_run }}
-              uses: pypa/gh-action-pypi-publish@release/v1
-              with:
-                  packages-dir: dist/
-                  skip-existing: true
-
-    github-release:
-        name: Create GitHub Release
-        needs: [check, publish-python]
+      - name: Publish to PyPI
         if: ${{ !inputs.dry_run }}
-        runs-on: ubuntu-latest
-        permissions:
-            contents: write
-        steps:
-            - uses: actions/checkout@v4
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
 
-            - name: Download all artifacts
-              uses: actions/download-artifact@v4
-              with:
-                  path: artifacts
+  publish-python:
+    name: Publish ultrasync to PyPI
+    needs: [build-python, publish-rust]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download python artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
 
-            - name: Create GitHub Release
-              env:
-                  GH_TOKEN: ${{ github.token }}
-              run: |
-                  VERSION="v${{ needs.check.outputs.version }}"
-                  echo "Creating release $VERSION"
+      - name: List artifacts
+        run: ls -la dist/
 
-                  # collect all wheel and sdist files
-                  mkdir -p release-assets
-                  find artifacts -name "*.whl" -exec cp {} release-assets/ \;
-                  find artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
+      - name: Publish to PyPI
+        if: ${{ !inputs.dry_run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
 
-                  # extract changelog for this version (between ## vX.X.X headers)
-                  # uses semantic-release generated CHANGELOG.md
-                  awk "/^## $VERSION/,/^## v[0-9]/" CHANGELOG.md | head -n -1 > release-notes.md
+  upload-release-assets:
+    name: Upload assets to GitHub Release
+    needs: [check, publish-python]
+    if: ${{ !inputs.dry_run && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
 
-                  # fallback if changelog section is empty
-                  if [ ! -s release-notes.md ]; then
-                      echo "## $VERSION" > release-notes.md
-                      echo "" >> release-notes.md
-                      echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release-notes.md
-                  fi
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
-                  # create tag if it doesn't exist
-                  git tag "$VERSION" || true
-                  git push origin "$VERSION" || true
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="v${{ needs.check.outputs.version }}"
+          echo "Uploading assets to release $VERSION"
 
-                  # create release with changelog notes and assets
-                  gh release create "$VERSION" \
-                      --title "$VERSION" \
-                      --notes-file release-notes.md \
-                      release-assets/*
+          # collect all wheel and sdist files
+          mkdir -p release-assets
+          find artifacts -name "*.whl" -exec cp {} release-assets/ \;
+          find artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
+
+          # upload to existing release (created by semantic-release)
+          gh release upload "$VERSION" release-assets/* --clobber

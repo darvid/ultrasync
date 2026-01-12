@@ -33,12 +33,9 @@ jobs:
       id-token: write
 
     outputs:
-      released: ${{ steps.check.outputs.released }}
-      version: ${{ steps.check.outputs.version }}
-      tag: ${{ steps.check.outputs.tag }}
-
-    env:
-      RELEASE_BRANCH: release/next
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
 
     steps:
       - name: Checkout
@@ -50,68 +47,13 @@ jobs:
       - name: Setup gitsign
         uses: chainguard-dev/actions/setup-gitsign@main
 
-      - name: Check if release needed
-        id: check
-        uses: python-semantic-release/python-semantic-release@v10.5.3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          root_options: "-v --noop"
-          force: ${{ inputs.force }}
-          push: "false"
-          vcs_release: "false"
-
-      - name: Create release branch
-        if: steps.check.outputs.released == 'true'
-        run: |
-          git checkout -b ${{ env.RELEASE_BRANCH }}
-
       - name: Semantic Release
-        if: steps.check.outputs.released == 'true'
+        id: release
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          root_options: "-v"
+          verbosity: info
           force: ${{ inputs.force }}
-          push: "false"
-          vcs_release: "false"
 
-      - name: Push release branch
-        if: steps.check.outputs.released == 'true'
-        run: |
-          git push -u origin ${{ env.RELEASE_BRANCH }} --force
-
-      - name: Create Pull Request
-        if: steps.check.outputs.released == 'true'
-        run: |
-          # check if PR already exists for release branch
-          EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
-          if [ -n "$EXISTING_PR" ]; then
-            echo "Release PR #$EXISTING_PR already exists, skipping creation"
-            exit 0
-          fi
-
-          # check if there are actual commits between main and release branch
-          COMMITS=$(git rev-list --count main..${{ env.RELEASE_BRANCH }} 2>/dev/null || echo "0")
-          if [ "$COMMITS" = "0" ]; then
-            echo "No commits between main and ${{ env.RELEASE_BRANCH }}, skipping PR creation"
-            exit 0
-          fi
-
-          gh pr create \
-            --base main \
-            --head ${{ env.RELEASE_BRANCH }} \
-            --title "chore(release): ${{ steps.check.outputs.version }}" \
-            --body "## Release ${{ steps.check.outputs.version }}
-
-          Automated release PR created by semantic-release.
-
-          This PR contains:
-          - Version bump to ${{ steps.check.outputs.version }}
-          - Updated CHANGELOG.md
-
-          Merge this PR to trigger the publish workflow."
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # publish is triggered separately when the release PR is merged
-  # see publish.yml which triggers on pull_request closed
+  # publish is triggered by the release/tag creation
+  # see publish.yml
