@@ -74,19 +74,33 @@ jobs:
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          verbosity: "1"
+          verbosity: "2"
           force: ${{ inputs.force }}
+          commit: "true"
+          changelog: "true"
           push: "false"
           tag: "false"
           vcs_release: "false"
 
-      - name: Push release branch
+      - name: Check for commits
         if: steps.check.outputs.released == 'true'
+        id: commits
+        run: |
+          COMMITS=$(git rev-list --count main..${{ env.RELEASE_BRANCH }} 2>/dev/null || echo "0")
+          echo "commit_count=$COMMITS" >> $GITHUB_OUTPUT
+          if [ "$COMMITS" = "0" ]; then
+            echo "::warning::No commits on release branch - semantic-release may have failed"
+          else
+            echo "Found $COMMITS commit(s) on release branch"
+          fi
+
+      - name: Push release branch
+        if: steps.check.outputs.released == 'true' && steps.commits.outputs.commit_count != '0'
         run: |
           git push -u origin ${{ env.RELEASE_BRANCH }} --force
 
       - name: Create Pull Request
-        if: steps.check.outputs.released == 'true'
+        if: steps.check.outputs.released == 'true' && steps.commits.outputs.commit_count != '0'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
