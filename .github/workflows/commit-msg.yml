@@ -1,0 +1,37 @@
+name: Commit Message Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+jobs:
+  commit-msg:
+    name: Commit Message Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate commit messages
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            range="${{ github.event.before }}..${{ github.sha }}"
+          fi
+
+          if [[ "$range" == "0000000000000000000000000000000000000000.."* ]]; then
+            range="${{ github.sha }}"
+          fi
+
+          for sha in $(git rev-list "$range"); do
+            msg_file="$(mktemp)"
+            git log -1 --format=%B "$sha" > "$msg_file"
+            .github/scripts/commit-msg-check.sh "$msg_file"
+            rm -f "$msg_file"
+          done
