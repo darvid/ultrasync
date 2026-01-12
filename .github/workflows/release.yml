@@ -55,6 +55,42 @@ jobs:
           no_operation_mode: true
           force: ${{ inputs.force }}
 
+      - name: Test SSH signing
+        if: steps.check.outputs.released == 'true'
+        run: |
+          # Setup SSH key for testing
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_SIGNING_PRIVATE_KEY }}" > ~/.ssh/signing_key
+          echo "${{ secrets.SSH_SIGNING_PUBLIC_KEY }}" > ~/.ssh/signing_key.pub
+          chmod 600 ~/.ssh/signing_key
+          chmod 644 ~/.ssh/signing_key.pub
+
+          # Verify key format
+          echo "=== Private key header ==="
+          head -1 ~/.ssh/signing_key
+
+          # Test ssh-keygen can read the key (required for git signing)
+          echo "=== Testing ssh-keygen can read key ==="
+          ssh-keygen -y -f ~/.ssh/signing_key || echo "ERROR: ssh-keygen cannot read private key"
+
+          # Configure git for SSH signing
+          git config --global gpg.format ssh
+          git config --global user.signingKey ~/.ssh/signing_key
+          git config --global user.name "ultrasync-release[bot]"
+          git config --global user.email "ultrasync-release[bot]@users.noreply.github.com"
+
+          # Test signing a dummy commit (in memory)
+          echo "=== Testing git commit signing ==="
+          echo "test" > /tmp/testfile
+          cd /tmp && git init testdir && cd testdir
+          git config user.name "test"
+          git config user.email "test@test.com"
+          git config gpg.format ssh
+          git config user.signingKey ~/.ssh/signing_key
+          echo "test" > testfile
+          git add testfile
+          GIT_TRACE=1 git commit -S -m "test" 2>&1 || echo "ERROR: Signing failed"
+
       - name: Semantic Release
         if: steps.check.outputs.released == 'true'
         id: release
