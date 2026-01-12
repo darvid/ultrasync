@@ -33,47 +33,36 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      id-token: write
 
     outputs:
-      released: ${{ steps.check.outputs.released }}
-      version: ${{ steps.check.outputs.version }}
-      tag: ${{ steps.check.outputs.tag }}
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
 
     steps:
-      - name: Generate GitHub App Token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Configure Git for GitHub App
-        run: |
-          git config user.name "ultrasync-release[bot]"
-          git config user.email "ultrasync-release[bot]@users.noreply.github.com"
 
       - name: Check if release needed
         id: check
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ steps.app-token.outputs.token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           verbosity: "1"
           no_operation_mode: true
           force: ${{ inputs.force }}
 
-      - name: Semantic Release (version bump on main)
+      - name: Semantic Release
         if: steps.check.outputs.released == 'true'
+        id: release
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
-          github_token: ${{ steps.app-token.outputs.token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          ssh_public_signing_key: ${{ secrets.SSH_SIGNING_PUBLIC_KEY }}
+          ssh_private_signing_key: ${{ secrets.SSH_SIGNING_PRIVATE_KEY }}
           verbosity: "2"
           force: ${{ inputs.force }}
           commit: "true"
@@ -85,30 +74,28 @@ jobs:
       - name: Create and push release branch
         if: steps.check.outputs.released == 'true'
         id: branch
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           # Check if semantic-release created a commit
-          if git diff --quiet HEAD~1 2>/dev/null; then
-            echo "No changes detected from semantic-release"
+          CURRENT_SHA=$(git rev-parse HEAD)
+          ORIGIN_SHA=$(git rev-parse origin/main)
+
+          if [ "$CURRENT_SHA" = "$ORIGIN_SHA" ]; then
+            echo "No new commit from semantic-release"
             echo "has_changes=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
           echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "New commit: $CURRENT_SHA"
 
           # Create release branch from current HEAD (which has the version bump)
           git checkout -b ${{ env.RELEASE_BRANCH }}
           git push -u origin ${{ env.RELEASE_BRANCH }} --force
 
-          # Reset main back to origin (remove the version bump from main)
-          git checkout main
-          git reset --hard origin/main
-
       - name: Create Pull Request
         if: steps.check.outputs.released == 'true' && steps.branch.outputs.has_changes == 'true'
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # check if PR already exists for release branch
           EXISTING_PR=$(gh pr list --head ${{ env.RELEASE_BRANCH }} --json number --jq '.[0].number')
