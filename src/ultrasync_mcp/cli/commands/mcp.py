@@ -43,8 +43,8 @@ class Mcp:
         """Execute the mcp command."""
         from ultrasync_mcp.mcp_server import run_server
 
-        root = Path(self.directory) if self.directory else None
-        if root and not root.is_dir():
+        root = Path(self.directory) if self.directory else Path.cwd()
+        if not root.is_dir():
             print(f"error: {root} is not a directory", file=sys.stderr)
             return 1
 

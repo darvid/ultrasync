@@ -1286,7 +1286,7 @@ def create_server(
     Args:
         model_name: Embedding model to use
             (default: sentence-transformers/paraphrase-MiniLM-L3-v2)
-        root: Repository root path for file registration
+        root: Repository root path for file registration (default: cwd)
         watch_transcripts: Enable automatic transcript watching
             (default: auto from ULTRASYNC_WATCH_TRANSCRIPTS env var)
         agent: Coding agent name for transcript parser
@@ -1297,6 +1297,9 @@ def create_server(
     Returns:
         Configured FastMCP server instance
     """
+    if root is None:
+        root = Path.cwd()
+
     # determine data directory early for logging
     data_dir = get_data_dir(root)
 
@@ -5182,7 +5185,7 @@ def run_server(
 
     Args:
         model_name: Embedding model to use
-        root: Repository root path
+        root: Repository root path (default: cwd)
         transport: Transport type ("stdio" or "streamable-http")
         watch_transcripts: Enable automatic transcript watching
         agent: Coding agent name for transcript parser
