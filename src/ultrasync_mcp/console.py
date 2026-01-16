@@ -22,12 +22,9 @@ def _check_rich() -> bool:
     """Check if rich is available."""
     global _has_rich
     if _has_rich is None:
-        try:
-            import rich  # noqa: F401
+        import importlib.util
 
-            _has_rich = True
-        except ImportError:
-            _has_rich = False
+        _has_rich = importlib.util.find_spec("rich") is not None
     return _has_rich
 
 

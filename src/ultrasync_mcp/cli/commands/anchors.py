@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import tyro
 
@@ -17,12 +17,16 @@ from ultrasync_mcp.paths import get_data_dir
 
 def _has_rich() -> bool:
     """Check if rich is available."""
-    try:
-        import rich  # noqa: F401
+    import importlib.util
 
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("rich") is not None
+
+
+AnchorMatches = list[Any]
+FileAnchorResults = list[tuple[str, AnchorMatches]]
+AnchorResult = tuple[str, int, AnchorMatches]
+AnchorResultList = list[AnchorResult]
+AnchorTypeResults = dict[str, AnchorResultList]
 
 
 @dataclass
@@ -226,12 +230,16 @@ class AnchorsScan:
         type_filter: list[str] | None,
     ) -> int:
         """Scan a single file."""
-        if not self.file.exists():
-            print(f"error: file not found: {self.file}", file=sys.stderr)
+        file_path = self.file
+        if file_path is None:
+            print("error: file not provided", file=sys.stderr)
+            return 1
+        if not file_path.exists():
+            print(f"error: file not found: {file_path}", file=sys.stderr)
             return 1
 
-        content = self.file.read_bytes()
-        anchors_found = manager.extract_anchors(content, str(self.file))
+        content = file_path.read_bytes()
+        anchors_found = manager.extract_anchors(content, str(file_path))
 
         if type_filter:
             anchors_found = [
@@ -239,20 +247,20 @@ class AnchorsScan:
             ]
 
         if not anchors_found:
-            display_path = compact_path(str(self.file), root)
+            display_path = compact_path(str(file_path), root)
             print(f"no anchors found in {display_path}")
             return 0
 
         if _has_rich():
-            self._print_file_rich(root, str(self.file), anchors_found)
+            self._print_file_rich(root, str(file_path), anchors_found)
         else:
-            self._print_file_plain(root, str(self.file), anchors_found)
+            self._print_file_plain(root, str(file_path), anchors_found)
 
         print(f"\n{len(anchors_found)} anchors found")
         return 0
 
     def _print_file_rich(
-        self, root: Path, file_path: str, anchors: list
+        self, root: Path, file_path: str, anchors: AnchorMatches
     ) -> None:
         """Print single file scan with rich."""
         from rich.console import Console
@@ -280,7 +288,7 @@ class AnchorsScan:
         console.print(table)
 
     def _print_file_plain(
-        self, root: Path, file_path: str, anchors: list
+        self, root: Path, file_path: str, anchors: AnchorMatches
     ) -> None:
         """Print single file scan with plain text."""
         display_path = compact_path(file_path, root)
@@ -315,7 +323,7 @@ class AnchorsScan:
         total_anchors = 0
         files_with_anchors = 0
         by_type: dict[str, int] = {}
-        file_results: list[tuple[str, list]] = []
+        file_results: FileAnchorResults = []
 
         for file_record in tracker.iter_files():
             content = blob.read(
@@ -350,7 +358,7 @@ class AnchorsScan:
     def _print_all_rich(
         self,
         root: Path,
-        file_results: list[tuple[str, list]],
+        file_results: FileAnchorResults,
         by_type: dict[str, int],
         total_anchors: int,
         files_with_anchors: int,
@@ -399,7 +407,7 @@ class AnchorsScan:
     def _print_all_plain(
         self,
         root: Path,
-        file_results: list[tuple[str, list]],
+        file_results: FileAnchorResults,
         by_type: dict[str, int],
         total_anchors: int,
         files_with_anchors: int,
@@ -473,7 +481,7 @@ class AnchorsFind:
         tracker = FileTracker(tracker_db)
         blob = BlobAppender(blob_file)
 
-        results: list[tuple[str, int, list]] = []
+        results: AnchorResultList = []
 
         for file_record in tracker.iter_files():
             ext = Path(file_record.path).suffix.lstrip(".").lower()
@@ -512,7 +520,7 @@ class AnchorsFind:
         self,
         root: Path,
         anchor_type: str,
-        results: list[tuple[str, int, list]],
+        results: AnchorResultList,
     ) -> None:
         """Print with rich formatting."""
         from rich.console import Console
@@ -557,7 +565,7 @@ class AnchorsFind:
         self,
         root: Path,
         anchor_type: str,
-        results: list[tuple[str, int, list]],
+        results: AnchorResultList,
     ) -> None:
         """Print with plain text formatting."""
         print(f"Files with {anchor_type}:\n")
@@ -612,7 +620,7 @@ class AnchorsFindAll:
         blob = BlobAppender(blob_file)
 
         # collect all anchors across all files
-        by_type: dict[str, list[tuple[str, int, list]]] = {}
+        by_type: AnchorTypeResults = {}
         total_files = 0
         total_anchors = 0
 
@@ -625,7 +633,7 @@ class AnchorsFindAll:
             if anchors_found:
                 total_files += 1
                 # group by anchor type
-                file_by_type: dict[str, list] = {}
+                file_by_type: dict[str, AnchorMatches] = {}
                 for a in anchors_found:
                     file_by_type.setdefault(a.anchor_type, []).append(a)
 
@@ -656,7 +664,7 @@ class AnchorsFindAll:
     def _print_rich(
         self,
         root: Path,
-        by_type: dict[str, list[tuple[str, int, list]]],
+        by_type: AnchorTypeResults,
         total_files: int,
         total_anchors: int,
     ) -> None:
@@ -713,7 +721,7 @@ class AnchorsFindAll:
     def _print_plain(
         self,
         root: Path,
-        by_type: dict[str, list[tuple[str, int, list]]],
+        by_type: AnchorTypeResults,
         total_files: int,
         total_anchors: int,
     ) -> None:

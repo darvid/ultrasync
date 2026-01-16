@@ -128,6 +128,41 @@ def _normalize_git_remote(url: str) -> str:
     return normalized
 
 
+def _normalize_broadcast_response(
+    data: Any,
+    client_id: str,
+) -> dict[str, Any]:
+    """Normalize broadcast API responses into a consistent structure."""
+    broadcasts: list[dict[str, Any]] = []
+    latest_broadcast: dict[str, Any] | None = None
+
+    if isinstance(data, dict):
+        latest_broadcast = data.get("latest_broadcast")
+        if isinstance(data.get("broadcasts"), list):
+            broadcasts = data.get("broadcasts", [])
+        elif isinstance(data.get("items"), list):
+            broadcasts = data.get("items", [])
+    elif isinstance(data, list):
+        broadcasts = data
+        data = {}
+
+    broadcasts = [b for b in broadcasts if isinstance(b, dict)]
+    broadcasts = sorted(
+        broadcasts,
+        key=lambda item: item.get("created_at", ""),
+        reverse=True,
+    )
+
+    if latest_broadcast is None and broadcasts:
+        latest_broadcast = broadcasts[0]
+
+    result = dict(data) if isinstance(data, dict) else {}
+    result["broadcasts"] = broadcasts
+    result["latest_broadcast"] = latest_broadcast
+    result["client_id"] = client_id
+    return result
+
+
 def _get_project_name(cwd: str | None = None) -> str:
     """Get project name from env or auto-detect from git.
 
@@ -595,6 +630,9 @@ class SyncClient:
 
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
 
                     # derive shared project_id from git_remote
                     project_id = derive_shared_project_id(
@@ -664,6 +702,9 @@ class SyncClient:
 
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
                     project_id = derive_shared_project_id(
                         self.config.git_remote, org_id
                     )
@@ -727,6 +768,9 @@ class SyncClient:
 
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
 
                     # derive shared project_id from git_remote
                     project_id = derive_shared_project_id(
@@ -781,6 +825,9 @@ class SyncClient:
 
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
 
                     # derive shared project_id from git_remote
                     project_id = derive_shared_project_id(
@@ -808,6 +855,125 @@ class SyncClient:
 
         except Exception as e:
             logger.exception("fetch_team_index error: %s", e)
+            return None
+
+    async def fetch_broadcasts(
+        self,
+        since: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch project broadcasts from the sync server.
+
+        Returns the raw API response augmented with a sorted broadcasts list
+        and a normalized latest_broadcast entry.
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot fetch broadcasts")
+            return None
+
+        try:
+            base_url = self.config.url.rstrip("/")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
+
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                params = {"client_id": self.config.client_id}
+                if since is not None:
+                    params["since"] = str(since)
+
+                async with session.get(
+                    f"{base_url}/api/broadcasts/{org_id}/{project_id}",
+                    params=params,
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error("fetch_broadcasts failed: %s", error[:100])
+                        return None
+
+                    data = await resp.json()
+
+            return _normalize_broadcast_response(data, self.config.client_id)
+
+        except Exception as e:
+            logger.exception("fetch_broadcasts error: %s", e)
+            return None
+
+    async def mark_broadcast_read(self, broadcast_id: str) -> dict | None:
+        """Mark a broadcast as read for this client.
+
+        Args:
+            broadcast_id: Broadcast identifier to mark as read
+        """
+        import aiohttp
+
+        if not self.config.is_configured:
+            logger.warning("sync not configured, cannot mark broadcast")
+            return None
+
+        try:
+            base_url = self.config.url.rstrip("/")
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{base_url}/api/tokens/verify",
+                    headers={"Authorization": f"Bearer {self.config.token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error("token verify failed: %s", resp.status)
+                        return None
+
+                    token_data = await resp.json()
+                    org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return None
+
+                    project_id = derive_shared_project_id(
+                        self.config.git_remote, org_id
+                    )
+
+                payload = {"client_id": self.config.client_id}
+                endpoint = (
+                    f"{base_url}/api/broadcasts/{org_id}/{project_id}/"
+                    f"{broadcast_id}/read"
+                )
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {self.config.token}",
+                        "Content-Type": "application/json",
+                    },
+                ) as resp:
+                    if resp.status != 200:
+                        error = await resp.text()
+                        logger.error(
+                            "mark_broadcast_read failed: %s", error[:100]
+                        )
+                        return None
+
+                    return await resp.json()
+
+        except Exception as e:
+            logger.exception("mark_broadcast_read error: %s", e)
             return None
 
     async def push_presence(
@@ -1074,6 +1240,12 @@ class SyncClient:
 
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        logger.error("token verify missing org_id")
+                        return {
+                            "error": "token verify missing org_id",
+                            "total_count": 0,
+                        }
                     project_id = derive_shared_project_id(
                         self.config.git_remote, org_id
                     )
@@ -1311,6 +1483,17 @@ class SyncClient:
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
                     project_id = token_data.get("project_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        progress.state = "error"
+                        progress.errors.append(
+                            {
+                                "index": -1,
+                                "error": "token verify missing org_id",
+                            }
+                        )
+                        if on_progress:
+                            on_progress(progress)
+                        return progress
 
                     # Use shared project_id when git_remote is configured
                     # This ensures bulk sync goes to same project as WebSocket
@@ -1478,6 +1661,17 @@ class SyncClient:
                     token_data = await resp.json()
                     org_id = token_data.get("org_id")
                     project_id = token_data.get("project_id")
+                    if not isinstance(org_id, str) or not org_id:
+                        progress.state = "error"
+                        progress.errors.append(
+                            {
+                                "index": -1,
+                                "error": "token verify missing org_id",
+                            }
+                        )
+                        if on_progress:
+                            on_progress(progress)
+                        return progress
 
                     # Use shared project_id when git_remote is configured
                     # This ensures bulk sync goes to same project as WebSocket

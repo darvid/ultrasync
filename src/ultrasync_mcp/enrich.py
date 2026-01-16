@@ -232,6 +232,7 @@ class AgentSpawner:
             call_number=self.call_count,
         )
 
+        proc: asyncio.subprocess.Process | None = None
         try:
             # Run subprocess asynchronously
             proc = await asyncio.create_subprocess_exec(
@@ -257,7 +258,8 @@ class AgentSpawner:
 
         except asyncio.TimeoutError:
             logger.warning("agent timed out", timeout=self.config.timeout)
-            proc.kill()
+            if proc is not None:
+                proc.kill()
             return ""
         except FileNotFoundError:
             logger.error("agent command not found", command=self.config.command)

@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ultrasync_mcp import console
 from ultrasync_mcp.cli._common import (
@@ -30,6 +30,10 @@ try:
 
     RICH_AVAILABLE = True
 except ImportError:
+    Console = None
+    Live = None
+    Spinner = None
+    Text = None
     RICH_AVAILABLE = False
 
 
@@ -38,14 +42,18 @@ class EnrichmentProgress:
 
     def __init__(self):
         self._message = "Starting enrichment..."
-        self._live: Live | None = None
-        self._console: Console | None = None
+        self._live: Any | None = None
+        self._console: Any | None = None
         self._use_rich = RICH_AVAILABLE and sys.stderr.isatty()
 
-    def _make_display(self) -> Text:
-        spinner = Spinner("dots", style="cyan")
-        spinner_text = spinner.render(0)
-        return Text.assemble(spinner_text, " ", self._message)
+    def _make_display(self) -> Any:
+        spinner_cls = Spinner
+        text_cls = Text
+        if spinner_cls is None or text_cls is None:
+            raise RuntimeError("rich not available")
+        spinner = spinner_cls("dots", style="cyan")
+        spinner_text = cast(Any, spinner.render(0))
+        return text_cls.assemble(spinner_text, " ", self._message)
 
     def update(self, progress: EnrichProgress) -> None:
         """Update progress from callback."""
@@ -62,14 +70,19 @@ class EnrichmentProgress:
 
     def __enter__(self) -> EnrichmentProgress:
         if self._use_rich:
-            self._console = Console(stderr=True)
-            self._live = Live(
+            console_cls = Console
+            live_cls = Live
+            if console_cls is None or live_cls is None:
+                raise RuntimeError("rich not available")
+            self._console = console_cls(stderr=True)
+            self._live = live_cls(
                 self._make_display(),
                 console=self._console,
                 refresh_per_second=10,
                 transient=True,
             )
-            self._live.__enter__()
+            if self._live is not None:
+                self._live.__enter__()
         return self
 
     def __exit__(self, *args) -> None:

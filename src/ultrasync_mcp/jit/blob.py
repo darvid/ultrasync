@@ -47,7 +47,7 @@ class BlobAppender:
                 if len(header) < BLOB_HEADER_SIZE:
                     raise ValueError(f"Corrupt blob header: {self.path}")
 
-                magic, version, flags, entry_count, _ = struct.unpack(
+                magic, version, _flags, entry_count, _ = struct.unpack(
                     BLOB_HEADER_FORMAT, header
                 )
 

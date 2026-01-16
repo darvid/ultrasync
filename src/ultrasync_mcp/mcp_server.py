@@ -58,6 +58,8 @@ def _format_search_results_tsv(
     elapsed_ms: float,
     source: str,
     hint: str | None = None,
+    latest_broadcast: dict | None = None,
+    broadcast_error: str | None = None,
     prior_context: list[dict] | None = None,
     related_memories: list[dict] | None = None,
     team_updates: list[dict] | None = None,
@@ -83,7 +85,30 @@ def _format_search_results_tsv(
     """
     lines = []
 
-    # TEAM UPDATES shown FIRST - memories shared by teammates
+    if broadcast_error:
+        lines.append("# BROADCAST CHECK FAILED - proceed with caution")
+        lines.append(f"# error\t{broadcast_error}")
+        lines.append("")
+
+    if latest_broadcast:
+        lines.append("# LATEST BROADCAST - review before action:")
+        lines.append("# id\tcreated_at\tread\tauthor\tcontent")
+        content = latest_broadcast.get("content", "")[:200].replace("\n", " ")
+        created_at = latest_broadcast.get("created_at", "-")
+        broadcast_id = latest_broadcast.get("id", "-")
+        author = (
+            latest_broadcast.get("author")
+            or latest_broadcast.get("user")
+            or latest_broadcast.get("user_id")
+            or "-"
+        )
+        read_flag = str(latest_broadcast.get("read", False)).lower()
+        lines.append(
+            f"B\t{broadcast_id}\t{created_at}\t{read_flag}\t{author}\t{content}"
+        )
+        lines.append("")
+
+    # TEAM UPDATES - context shared by teammates
     if team_updates:
         lines.append("# TEAM UPDATES - context shared by teammates:")
         lines.append(
@@ -225,6 +250,8 @@ TOOL_CATEGORIES: dict[str, set[str]] = {
         "sync_full",
         "sync_fetch_team_memories",
         "sync_fetch_team_index",
+        "sync_fetch_broadcasts",
+        "sync_mark_broadcast_read",
     },
     # Session thread management
     "session": {
@@ -1059,8 +1086,11 @@ class ServerState:
         def on_team_memory(payload: dict) -> None:
             if self._jit_manager is None:
                 return
+            memory_manager = self._jit_manager.memory
+            if memory_manager is None:
+                return
             try:
-                self._jit_manager.memory.import_memory(
+                memory_manager.import_memory(
                     memory_id=payload.get("id", ""),
                     text=payload.get("text", ""),
                     task=payload.get("task"),
@@ -1404,6 +1434,19 @@ def create_server(
         instructions="""\
 Ultrasync provides semantic indexing and search for codebases.
 
+<broadcasts>
+Before acting on user requests, check project broadcasts.
+- Call sync_fetch_broadcasts() or use latest_broadcast in search()
+  results
+- If latest_broadcast exists and read is false, summarize it first,
+  apply its instructions, acknowledge it, then call
+  sync_mark_broadcast_read()
+- If multiple unread broadcasts exist, handle newest first and optionally
+  summarize older ones
+- If broadcast fetching fails, notify the user and proceed cautiously
+- Re-check on new sessions or after reconnects
+</broadcasts>
+
 <tool_selection>
 Use search() for code discovery - it understands natural language and
 returns ranked results with source code included.
@@ -1571,11 +1614,16 @@ After writing code, validate against conventions:
 
         try:
             # list_roots is on session, not Context directly
-            roots = await ctx.session.list_roots()
+            roots_result = await ctx.session.list_roots()
+            roots = (
+                roots_result.roots
+                if hasattr(roots_result, "roots")
+                else roots_result
+            )
             logger.info("list_roots returned: %s", roots)
-            if roots:
+            if isinstance(roots, list) and roots:
                 # use first root (typically the project root)
-                root_uri = roots[0].uri
+                root_uri = str(roots[0].uri)
                 logger.info("using root_uri: %s", root_uri)
                 # convert file:// URI to path
                 if root_uri.startswith("file://"):
@@ -2514,7 +2562,11 @@ After writing code, validate against conventions:
         team_updates: list[dict[str, Any]] = []
         if include_memories:
             try:
-                mem_results = state.jit_manager.memory.search(
+                memory_manager = state.jit_manager.memory
+                if memory_manager is None:
+                    raise RuntimeError("memory manager not initialized")
+
+                mem_results = memory_manager.search(
                     query=query,
                     top_k=10,  # get more to allow for tiering + team
                 )
@@ -2561,6 +2613,8 @@ After writing code, validate against conventions:
 
             if contexts:
                 conv_manager = jit_manager.conventions
+                if conv_manager is None:
+                    raise RuntimeError("conventions manager not initialized")
                 conventions = conv_manager.get_for_contexts(
                     list(contexts), include_global=True
                 )
@@ -2580,6 +2634,18 @@ After writing code, validate against conventions:
         except Exception:
             pass  # gracefully ignore convention lookup errors
 
+        latest_broadcast: dict[str, Any] | None = None
+        broadcast_error: str | None = None
+        broadcast_client_id: str | None = None
+        client = state.sync_client
+        if client:
+            data = await client.fetch_broadcasts()
+            if data is None:
+                broadcast_error = "broadcast fetch failed"
+            else:
+                latest_broadcast = data.get("latest_broadcast")
+                broadcast_client_id = data.get("client_id")
+
         # return compact TSV format (3-4x fewer tokens)
         if format == "tsv":
             return _format_search_results_tsv(
@@ -2587,6 +2653,8 @@ After writing code, validate against conventions:
                 elapsed_ms,
                 primary_source,
                 hint,
+                latest_broadcast,
+                broadcast_error,
                 prior_context,
                 related_memories,
                 team_updates,
@@ -2598,7 +2666,21 @@ After writing code, validate against conventions:
             "source": primary_source,
         }
 
-        # team updates shown FIRST - memories shared by teammates
+        if latest_broadcast is not None:
+            response["latest_broadcast"] = latest_broadcast
+            if not latest_broadcast.get("read", False):
+                response["_broadcasts_hint"] = (
+                    "Unread broadcast available. Review and apply before "
+                    "continuing."
+                )
+
+        if broadcast_client_id:
+            response["broadcast_client_id"] = broadcast_client_id
+
+        if broadcast_error:
+            response["broadcast_error"] = broadcast_error
+
+        # team updates - memories shared by teammates
         # IMPORTANT: Agent should notify user about relevant team context
         if team_updates:
             response["team_updates"] = team_updates
@@ -2735,7 +2817,11 @@ After writing code, validate against conventions:
         Returns:
             Memory entry with id, key_hash, and metadata
         """
-        entry = state.jit_manager.memory.write(
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            raise ValueError("memory manager not initialized")
+
+        entry = memory_manager.write(
             text=text,
             task=task,
             insights=insights,
@@ -2813,7 +2899,11 @@ After writing code, validate against conventions:
         Returns:
             List of matching memories with scores
         """
-        results = state.jit_manager.memory.search(
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            raise ValueError("memory manager not initialized")
+
+        results = memory_manager.search(
             query=query,
             task=task,
             context_filter=context,
@@ -2847,7 +2937,11 @@ After writing code, validate against conventions:
         Returns:
             Memory entry or None if not found
         """
-        entry = state.jit_manager.memory.get(memory_id)
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return None
+
+        entry = memory_manager.get(memory_id)
         if not entry:
             return None
 
@@ -2882,7 +2976,11 @@ After writing code, validate against conventions:
         Returns:
             List of memory entries
         """
-        entries = state.jit_manager.memory.list(
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return []
+
+        entries = memory_manager.list(
             task=task,
             context_filter=context,
             limit=limit,
@@ -2941,7 +3039,14 @@ After writing code, validate against conventions:
             }
 
         # verify memory exists
-        entry = state.jit_manager.memory.get(memory_id)
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return {
+                "shared": False,
+                "error": "memory manager not initialized",
+            }
+
+        entry = memory_manager.get(memory_id)
         if not entry:
             return {
                 "shared": False,
@@ -3006,11 +3111,18 @@ After writing code, validate against conventions:
             return {"success": False, "error": "sync client not initialized"}
 
         # build memory payloads, verifying each exists
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return {
+                "success": False,
+                "error": "memory manager not initialized",
+            }
+
         memories: list[dict[str, Any]] = []
         not_found: list[str] = []
 
         for mem_id in memory_ids:
-            entry = state.jit_manager.memory.get(mem_id)
+            entry = memory_manager.get(mem_id)
             if not entry:
                 not_found.append(mem_id)
                 continue
@@ -3337,7 +3449,11 @@ After writing code, validate against conventions:
         Returns:
             Memories with their pattern matches
         """
-        memories = state.jit_manager.memory.list(
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return []
+
+        memories = memory_manager.list(
             task=task,
             context_filter=context,
             limit=100,
@@ -3632,6 +3748,8 @@ After writing code, validate against conventions:
             Created convention entry
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            raise ValueError("conventions manager not initialized")
         entry = manager.add(
             name=name,
             description=description,
@@ -3665,6 +3783,8 @@ After writing code, validate against conventions:
             List of matching conventions
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return []
         entries = manager.list(
             category=category,
             scope=scope,
@@ -3690,6 +3810,8 @@ After writing code, validate against conventions:
             Ranked list of matching conventions
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return []
         results = manager.search(
             query=query,
             scope=scope,
@@ -3714,6 +3836,8 @@ After writing code, validate against conventions:
             Convention entry or None if not found
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return None
         entry = manager.get(conv_id)
         if entry is None:
             return None
@@ -3730,6 +3854,8 @@ After writing code, validate against conventions:
             Status indicating success or failure
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return {"deleted": False, "conv_id": conv_id}
         deleted = manager.delete(conv_id)
         return {"deleted": deleted, "conv_id": conv_id}
 
@@ -3750,6 +3876,8 @@ After writing code, validate against conventions:
             List of applicable conventions sorted by priority
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return []
         entries = manager.get_for_context(
             context, include_global=include_global
         )
@@ -3789,6 +3917,8 @@ After writing code, validate against conventions:
             code = content.decode("utf-8", errors="replace")
 
         manager = state.jit_manager.conventions
+        if manager is None:
+            return []
         violations = manager.check_code(code, context=context)
 
         return [
@@ -3809,6 +3939,8 @@ After writing code, validate against conventions:
             Dict with total count and counts by category
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return {"total": 0, "by_category": {}, "by_priority": {}}
         return manager.get_stats()
 
     @tool_if_enabled
@@ -3826,6 +3958,8 @@ After writing code, validate against conventions:
             Serialized conventions
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return ""
         if format == "yaml":
             return manager.export_yaml(org_id=org_id)
         return manager.export_json(org_id=org_id)
@@ -3847,6 +3981,8 @@ After writing code, validate against conventions:
             Import stats (added, updated, skipped)
         """
         manager = state.jit_manager.conventions
+        if manager is None:
+            return {"added": 0, "updated": 0, "skipped": 0}
         return manager.import_conventions(source, org_id=org_id, merge=merge)
 
     @tool_if_enabled
@@ -3868,6 +4004,8 @@ After writing code, validate against conventions:
 
         root = state.root or Path(os.getcwd())
         manager = state.jit_manager.conventions
+        if manager is None:
+            return {"discovered": {}, "total": 0, "linters_found": []}
 
         stats = discover_and_import(root, manager, org_id=org_id)
 
@@ -4745,7 +4883,10 @@ After writing code, validate against conventions:
             if state._jit_manager is None:
                 return
             try:
-                state._jit_manager.memory.import_memory(
+                memory_manager = state._jit_manager.memory
+                if memory_manager is None:
+                    return
+                memory_manager.import_memory(
                     memory_id=payload.get("id", ""),
                     text=payload.get("text", ""),
                     task=payload.get("task"),
@@ -4959,7 +5100,11 @@ After writing code, validate against conventions:
             return {"synced": False, "error": "not connected"}
 
         # get memory from index
-        entry = state.jit_manager.memory.get(memory_id)
+        memory_manager = state.jit_manager.memory
+        if memory_manager is None:
+            return {"synced": False, "error": "memory manager not initialized"}
+
+        entry = memory_manager.get(memory_id)
         if entry is None:
             return {"synced": False, "error": "memory not found"}
 
@@ -5091,7 +5236,13 @@ After writing code, validate against conventions:
                 continue
 
             try:
-                state.jit_manager.memory.import_memory(
+                memory_manager = state.jit_manager.memory
+                if memory_manager is None:
+                    errors.append(
+                        {"id": mem.get("id"), "error": "memory manager missing"}
+                    )
+                    continue
+                memory_manager.import_memory(
                     memory_id=mem.get("id", ""),
                     text=mem.get("text", ""),
                     task=mem.get("task"),
@@ -5168,6 +5319,80 @@ After writing code, validate against conventions:
             "imported": imported,
             "skipped": skipped,
             "errors": errors[:5] if errors else [],
+        }
+
+    @tool_if_enabled
+    async def sync_fetch_broadcasts(
+        since: str | None = None,
+        unread_only: bool = True,
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
+    ) -> dict[str, Any]:
+        """Fetch broadcasts for the current project.
+
+        Args:
+            since: Optional timestamp cursor for newer broadcasts
+            unread_only: If True, return only unread broadcasts
+
+        Returns:
+            Dict with latest_broadcast and broadcast list
+        """
+        if ctx:
+            await _detect_client_root(ctx)
+
+        client = state.sync_client
+        if client is None:
+            return {"success": False, "error": "sync not configured"}
+
+        data = await client.fetch_broadcasts(since=since)
+        if data is None:
+            return {"success": False, "error": "failed to fetch broadcasts"}
+
+        broadcasts = data.get("broadcasts") or []
+        latest_broadcast = data.get("latest_broadcast")
+
+        if unread_only:
+            broadcasts = [b for b in broadcasts if not b.get("read", False)]
+            latest_broadcast = broadcasts[0] if broadcasts else None
+
+        return {
+            "success": True,
+            "client_id": data.get("client_id") or client.config.client_id,
+            "latest_broadcast": latest_broadcast,
+            "broadcasts": broadcasts,
+        }
+
+    @tool_if_enabled
+    async def sync_mark_broadcast_read(
+        broadcast_id: str,
+        ctx: Context = None,  # type: ignore[assignment] - FastMCP injects
+    ) -> dict[str, Any]:
+        """Mark a broadcast as read for this client.
+
+        Args:
+            broadcast_id: Broadcast identifier to mark as read
+
+        Returns:
+            Status dict with server response
+        """
+        if ctx:
+            await _detect_client_root(ctx)
+
+        client = state.sync_client
+        if client is None:
+            return {"success": False, "error": "sync not configured"}
+
+        result = await client.mark_broadcast_read(broadcast_id)
+        if result is None:
+            return {
+                "success": False,
+                "error": "failed to mark broadcast as read",
+            }
+
+        return {
+            "success": True,
+            "broadcast_id": broadcast_id,
+            "client_id": client.config.client_id,
+            "result": result,
         }
 
     return mcp

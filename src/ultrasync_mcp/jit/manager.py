@@ -780,6 +780,11 @@ class JITIndexManager:
             logger.debug("ensure_embedded: 0x%016x already cached", key_hash)
             return True
 
+        provider = self.provider
+        if provider is None:
+            logger.warning("embedding provider not configured")
+            return False
+
         # 2. check persistent vector store
         file_record = self.tracker.get_file_by_key(key_hash)
         if file_record:
@@ -808,7 +813,7 @@ class JITIndexManager:
             metadata = self.scanner.scan(p)
             if metadata:
                 text = metadata.to_embedding_text()
-                embedding = self.provider.embed(text)
+                embedding = provider.embed(text)
                 # persist to vector store
                 entry = self.vector_store.append(embedding)
                 self.tracker.update_file_vector(
@@ -844,7 +849,7 @@ class JITIndexManager:
 
             # compute fresh embedding
             text = f"{sym_record.kind} {sym_record.name}"
-            embedding = self.provider.embed(text)
+            embedding = provider.embed(text)
             # persist to vector store
             entry = self.vector_store.append(embedding)
             self.tracker.update_symbol_vector(
@@ -910,12 +915,16 @@ class JITIndexManager:
                 (sym_text, {"type": "symbol", "name": sym.name})
             )
 
+        provider = self.provider
+        if provider is None:
+            raise ValueError("embedding provider not configured")
+
         if self._started:
+            if self.embed_queue is None:
+                raise ValueError("embedding provider not configured")
             embeddings = await self.embed_queue.embed_many(texts_to_embed)
         else:
-            embeddings = self.provider.embed_batch(
-                [t for t, _ in texts_to_embed]
-            )
+            embeddings = provider.embed_batch([t for t, _ in texts_to_embed])
 
         file_vec_entry = self.vector_store.append(embeddings[0])
         self.vector_cache.put(file_key, embeddings[0])
@@ -1046,11 +1055,16 @@ class JITIndexManager:
             embed_text = f"{symbol_type} {name}: {source_code[:500]}"
 
         if self._started:
+            if self.embed_queue is None:
+                raise ValueError("embedding provider not configured")
             embedding = await self.embed_queue.embed(
                 embed_text, {"type": "manual_symbol"}
             )
         else:
-            embedding = self.provider.embed(embed_text)
+            provider = self.provider
+            if provider is None:
+                raise ValueError("embedding provider not configured")
+            embedding = provider.embed(embed_text)
 
         self.vector_cache.put(key, embedding)
 
@@ -1368,7 +1382,11 @@ class JITIndexManager:
         2. Write phase: Batch blob/tracker/AOT writes (single fsync)
         3. Embed phase: Async embedding with pipelined vector writes
         """
-        embed_batch_size = 512 if self.provider.device != "cpu" else 512
+        provider = self.provider
+        if provider is None:
+            raise ValueError("embedding provider not configured")
+
+        embed_batch_size = 512 if provider.device != "cpu" else 512
 
         # ============================================================
         # Phase 1: Scan all files and collect data (no writes yet)
@@ -1633,7 +1651,7 @@ class JITIndexManager:
         if progress:
             progress.start_phase("embed", "Embedding texts", len(embed_texts))
             progress.set_stats(
-                device=self.provider.device,
+                device=provider.device,
                 texts=len(embed_texts),
             )
 
@@ -1645,7 +1663,7 @@ class JITIndexManager:
             batch_texts = embed_texts[batch_start:batch_end]
 
             # Run embedding (sync - CPU/GPU bound anyway)
-            batch_embeddings = self.provider.embed_batch(batch_texts)
+            batch_embeddings = provider.embed_batch(batch_texts)
             all_embeddings.extend(batch_embeddings)
 
             if progress:
@@ -2018,7 +2036,8 @@ class JITIndexManager:
 
         # Check and compact vectors
         try:
-            vec_stats = self.vector_store.stats()
+            live_bytes, live_count = self.tracker.live_vector_stats()
+            vec_stats = self.vector_store.compute_stats(live_bytes, live_count)
             waste_bytes = vec_stats.dead_bytes
             waste_pct = vec_stats.waste_ratio * 100
 
@@ -2413,11 +2432,16 @@ class JITIndexManager:
         files_preview = matched_files[:5]
         embed_text = f"{tool_type} pattern {pattern}: matches {files_preview}"
         if self._started:
+            if self.embed_queue is None:
+                raise ValueError("embedding provider not configured")
             embedding = await self.embed_queue.embed(
                 embed_text, {"type": "pattern_cache"}
             )
         else:
-            embedding = self.provider.embed(embed_text)
+            provider = self.provider
+            if provider is None:
+                raise ValueError("embedding provider not configured")
+            embedding = provider.embed(embed_text)
 
         self.vector_cache.put(key, embedding)
 
