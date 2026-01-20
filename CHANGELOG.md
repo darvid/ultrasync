@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-01-20)
+
+### Features
+
+- **mcp**: Add MCP resources for memories, stats, and contexts
+  ([`c45f39d`](https://github.com/darvid/ultrasync/commit/c45f39d8aecf47e5622b586c4ecb1c17bf332261))
+
+- **mcp**: Enforce broadcast awareness and unblock basedpyright
+  ([`90bea82`](https://github.com/darvid/ultrasync/commit/90bea8263d0899368df6cc8b0665505659cf1aa5))
+
+
 ## v1.1.0 (2026-01-12)
 
 ### Bug Fixes
