@@ -13,6 +13,7 @@ from ultrasync_mcp.jit.blob import BlobAppender
 from ultrasync_mcp.jit.cache import VectorCache
 from ultrasync_mcp.jit.lmdb_tracker import FileTracker, MemoryRecord
 from ultrasync_mcp.jit.secrets import ScanResult, SecretScanner
+from ultrasync_mcp.jit.vector_store import VectorStore
 from ultrasync_mcp.keys import hash64, mem_key
 
 if TYPE_CHECKING:
@@ -103,6 +104,7 @@ class MemoryManager:
         blob: BlobAppender,
         vector_cache: VectorCache,
         embedding_provider: EmbeddingProvider,
+        vector_store: VectorStore | None = None,
         max_memories: int | None = None,
         secret_policy: SecretPolicy | str | None = None,
         secret_scanner: SecretScanner | None = None,
@@ -110,6 +112,7 @@ class MemoryManager:
         self.tracker = tracker
         self.blob = blob
         self.vector_cache = vector_cache
+        self.vector_store = vector_store
         self.provider = embedding_provider
 
         # Load max from env, fallback to param, fallback to default
@@ -371,6 +374,13 @@ class MemoryManager:
         embedding = self.provider.embed(processed_text)
         self.vector_cache.put(key_hash, embedding)
 
+        # Persist embedding to vector store for cross-session retrieval
+        if self.vector_store is not None:
+            vec_entry = self.vector_store.append(embedding)
+            self.tracker.update_memory_vector(
+                key_hash, vec_entry.offset, vec_entry.length
+            )
+
         self.tracker.upsert_memory(
             id=mem_id,
             task=task,
@@ -472,6 +482,13 @@ class MemoryManager:
         embedding = self.provider.embed(processed_text)
         self.vector_cache.put(key_hash, embedding)
 
+        # Persist embedding to vector store for cross-session retrieval
+        if self.vector_store is not None:
+            vec_entry = self.vector_store.append(embedding)
+            self.tracker.update_memory_vector(
+                key_hash, vec_entry.offset, vec_entry.length
+            )
+
         self.tracker.upsert_memory(
             id=memory_id,
             task=task,
@@ -552,6 +569,16 @@ class MemoryManager:
 
             for mem in candidates:
                 vec = self.vector_cache.get(mem.key_hash)
+
+                # Try loading from persistent vector store on cache miss
+                if vec is None and self.vector_store is not None:
+                    if mem.vector_offset is not None:
+                        vec = self.vector_store.read(
+                            mem.vector_offset, mem.vector_length or 0
+                        )
+                        if vec is not None:
+                            self.vector_cache.put(mem.key_hash, vec)
+
                 if vec is not None:
                     score = float(
                         np.dot(q_vec, vec)
@@ -559,8 +586,14 @@ class MemoryManager:
                     )
                     scored.append((mem, score))
                 else:
+                    # Fallback: re-embed from text and persist
                     embedding = self.provider.embed(mem.text)
                     self.vector_cache.put(mem.key_hash, embedding)
+                    if self.vector_store is not None:
+                        vec_entry = self.vector_store.append(embedding)
+                        self.tracker.update_memory_vector(
+                            mem.key_hash, vec_entry.offset, vec_entry.length
+                        )
                     score = float(
                         np.dot(q_vec, embedding)
                         / (

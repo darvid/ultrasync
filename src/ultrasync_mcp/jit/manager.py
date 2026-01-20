@@ -131,6 +131,7 @@ class JITIndexManager:
                 blob=self.blob,
                 vector_cache=self.vector_cache,
                 embedding_provider=embedding_provider,
+                vector_store=self.vector_store,
             )
             self.conventions = ConventionManager(
                 tracker=self.tracker,

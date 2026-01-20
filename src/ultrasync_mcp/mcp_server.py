@@ -1435,14 +1435,12 @@ def create_server(
 Ultrasync provides semantic indexing and search for codebases.
 
 <broadcasts>
-Before acting on user requests, check project broadcasts.
-- Call sync_fetch_broadcasts() or use latest_broadcast in search()
-  results
-- If latest_broadcast exists and read is false, summarize it first,
-  apply its instructions, acknowledge it, then call
-  sync_mark_broadcast_read()
-- If multiple unread broadcasts exist, handle newest first and optionally
-  summarize older ones
+Before acting on user requests, and at the start of each session, check
+project broadcasts.
+- Read the ultrasync://broadcasts resource at session start
+- Or call sync_fetch_broadcasts() or use latest_broadcast in search()
+- If unread broadcasts exist, summarize them first, apply instructions,
+  then call sync_mark_broadcast_read()
 - If broadcast fetching fails, notify the user and proceed cautiously
 - Re-check on new sessions or after reconnects
 </broadcasts>
@@ -1566,6 +1564,270 @@ After writing code, validate against conventions:
 </conventions>
 """,
     )
+
+    # -----------------------------------------------------------------
+    # MCP Resource: broadcasts
+    # Exposes unread broadcasts so AI clients can read them at session
+    # start without needing to call a tool first.
+    # -----------------------------------------------------------------
+    @mcp.resource("ultrasync://broadcasts")
+    async def get_broadcasts() -> dict:
+        """Project broadcasts - check at session start.
+
+        Returns unread broadcasts from teammates. AI clients should read
+        this resource at the start of each session to stay informed about
+        team context, decisions, and instructions.
+
+        If there are unread broadcasts:
+        1. Summarize them for the user
+        2. Apply any instructions they contain
+        3. Call sync_mark_broadcast_read() to mark them as read
+        """
+        client = state.sync_client
+        if not client:
+            return {
+                "status": "disconnected",
+                "message": "Sync not connected. Broadcasts unavailable.",
+                "broadcasts": [],
+            }
+
+        try:
+            data = await client.fetch_broadcasts()
+            if data is None:
+                return {
+                    "status": "error",
+                    "message": "Broadcast fetch failed. Proceed cautiously.",
+                    "broadcasts": [],
+                }
+
+            broadcasts = data.get("broadcasts", [])
+            latest = data.get("latest_broadcast")
+            unread = [b for b in broadcasts if not b.get("read", False)]
+
+            return {
+                "status": "ok",
+                "total": len(broadcasts),
+                "unread_count": len(unread),
+                "latest_broadcast": latest,
+                "unread_broadcasts": unread,
+                "hint": (
+                    "Unread broadcasts found! Review and apply first."
+                    if unread
+                    else "No unread broadcasts."
+                ),
+            }
+        except Exception as e:
+            logger.warning("broadcasts resource error: %s", e)
+            return {
+                "status": "error",
+                "message": f"Error fetching broadcasts: {e}",
+                "broadcasts": [],
+            }
+
+    # -----------------------------------------------------------------
+    # MCP Resource: memories
+    # Exposes stored memories (decisions, constraints, findings) so AI
+    # clients can access prior context without tool calls.
+    # -----------------------------------------------------------------
+    @mcp.resource("ultrasync://memories")
+    async def get_memories_resource() -> dict:
+        """All stored memories - decisions, constraints, findings.
+
+        Returns a list of all memories with truncated text previews.
+        Use memory_get(id) tool for full text of a specific memory.
+        """
+        manager = await state.get_jit_manager_async()
+        if not manager.memory:
+            return {
+                "status": "error",
+                "message": "Memory system not configured.",
+                "memories": [],
+            }
+
+        try:
+            entries = manager.memory.list(limit=100)
+            total = manager.memory.count()
+
+            return {
+                "status": "ok",
+                "total": total,
+                "memories": [
+                    {
+                        "id": e.id,
+                        "task": e.task,
+                        "insights": e.insights,
+                        "context": e.context,
+                        "text": (
+                            e.text[:200] + "..."
+                            if len(e.text) > 200
+                            else e.text
+                        ),
+                        "tags": e.tags,
+                        "created_at": e.created_at,
+                        "is_team": e.is_team,
+                    }
+                    for e in entries
+                ],
+                "hint": (
+                    f"{total} memories stored. "
+                    "Use memory_get(id) for full content."
+                    if total > 0
+                    else "No memories stored yet."
+                ),
+            }
+        except Exception as e:
+            logger.warning("memories resource error: %s", e)
+            return {
+                "status": "error",
+                "message": f"Error fetching memories: {e}",
+                "memories": [],
+            }
+
+    @mcp.resource("ultrasync://memories/{memory_id}")
+    async def get_memory_resource(memory_id: str) -> dict:
+        """Read a specific memory by ID.
+
+        Returns the full memory content including all metadata.
+        """
+        manager = await state.get_jit_manager_async()
+        if not manager.memory:
+            return {
+                "status": "error",
+                "message": "Memory system not configured.",
+            }
+
+        try:
+            entry = manager.memory.get(memory_id)
+            if not entry:
+                return {
+                    "status": "not_found",
+                    "message": f"Memory '{memory_id}' not found.",
+                }
+
+            return {
+                "status": "ok",
+                "memory": {
+                    "id": entry.id,
+                    "key_hash": _key_to_hex(entry.key_hash),
+                    "task": entry.task,
+                    "insights": entry.insights,
+                    "context": entry.context,
+                    "text": entry.text,
+                    "tags": entry.tags,
+                    "created_at": entry.created_at,
+                    "updated_at": entry.updated_at,
+                    "access_count": entry.access_count,
+                    "last_accessed": entry.last_accessed,
+                    "is_team": entry.is_team,
+                    "owner_id": entry.owner_id,
+                },
+            }
+        except Exception as e:
+            logger.warning("memory resource error: %s", e)
+            return {
+                "status": "error",
+                "message": f"Error fetching memory: {e}",
+            }
+
+    # -----------------------------------------------------------------
+    # MCP Resource: stats
+    # Exposes index statistics for AI context awareness.
+    # -----------------------------------------------------------------
+    @mcp.resource("ultrasync://stats")
+    async def get_stats_resource() -> dict:
+        """Index statistics - files, symbols, memories, storage.
+
+        Returns current state of the semantic index including counts
+        and storage usage. Useful for understanding index health.
+        """
+        manager = await state.get_jit_manager_async()
+
+        try:
+            stats = manager.get_stats()
+            memory_count = manager.memory.count() if manager.memory else 0
+            memory_max = manager.memory.max_memories if manager.memory else 1000
+
+            return {
+                "status": "ok",
+                "files": {
+                    "indexed": stats.file_count,
+                    "embedded": stats.embedded_file_count,
+                },
+                "symbols": {
+                    "indexed": stats.symbol_count,
+                    "embedded": stats.embedded_symbol_count,
+                },
+                "memories": {
+                    "total": memory_count,
+                    "max": memory_max,
+                },
+                "conventions": {
+                    "total": stats.convention_count,
+                },
+                "storage": {
+                    "blob_bytes": stats.blob_size_bytes,
+                    "vector_bytes": stats.vector_store_bytes,
+                    "vector_cache_bytes": stats.vector_cache_bytes,
+                },
+                "aot_index": {
+                    "entries": stats.aot_index_count,
+                    "capacity": stats.aot_index_capacity,
+                    "complete": stats.aot_complete,
+                },
+                "lexical": {
+                    "enabled": stats.lexical_enabled,
+                    "docs": stats.lexical_doc_count,
+                },
+                "hint": (
+                    f"Index: {stats.file_count} files, "
+                    f"{stats.symbol_count} symbols, "
+                    f"{memory_count} memories."
+                ),
+            }
+        except Exception as e:
+            logger.warning("stats resource error: %s", e)
+            return {
+                "status": "error",
+                "message": f"Error fetching stats: {e}",
+            }
+
+    # -----------------------------------------------------------------
+    # MCP Resource: contexts
+    # Exposes detected context types for navigation and filtering.
+    # -----------------------------------------------------------------
+    @mcp.resource("ultrasync://contexts")
+    async def get_contexts_resource() -> dict:
+        """Detected context types with file counts.
+
+        Returns all context types (e.g., context:frontend, context:api)
+        that were auto-detected during indexing, with counts of files
+        in each context.
+        """
+        manager = await state.get_jit_manager_async()
+
+        try:
+            context_stats = manager.tracker.get_context_stats()
+            total_files = sum(context_stats.values())
+
+            return {
+                "status": "ok",
+                "contexts": context_stats,
+                "context_count": len(context_stats),
+                "total_files": total_files,
+                "hint": (
+                    f"{len(context_stats)} context types across "
+                    f"{total_files} files."
+                    if context_stats
+                    else "No contexts detected yet. Run full_index() first."
+                ),
+            }
+        except Exception as e:
+            logger.warning("contexts resource error: %s", e)
+            return {
+                "status": "error",
+                "message": f"Error fetching contexts: {e}",
+                "contexts": {},
+            }
 
     # -----------------------------------------------------------------
     # Conditional tool registration based on ULTRASYNC_TOOLS env var
