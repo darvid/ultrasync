@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ultrasync_mcp import console
 from ultrasync_mcp.cli._common import (
@@ -13,6 +14,10 @@ from ultrasync_mcp.cli._common import (
 )
 from ultrasync_mcp.paths import get_data_dir
 
+if TYPE_CHECKING:
+    from ultrasync_mcp.jit import JITIndexManager
+    from ultrasync_mcp.jit.conventions import ConventionManager
+
 # Try to import Rich for progress display
 try:
     from rich.console import Console
@@ -20,10 +25,14 @@ try:
 
     RICH_AVAILABLE = True
 except ImportError:
+    Console = None
+    Table = None
     RICH_AVAILABLE = False
 
 
-def _get_manager(directory: Path | None):
+def _get_manager(
+    directory: Path | None,
+) -> tuple[JITIndexManager | None, Path]:
     """Get JITIndexManager for the given directory."""
     from ultrasync_mcp.jit import JITIndexManager
 
@@ -39,6 +48,12 @@ def _get_manager(directory: Path | None):
         embedder_cls(DEFAULT_EMBEDDING_MODEL),
     )
     return manager, data_dir
+
+
+def _get_conventions(
+    manager: JITIndexManager,
+) -> ConventionManager | None:
+    return manager.conventions
 
 
 @dataclass
@@ -69,11 +84,16 @@ class ConventionsList:
     def run(self) -> int:
         """Execute the conventions list command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        conventions = manager.conventions.list(
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        conventions = conv_manager.list(
             category=self.category,
             priority=self.priority,
             limit=self.limit,
@@ -111,11 +131,16 @@ class ConventionsShow:
     def run(self) -> int:
         """Execute the conventions show command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        conv = manager.conventions.get(self.convention_id)
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        conv = conv_manager.get(self.convention_id)
         if not conv:
             console.error(f"convention {self.convention_id} not found")
             return 1
@@ -191,11 +216,16 @@ class ConventionsSearch:
     def run(self) -> int:
         """Execute the conventions search command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        results = manager.conventions.search(
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        results = conv_manager.search(
             query=self.query,
             category=self.category,
             top_k=self.top_k,
@@ -268,22 +298,24 @@ class ConventionsAdd:
     def run(self) -> int:
         """Execute the conventions add command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
         try:
-            entry = manager.conventions.add(
+            entry = conv_manager.add(
                 name=self.name,
                 description=self.description,
                 category=self.category,
-                priority=self.priority,
                 scope=self.scope,
+                priority=self.priority,
                 pattern=self.pattern,
-                good_examples=self.good_examples,
-                bad_examples=self.bad_examples,
                 tags=self.tags,
-                org_id=self.org_id,
             )
 
             print(f"created convention: {entry.id}")
@@ -314,11 +346,16 @@ class ConventionsDelete:
     def run(self) -> int:
         """Execute the conventions delete command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        deleted = manager.conventions.delete(self.convention_id)
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        deleted = conv_manager.delete(self.convention_id)
         if deleted:
             print(f"deleted convention: {self.convention_id}")
         else:
@@ -340,11 +377,16 @@ class ConventionsStats:
     def run(self) -> int:
         """Execute the conventions stats command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        stats = manager.conventions.get_stats()
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        stats = conv_manager.get_stats()
 
         console.header("Convention Stats")
 
@@ -406,7 +448,10 @@ class ConventionsDiscover:
         from ultrasync_mcp.jit import ConventionDiscovery
 
         if use_rich:
-            rich_console = Console(stderr=True)
+            console_cls = Console
+            if console_cls is None:
+                raise RuntimeError("rich not available")
+            rich_console = console_cls(stderr=True)
             with Status(
                 "Scanning for linter configs...",
                 console=rich_console,
@@ -443,12 +488,20 @@ class ConventionsDiscover:
         from ultrasync_mcp.jit import discover_and_import
 
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
         if use_rich:
-            rich_console = Console(stderr=True)
+            console_cls = Console
+            if console_cls is None:
+                raise RuntimeError("rich not available")
+            rich_console = console_cls(stderr=True)
             with Status(
                 "Discovering and importing conventions...",
                 console=rich_console,
@@ -456,14 +509,14 @@ class ConventionsDiscover:
             ):
                 stats = discover_and_import(
                     scan_path,
-                    manager.conventions,
+                    conv_manager,
                     org_id=self.org_id,
                 )
         else:
             print("Discovering and importing conventions...", file=sys.stderr)
             stats = discover_and_import(
                 scan_path,
-                manager.conventions,
+                conv_manager,
                 org_id=self.org_id,
             )
 
@@ -478,9 +531,17 @@ class ConventionsDiscover:
 
         return 0
 
-    def _print_results_rich(self, all_rules: list, sources: list) -> None:
+    def _print_results_rich(
+        self, all_rules: list[Any], sources: list[str]
+    ) -> None:
         """Print discovery results with rich formatting."""
-        rich_console = Console()
+        console_cls = Console
+        if console_cls is None:
+            raise RuntimeError("rich not available")
+        table_cls = Table
+        if table_cls is None:
+            raise RuntimeError("rich not available")
+        rich_console = console_cls()
         rich_console.print(
             f"[green]Found {len(all_rules)} rules[/] from "
             f"[cyan]{len(sources)} linters[/]:\n"
@@ -491,7 +552,7 @@ class ConventionsDiscover:
 
         rich_console.print()
 
-        table = Table(show_header=True, header_style="bold")
+        table = table_cls(show_header=True, header_style="bold")
         table.add_column("Source", style="cyan", width=15)
         table.add_column("Category", width=22)
         table.add_column("Rule")
@@ -508,7 +569,9 @@ class ConventionsDiscover:
         if len(all_rules) > 30:
             rich_console.print(f"[dim]... and {len(all_rules) - 30} more[/]")
 
-    def _print_results_plain(self, all_rules: list, sources: list) -> None:
+    def _print_results_plain(
+        self, all_rules: list[Any], sources: list[str]
+    ) -> None:
         """Print discovery results without rich formatting."""
         print(f"Found {len(all_rules)} rules from {len(sources)} linters:")
         print()
@@ -550,7 +613,7 @@ class ConventionsCheck:
     def run(self) -> int:
         """Execute the conventions check command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
@@ -561,7 +624,12 @@ class ConventionsCheck:
 
         code = file_path.read_text()
 
-        violations = manager.conventions.check_code(code, context=self.context)
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        violations = conv_manager.check_code(code, context=self.context)
 
         if not violations:
             print("✓ no convention violations found")
@@ -612,17 +680,22 @@ class ConventionsExport:
     def run(self) -> int:
         """Execute the conventions export command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
+            return 1
+
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
             return 1
 
         suffix = self.output.suffix.lower()
         if suffix in (".yaml", ".yml"):
-            content = manager.conventions.export_yaml(
+            content = conv_manager.export_yaml(
                 org_id=self.org_id,
             )
         elif suffix == ".json":
-            content = manager.conventions.export_json(
+            content = conv_manager.export_json(
                 org_id=self.org_id,
             )
         else:
@@ -630,7 +703,7 @@ class ConventionsExport:
             return 1
 
         self.output.write_text(content)
-        count = manager.conventions.count()
+        count = conv_manager.count()
         print(f"exported {count} conventions to {self.output}")
 
         return 0
@@ -655,7 +728,7 @@ class ConventionsImport:
     def run(self) -> int:
         """Execute the conventions import command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
@@ -663,10 +736,13 @@ class ConventionsImport:
             console.error(f"file not found: {self.input}")
             return 1
 
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
         content = self.input.read_text()
-        imported = manager.conventions.import_conventions(
-            content, merge=self.merge
-        )
+        imported = conv_manager.import_conventions(content, merge=self.merge)
 
         print(f"imported {imported} conventions from {self.input}")
 
@@ -693,11 +769,16 @@ class ConventionsGeneratePrompt:
     def run(self) -> int:
         """Execute the conventions generate-prompt command."""
         manager, data_dir = _get_manager(self.directory)
-        if not manager:
+        if manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        conventions = manager.conventions.list(limit=1000)
+        conv_manager = _get_conventions(manager)
+        if conv_manager is None:
+            console.error("conventions manager not initialized")
+            return 1
+
+        conventions = conv_manager.list(limit=1000)
         if not conventions:
             console.error("no conventions found - run conventions:discover")
             return 1

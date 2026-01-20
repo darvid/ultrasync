@@ -255,9 +255,9 @@ class Keys:
         contexts_list = grouped.get("context", [])
         grep_cache_list = grouped.get("grep-cache", [])
 
-        try:
-            import rich  # noqa: F401 - test availability
+        import importlib.util
 
+        if importlib.util.find_spec("rich") is not None:
             self._print_rich(
                 files,
                 symbols_list,
@@ -267,7 +267,7 @@ class Keys:
                 root,
                 len(results),
             )
-        except ImportError:
+        else:
             self._print_plain(
                 files,
                 symbols_list,

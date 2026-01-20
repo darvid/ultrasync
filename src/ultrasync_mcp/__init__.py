@@ -1,9 +1,13 @@
 import warnings
+from typing import TYPE_CHECKING
 
 # suppress GIL warning from tokenizers (used by sentence-transformers)
 warnings.filterwarnings("ignore", message=".*global interpreter lock.*")
 
 __version__ = "1.1.0"
+
+if TYPE_CHECKING:
+    from ultrasync_mcp.embeddings import EmbeddingProvider
 
 from ultrasync_mcp.events import EventType, SessionEvent
 from ultrasync_mcp.file_registry import FileEntry, FileRegistry

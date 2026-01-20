@@ -243,6 +243,7 @@ class VectorStore:
         live_list = list(live_vectors)
 
         # Hold exclusive lock for entire compaction to block appends
+        temp_path: str | None = None
         with open(self.path, "r+b") as lock_f:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
@@ -293,10 +294,11 @@ class VectorStore:
                 ), offset_map
 
             except Exception as e:
-                try:
-                    Path(temp_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                if temp_path:
+                    try:
+                        Path(temp_path).unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
                 return CompactionResult(
                     bytes_before=bytes_before,

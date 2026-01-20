@@ -39,6 +39,7 @@ try:
 
         HAS_DISCORD = True
     except ImportError:
+        DiscordBotTokenDetector = None
         HAS_DISCORD = False
 
     try:
@@ -46,6 +47,7 @@ try:
 
         HAS_GITHUB = True
     except ImportError:
+        GitHubTokenDetector = None
         HAS_GITHUB = False
 
     try:
@@ -53,6 +55,7 @@ try:
 
         HAS_GITLAB = True
     except ImportError:
+        GitLabTokenDetector = None
         HAS_GITLAB = False
 
     try:
@@ -60,6 +63,7 @@ try:
 
         HAS_OPENAI = True
     except ImportError:
+        OpenAIDetector = None
         HAS_OPENAI = False
 
     try:
@@ -67,6 +71,7 @@ try:
 
         HAS_SLACK = True
     except ImportError:
+        SlackDetector = None
         HAS_SLACK = False
 
     try:
@@ -74,6 +79,7 @@ try:
 
         HAS_STRIPE = True
     except ImportError:
+        StripeDetector = None
         HAS_STRIPE = False
 
     try:
@@ -81,10 +87,32 @@ try:
 
         HAS_TWILIO = True
     except ImportError:
+        TwilioKeyDetector = None
         HAS_TWILIO = False
 
     DETECT_SECRETS_AVAILABLE = True
 except ImportError:
+    AWSKeyDetector = None
+    BasicAuthDetector = None
+    Base64HighEntropyString = None
+    HexHighEntropyString = None
+    JwtTokenDetector = None
+    KeywordDetector = None
+    PrivateKeyDetector = None
+    DiscordBotTokenDetector = None
+    GitHubTokenDetector = None
+    GitLabTokenDetector = None
+    OpenAIDetector = None
+    SlackDetector = None
+    StripeDetector = None
+    TwilioKeyDetector = None
+    HAS_DISCORD = False
+    HAS_GITHUB = False
+    HAS_GITLAB = False
+    HAS_OPENAI = False
+    HAS_SLACK = False
+    HAS_STRIPE = False
+    HAS_TWILIO = False
     DETECT_SECRETS_AVAILABLE = False
     logger.warning(
         "detect-secrets not installed, using fallback regex patterns only"
@@ -235,35 +263,61 @@ class SecretScanner:
         # Initialize detect-secrets plugins if available
         self._plugins: list = []
         if DETECT_SECRETS_AVAILABLE:
-            self._plugins = [
-                AWSKeyDetector(),
-                BasicAuthDetector(),
-                Base64HighEntropyString(limit=entropy_limit_base64),
-                HexHighEntropyString(limit=entropy_limit_hex),
-                JwtTokenDetector(),
-                KeywordDetector(),
-                PrivateKeyDetector(),
-            ]
-            # Add optional plugins
-            if HAS_DISCORD:
-                self._plugins.append(DiscordBotTokenDetector())
-            if HAS_GITHUB:
-                self._plugins.append(GitHubTokenDetector())
-            if HAS_GITLAB:
-                self._plugins.append(GitLabTokenDetector())
-            if HAS_OPENAI:
-                self._plugins.append(OpenAIDetector())
-            if HAS_SLACK:
-                self._plugins.append(SlackDetector())
-            if HAS_STRIPE:
-                self._plugins.append(StripeDetector())
-            if HAS_TWILIO:
-                self._plugins.append(TwilioKeyDetector())
+            aws_detector = AWSKeyDetector
+            basic_detector = BasicAuthDetector
+            base64_detector = Base64HighEntropyString
+            hex_detector = HexHighEntropyString
+            jwt_detector = JwtTokenDetector
+            keyword_detector = KeywordDetector
+            private_detector = PrivateKeyDetector
 
-            logger.debug(
-                "initialized detect-secrets plugins",
-                count=len(self._plugins),
-            )
+            if (
+                aws_detector is None
+                or basic_detector is None
+                or base64_detector is None
+                or hex_detector is None
+                or jwt_detector is None
+                or keyword_detector is None
+                or private_detector is None
+            ):
+                logger.warning("detect-secrets plugins missing core detectors")
+            else:
+                self._plugins = [
+                    aws_detector(),
+                    basic_detector(),
+                    base64_detector(limit=entropy_limit_base64),
+                    hex_detector(limit=entropy_limit_hex),
+                    jwt_detector(),
+                    keyword_detector(),
+                    private_detector(),
+                ]
+                # Add optional plugins
+                discord_detector = DiscordBotTokenDetector
+                if HAS_DISCORD and discord_detector is not None:
+                    self._plugins.append(discord_detector())
+                github_detector = GitHubTokenDetector
+                if HAS_GITHUB and github_detector is not None:
+                    self._plugins.append(github_detector())
+                gitlab_detector = GitLabTokenDetector
+                if HAS_GITLAB and gitlab_detector is not None:
+                    self._plugins.append(gitlab_detector())
+                openai_detector = OpenAIDetector
+                if HAS_OPENAI and openai_detector is not None:
+                    self._plugins.append(openai_detector())
+                slack_detector = SlackDetector
+                if HAS_SLACK and slack_detector is not None:
+                    self._plugins.append(slack_detector())
+                stripe_detector = StripeDetector
+                if HAS_STRIPE and stripe_detector is not None:
+                    self._plugins.append(stripe_detector())
+                twilio_detector = TwilioKeyDetector
+                if HAS_TWILIO and twilio_detector is not None:
+                    self._plugins.append(twilio_detector())
+
+                logger.debug(
+                    "initialized detect-secrets plugins",
+                    count=len(self._plugins),
+                )
 
         # Compile custom patterns
         self._compiled_secrets: dict[str, tuple[re.Pattern, str]] = {}

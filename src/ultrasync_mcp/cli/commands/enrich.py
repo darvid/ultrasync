@@ -118,6 +118,11 @@ class Enrich:
 
             use_rich = True
         except ImportError:
+            RichConsole = None
+            Live = None
+            Panel = None
+            Table = None
+            Text = None
             use_rich = False
 
         # Progress state
@@ -125,7 +130,13 @@ class Enrich:
 
         def make_progress_display():
             """Build the progress display panel."""
-            table = Table.grid(padding=(0, 1))
+            table_cls = Table
+            text_cls = Text
+            panel_cls = Panel
+            if table_cls is None or text_cls is None or panel_cls is None:
+                raise RuntimeError("rich not available")
+
+            table = table_cls.grid(padding=(0, 1))
             table.add_column(style="cyan", justify="right")
             table.add_column()
 
@@ -135,7 +146,7 @@ class Enrich:
             tot = progress_state["total"]
 
             # Phase indicator
-            phase_text = Text()
+            phase_text = text_cls()
             phase_text.append("⚡ ", style="yellow")
             phase_name = phase.replace("_", " ").title()
             phase_text.append(phase_name, style="bold cyan")
@@ -150,7 +161,7 @@ class Enrich:
                 prog = f"[green]{bar}[/] {cur}/{tot} ({pct}%)"
                 table.add_row("progress", prog)
 
-            return Panel(
+            return panel_cls(
                 table,
                 title="[bold]Enrichment Progress[/]",
                 border_style="blue",
@@ -182,8 +193,12 @@ class Enrich:
         live = None
         try:
             if use_rich:
-                rich_console = RichConsole()
-                with Live(
+                console_cls = RichConsole
+                live_cls = Live
+                if console_cls is None or live_cls is None:
+                    raise RuntimeError("rich not available")
+                rich_console = console_cls()
+                with live_cls(
                     make_progress_display(),
                     console=rich_console,
                     refresh_per_second=4,

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__acp__Edit",
+      "mcp__acp__Bash",
+      "mcp__ultrasync__sync_status",
+      "mcp__ultrasync__search",
+      "mcp__ultrasync__sync_fetch_broadcasts"
+    ]
+  }
+}

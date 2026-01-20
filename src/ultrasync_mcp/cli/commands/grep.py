@@ -173,6 +173,9 @@ class Grep:
                 if line.strip() and not line.startswith("#")
             ]
         else:
+            if self.pattern is None:
+                print("error: no patterns provided", file=sys.stderr)
+                return None
             patterns_list = [self.pattern.encode()]
 
         if not patterns_list:
@@ -372,6 +375,9 @@ class Sgrep:
                 if line.strip() and not line.startswith("#")
             ]
         else:
+            if self.pattern is None:
+                print("error: no patterns provided", file=sys.stderr)
+                return None
             patterns_list = [self.pattern.encode()]
 
         if not patterns_list:

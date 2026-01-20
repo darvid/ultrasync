@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+from typing import Any, cast
 
 try:
     from rich.console import Console
@@ -22,6 +20,10 @@ try:
 
     RICH_AVAILABLE = True
 except ImportError:
+    Console = None
+    Live = None
+    Spinner = None
+    Text = None
     RICH_AVAILABLE = False
 
 
@@ -36,7 +38,7 @@ class IndexingProgress:
     def __init__(
         self,
         use_rich: bool | None = None,
-        console: Console | None = None,
+        console: Any | None = None,
     ):
         """Initialize progress display.
 
@@ -50,7 +52,7 @@ class IndexingProgress:
             self._use_rich = use_rich and RICH_AVAILABLE
 
         self._console = console
-        self._live: Live | None = None
+        self._live: Any | None = None
         self._current_text = ""
         self._phases: dict[str, dict] = {}
         self._stats: dict[str, int | str] = {}
@@ -60,8 +62,12 @@ class IndexingProgress:
     def live_context(self) -> Iterator[IndexingProgress]:
         """Context manager for live progress display."""
         if self._use_rich:
-            self._console = self._console or Console(stderr=True)
-            with Live(
+            console_cls = Console
+            live_cls = Live
+            if console_cls is None or live_cls is None:
+                raise RuntimeError("rich not available")
+            self._console = self._console or console_cls(stderr=True)
+            with live_cls(
                 self._make_display(),
                 console=self._console,
                 refresh_per_second=10,
@@ -75,12 +81,16 @@ class IndexingProgress:
         else:
             yield self
 
-    def _make_display(self) -> Text:
+    def _make_display(self) -> Any:
         """Create the display - just a spinner with status text."""
-        spinner = Spinner("dots", style="cyan")
+        spinner_cls = Spinner
+        text_cls = Text
+        if spinner_cls is None or text_cls is None:
+            raise RuntimeError("rich not available")
+        spinner = spinner_cls("dots", style="cyan")
         # Get the current frame of the spinner
-        spinner_text = spinner.render(0)
-        return Text.assemble(spinner_text, " ", self._current_text)
+        spinner_text = cast(Any, spinner.render(0))
+        return text_cls.assemble(spinner_text, " ", self._current_text)
 
     def _format_bytes(self, n: int) -> str:
         """Format bytes as human-readable string."""
@@ -313,7 +323,10 @@ class IndexingProgress:
         summary = ", ".join(parts) if parts else ""
 
         if self._use_rich:
-            console = self._console or Console(stderr=True)
+            console_cls = Console
+            if console_cls is None:
+                raise RuntimeError("rich not available")
+            console: Any = self._console or console_cls(stderr=True)
             if summary:
                 console.print(
                     f"[green]✓[/green] {title} [dim]({summary})[/dim]"

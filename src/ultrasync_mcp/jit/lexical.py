@@ -378,9 +378,9 @@ class LexicalIndex:
         if doc_type:
             full_query = f"({full_query}) AND doc_type:{doc_type}"
 
+        fields = ["combined", "content", "name"]
         try:
             # Parse and execute query
-            fields = ["combined", "content", "name"]
             parsed = self._index.parse_query(full_query, fields)
             results = searcher.search(parsed, top_k).hits
         except Exception as e:

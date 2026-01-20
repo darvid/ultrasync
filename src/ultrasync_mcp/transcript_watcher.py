@@ -1708,8 +1708,14 @@ class TranscriptWatcher:
             return
 
         # write memory via JIT manager
+        memory_manager = self.jit_manager.memory
+        if memory_manager is None:
+            logger.warning("memory manager not initialized")
+            self._clear_turn_buffers()
+            return
+
         try:
-            entry = self.jit_manager.memory.write(
+            entry = memory_manager.write(
                 text=result.text,
                 task=result.task,
                 insights=result.insights or None,

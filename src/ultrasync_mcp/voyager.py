@@ -945,7 +945,11 @@ class VoyagerApp(App[None]):
             insights_table.load_insights(self._insights)
 
             # memories
-            self._memories = self._manager.memory.list(limit=200)
+            memory_manager = self._manager.memory
+            if memory_manager is not None:
+                self._memories = memory_manager.list(limit=200)
+            else:
+                self._memories = []
             memories_table = self.query_one("#memories-table", MemoriesTable)
             memories_table.load_memories(self._memories)
 

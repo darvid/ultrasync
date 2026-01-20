@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ultrasync_mcp import console
 from ultrasync_mcp.cli._common import (
@@ -12,6 +13,28 @@ from ultrasync_mcp.cli._common import (
     get_embedder_class,
 )
 from ultrasync_mcp.paths import get_data_dir
+
+if TYPE_CHECKING:
+    from ultrasync_mcp.jit.memory import MemoryManager
+
+
+def _get_memory_manager(
+    directory: Path | None,
+) -> tuple[MemoryManager | None, Path]:
+    from ultrasync_mcp.jit import JITIndexManager
+
+    root = directory.resolve() if directory else Path.cwd()
+    data_dir = get_data_dir(root)
+
+    if not data_dir.exists():
+        return None, data_dir
+
+    embedder_cls = get_embedder_class()
+    manager = JITIndexManager(
+        data_dir,
+        embedder_cls(DEFAULT_EMBEDDING_MODEL),
+    )
+    return manager.memory, data_dir
 
 
 @dataclass
@@ -41,23 +64,13 @@ class MemoryList:
 
     def run(self) -> int:
         """Execute the memory list command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
         context_filter = [self.context] if self.context else None
-        memories = manager.memory.list(
+        memories = memory_manager.list(
             task=self.task,
             context_filter=context_filter,
             limit=self.limit,
@@ -98,22 +111,12 @@ class MemoryShow:
 
     def run(self) -> int:
         """Execute the memory show command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
-        mem = manager.memory.get(self.memory_id)
+        mem = memory_manager.get(self.memory_id)
         if not mem:
             console.error(f"memory {self.memory_id} not found")
             return 1
@@ -187,23 +190,13 @@ class MemorySearch:
 
     def run(self) -> int:
         """Execute the memory search command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
         context_filter = [self.context] if self.context else None
-        results = manager.memory.search(
+        results = memory_manager.search(
             query=self.query,
             task=self.task,
             context_filter=context_filter,
@@ -212,7 +205,6 @@ class MemorySearch:
 
         if not results:
             print(f"no memories matching '{self.query}'")
-            manager.close()
             return 0
 
         print(f"Memories matching '{self.query}':\n")
@@ -241,25 +233,15 @@ class MemoryStats:
 
     def run(self) -> int:
         """Execute the memory stats command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
-        count = manager.memory.count()
+        count = memory_manager.count()
 
         # Get task/context distribution
-        memories = manager.memory.list(limit=1000)
+        memories = memory_manager.list(limit=1000)
         tasks: dict[str, int] = {}
         contexts: dict[str, int] = {}
 
@@ -317,22 +299,12 @@ class MemoryWrite:
 
     def run(self) -> int:
         """Execute the memory write command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
-        entry = manager.memory.write(
+        entry = memory_manager.write(
             text=self.text,
             task=self.task,
             insights=self.insights,
@@ -366,22 +338,12 @@ class MemoryDelete:
 
     def run(self) -> int:
         """Execute the memory delete command."""
-        from ultrasync_mcp.jit import JITIndexManager
-
-        root = self.directory.resolve() if self.directory else Path.cwd()
-        data_dir = get_data_dir(root)
-
-        if not data_dir.exists():
+        memory_manager, data_dir = _get_memory_manager(self.directory)
+        if memory_manager is None:
             console.error(f"no index found at {data_dir}")
             return 1
 
-        embedder_cls = get_embedder_class()
-        manager = JITIndexManager(
-            data_dir,
-            embedder_cls(DEFAULT_EMBEDDING_MODEL),
-        )
-
-        deleted = manager.memory.delete(self.memory_id)
+        deleted = memory_manager.delete(self.memory_id)
         if deleted:
             print(f"deleted memory: {self.memory_id}")
         else:
