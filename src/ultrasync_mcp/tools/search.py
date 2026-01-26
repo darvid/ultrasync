@@ -30,6 +30,66 @@ from ultrasync_mcp.server import (
 )
 
 
+def _estimate_size(obj: Any) -> int:
+    """Estimate JSON serialization size without full serialization."""
+    import json
+
+    return len(json.dumps(obj, default=str))
+
+
+def _truncate_response(
+    response: dict[str, Any],
+    max_chars: int,
+) -> dict[str, Any]:
+    """Truncate response to fit within max_chars.
+
+    Strategy: progressively truncate source content from lowest-scored
+    results first, preserving metadata so get_source() can fetch full content.
+    """
+    current_size = _estimate_size(response)
+    if current_size <= max_chars:
+        return response
+
+    results = response.get("results", [])
+    if not results:
+        return response
+
+    # sort by score ascending (lowest first) to truncate worst matches first
+    # preserve original order after truncation
+    indexed_results = [(i, r) for i, r in enumerate(results)]
+    indexed_results.sort(key=lambda x: x[1].get("score", 0))
+
+    truncated_count = 0
+    truncated_keys: list[str] = []
+
+    for _orig_idx, result in indexed_results:
+        if current_size <= max_chars:
+            break
+
+        content = result.get("content")
+        if content and len(content) > 200:
+            # calculate savings from truncation
+            savings = len(content) - 50  # keep ~50 char preview
+            result["content"] = content[:50] + "... [truncated]"
+            result["_truncated"] = True
+            current_size -= savings
+            truncated_count += 1
+            if result.get("key_hash"):
+                truncated_keys.append(result["key_hash"])
+
+    if truncated_count > 0:
+        response["_truncation"] = {
+            "truncated_results": truncated_count,
+            "hint": (
+                f"{truncated_count} results had source content truncated. "
+                "Use get_source(key_hash) to fetch full content."
+            ),
+            "truncated_keys": truncated_keys[:5],  # first 5 for convenience
+        }
+
+    return response
+
+
 def register_search_tools(
     mcp: FastMCP,
     state: ServerState,
@@ -267,6 +327,7 @@ def register_search_tools(
         recency_bias: bool = False,
         recency_config: Literal["default", "aggressive", "mild"] | None = None,
         include_memories: bool = True,
+        max_output_chars: int = 80000,
         ctx: Context = None,  # type: ignore[assignment]
     ) -> dict[str, Any] | str:
         """REQUIRED: Call this BEFORE using Grep, Glob, or Read tools.
@@ -319,6 +380,10 @@ def register_search_tools(
                 - "mild": 1w=1.0, 4w=0.95, 90d=0.9, older=0.85
             include_memories: Include relevant memories (prior decisions,
                 constraints, debugging findings) in results. Default: True.
+            max_output_chars: Max output size in chars (default: 80000).
+                When exceeded, source content is progressively truncated from
+                lowest-ranked results. Use get_source(key_hash) to fetch full
+                content for truncated results.
 
         Returns:
             TSV: Compact tab-separated format with header comments
@@ -548,6 +613,10 @@ def register_search_tools(
 
         if hint:
             response["hint"] = hint
+
+        # smart truncation to avoid exceeding token limits
+        response = _truncate_response(response, max_output_chars)
+
         return response
 
     @tool_if_enabled

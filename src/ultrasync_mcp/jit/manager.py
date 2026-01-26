@@ -2156,12 +2156,19 @@ class JITIndexManager:
             for file_record in self.tracker.iter_files():
                 if file_record.key_hash in seen_keys:
                     continue
-                if file_record.vector_offset is None:
-                    continue
 
-                vec = self.vector_store.read(
-                    file_record.vector_offset, file_record.vector_length or 0
-                )
+                vec = None
+                if file_record.vector_offset is not None:
+                    vec = self.vector_store.read(
+                        file_record.vector_offset,
+                        file_record.vector_length or 0,
+                    )
+
+                # JIT embed if no vector found
+                if vec is None and self.provider is not None:
+                    if self.ensure_embedded(file_record.key_hash):
+                        vec = self.vector_cache.get(file_record.key_hash)
+
                 if vec is not None:
                     self.vector_cache.put(file_record.key_hash, vec)
                     score = compute_score(vec)
@@ -2172,12 +2179,18 @@ class JITIndexManager:
             for sym_record in self.tracker.iter_all_symbols():
                 if sym_record.key_hash in seen_keys:
                     continue
-                if sym_record.vector_offset is None:
-                    continue
 
-                vec = self.vector_store.read(
-                    sym_record.vector_offset, sym_record.vector_length or 0
-                )
+                vec = None
+                if sym_record.vector_offset is not None:
+                    vec = self.vector_store.read(
+                        sym_record.vector_offset, sym_record.vector_length or 0
+                    )
+
+                # JIT embed if no vector found
+                if vec is None and self.provider is not None:
+                    if self.ensure_embedded(sym_record.key_hash):
+                        vec = self.vector_cache.get(sym_record.key_hash)
+
                 if vec is not None:
                     self.vector_cache.put(sym_record.key_hash, vec)
                     score = compute_score(vec)
@@ -2188,13 +2201,16 @@ class JITIndexManager:
             for pattern_record in self.tracker.iter_patterns():
                 if pattern_record.key_hash in seen_keys:
                     continue
-                if pattern_record.vector_offset is None:
-                    continue
 
-                vec = self.vector_store.read(
-                    pattern_record.vector_offset,
-                    pattern_record.vector_length or 0,
-                )
+                vec = None
+                if pattern_record.vector_offset is not None:
+                    vec = self.vector_store.read(
+                        pattern_record.vector_offset,
+                        pattern_record.vector_length or 0,
+                    )
+
+                # Patterns don't support JIT embedding (no ensure_embedded path)
+                # so we skip if no vector
                 if vec is not None:
                     self.vector_cache.put(pattern_record.key_hash, vec)
                     score = compute_score(vec)
