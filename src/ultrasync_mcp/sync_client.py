@@ -950,14 +950,14 @@ class SyncClient:
                         self.config.git_remote, org_id
                     )
 
-                payload = {"client_id": self.config.client_id}
+                # No payload needed - server extracts user from auth token
                 endpoint = (
                     f"{base_url}/api/broadcasts/{org_id}/{project_id}/"
                     f"{broadcast_id}/read"
                 )
                 async with session.post(
                     endpoint,
-                    json=payload,
+                    # empty body
                     headers={
                         "Authorization": f"Bearer {self.config.token}",
                         "Content-Type": "application/json",
