@@ -63,7 +63,7 @@ secrets = [
 ]
 sync = [
   "python-socketio[asyncio_client]>=5.11.0",  # async socket.io for sync server
-  "aiohttp>=3.9.0",  # async HTTP for sync client
+  "aiohttp>=3.13.3",  # async HTTP for sync client (CVE-2025-27087 zip bomb + DoS fixes)
 ]
 
 [dependency-groups]
