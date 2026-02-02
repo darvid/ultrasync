@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-02-02)
+
+### Bug Fixes
+
+- **deps**: Patch aiohttp CVEs including zip bomb vulnerability
+  ([`8aa85a6`](https://github.com/darvid/ultrasync/commit/8aa85a68333aab0964a1e546eb49b623e075090f))
+
+- **deps**: Patch filelock and python-multipart CVEs
+  ([`101f543`](https://github.com/darvid/ultrasync/commit/101f5437185c97e56291ac15b31c8a02608533f4))
+
+- **sync**: Remove redundant client_id from broadcast read request
+  ([`b5cd25d`](https://github.com/darvid/ultrasync/commit/b5cd25d61e62509d6e7ff0b628535b140be139a4))
+
+### Features
+
+- **jit**: Add JIT embedding on search and smart output truncation
+  ([`ffb926a`](https://github.com/darvid/ultrasync/commit/ffb926ab9a3893ffa8b12162f809bfa7677cf214))
+
+- **mcp**: Add MCP resources for memories, stats, and contexts
+  ([`c45f39d`](https://github.com/darvid/ultrasync/commit/c45f39d8aecf47e5622b586c4ecb1c17bf332261))
+
+- **mcp**: Enforce broadcast awareness and unblock basedpyright
+  ([`90bea82`](https://github.com/darvid/ultrasync/commit/90bea8263d0899368df6cc8b0665505659cf1aa5))
+
+
 ## v1.1.0 (2026-01-12)
 
 ### Bug Fixes

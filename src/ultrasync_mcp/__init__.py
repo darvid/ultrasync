@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 # suppress GIL warning from tokenizers (used by sentence-transformers)
 warnings.filterwarnings("ignore", message=".*global interpreter lock.*")
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 if TYPE_CHECKING:
     from ultrasync_mcp.embeddings import EmbeddingProvider
